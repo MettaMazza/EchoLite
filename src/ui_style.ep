@@ -1,0 +1,166 @@
+# EchoLite pixel design system: integer geometry, shared palette and spacing.
+import "chat_editor"
+
+define ui_color with red and green and blue:
+    return red + green * 256 + blue * 65536 + 4278190080
+
+define ui_frame with x and y and width and height and fill and edge:
+    raylib_draw_rectangle(x and y and width and height and edge)
+    raylib_draw_rectangle(x + 1 and y + 1 and width - 2 and height - 2 and fill)
+    return 0
+
+define ui_bitmap with bitmap and columns and x and y and scale and tint:
+    set i to 0
+    repeat while i < string_length(bitmap):
+        if get_character(bitmap and i) == 49:
+            raylib_draw_rectangle(x + (i % columns) * scale and y + (i / columns) * scale and scale and scale and tint)
+        set i to i + 1
+    return 0
+
+define ui_letter with code returning Str:
+    if code == 69:
+        return "11111100001000011110100001000011111"
+    if code == 67:
+        return "01111100001000010000100001000001111"
+    if code == 72:
+        return "10001100011000111111100011000110001"
+    if code == 79:
+        return "01110100011000110001100011000101110"
+    if code == 76:
+        return "10000100001000010000100001000011111"
+    if code == 73:
+        return "11111001000010000100001000010011111"
+    if code == 84:
+        return "11111001000010000100001000010000100"
+    return "00000000000000000000000000000000000"
+
+define ui_wordmark with x and y and scale and tint:
+    set word to "ECHOLITE"
+    set i to 0
+    repeat while i < string_length(word):
+        ui_bitmap(ui_letter(get_character(word and i)) and 5 and x + i * scale * 6 and y and scale and tint)
+        set i to i + 1
+    return 0
+
+define ui_icon with name and x and y and scale and tint:
+    set bitmap to "01110100011011110100101111000001110"
+    if name == "plus":
+        set bitmap to "00000001000010011111001000010000000"
+    if name == "chat":
+        set bitmap to "11111100011000110001111110100010000"
+    if name == "tasks":
+        set bitmap to "11111100011010110001101011000111111"
+    if name == "memory":
+        set bitmap to "01110100011111110001111111000101110"
+    if name == "me":
+        set bitmap to "01110100010111000000011101000110001"
+    if name == "up":
+        set bitmap to "00100011101111100100001000010000100"
+    if name == "image":
+        set bitmap to "11111100011010110001101011101111111"
+    ui_bitmap(bitmap and 5 and x and y and scale and tint)
+    return 0
+
+define ui_text_fit with text and width and size returning Str:
+    if font_measure(text and size) <= width:
+        return text
+    set count to layout_prefix(text and width - font_measure("..." and size) and size)
+    return concat(substring(text and 0 and count) and "...")
+
+define ui_nav with text and icon and y and active:
+    set fill to ui_color(17 and 20 and 24)
+    set tint to ui_color(152 and 162 and 170)
+    set hovered to raylib_get_mouse_x() >= 16 && raylib_get_mouse_x() < 232 && raylib_get_mouse_y() >= y && raylib_get_mouse_y() < y + 38
+    if active || hovered:
+        set fill to ui_color(30 and 36 and 40)
+        set tint to ui_color(229 and 235 and 238)
+    raylib_draw_rectangle(16 and y and 216 and 38 and fill)
+    if active:
+        raylib_draw_rectangle(16 and y and 2 and 38 and ui_color(189 and 229 and 201))
+    ui_icon(icon and 30 and y + 11 and 2 and tint)
+    font_draw(text and 56 and y + 11 and 15 and tint)
+    return 0
+
+define ui_plain_inline with text returning Str:
+    set text to string_replace(text and "**" and "")
+    return string_replace(text and "`" and "")
+
+define ui_code_block with text and language and x and y and width:
+    set lines to layout_lines(text and width - 32 and 15)
+    set block_height to length_list(lines) * 24 + 56
+    ui_frame(x and y and width and block_height and ui_color(17 and 21 and 26) and ui_color(47 and 56 and 64))
+    raylib_draw_rectangle(x + 1 and y + 1 and width - 2 and 30 and ui_color(28 and 34 and 40))
+    set title to language
+    if title == "":
+        set title to "CODE"
+    font_draw(ui_text_fit(title and width - 110 and 12) and x + 16 and y + 9 and 12 and ui_color(155 and 174 and 165))
+    font_draw("Copy" and x + width - 52 and y + 9 and 12 and ui_color(189 and 229 and 201))
+    if raylib_is_mouse_button_pressed(0) && raylib_get_mouse_x() >= x + width - 64 && raylib_get_mouse_x() <= x + width && raylib_get_mouse_y() >= y && raylib_get_mouse_y() < y + 30 && raylib_get_mouse_y() >= SELECT_TOP && raylib_get_mouse_y() < SELECT_BOTTOM:
+        ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and text)
+    selectable_text(text and x + 16 and y + 42 and width - 32 and 15 and ui_color(216 and 229 and 220))
+    return y + block_height + 16
+
+define ui_response with text and x and y and width and tint:
+    if string_contains(text and "```") == 0 && string_contains(text and "**") == 0 && starts_with(text and "#") == 0 && string_contains(text and "\n#") == 0 && starts_with(text and "- ") == 0 && starts_with(text and "* ") == 0 && string_contains(text and "\n- ") == 0 && string_contains(text and "\n* ") == 0:
+        return selectable_text(text and x and y and width and 18 and tint)
+    set lines to string_split(text and "\n")
+    set i to 0
+    set code to ""
+    set language to ""
+    set in_code to 0
+    repeat while i < length_list(lines):
+        set line to get_list(lines and i)
+        if starts_with(string_trim(line) and "```"):
+            if in_code:
+                set y to ui_code_block(code and language and x and y and width)
+                set code to ""
+                set in_code to 0
+            else:
+                set language to string_trim(substring(string_trim(line) and 3 and string_length(string_trim(line)) - 3))
+                set in_code to 1
+        else if in_code:
+            if code != "":
+                set code to concat(code and "\n")
+            set code to concat(code and line)
+        else if string_trim(line) == "":
+            set y to y + 12
+        else if starts_with(line and "#"):
+            set offset to 0
+            repeat while offset < string_length(line) && get_character(line and offset) == 35:
+                set offset to offset + 1
+            set y to selectable_text(ui_plain_inline(string_trim(substring(line and offset and string_length(line) - offset))) and x and y + 4 and width and 22 and ui_color(218 and 237 and 225))
+            set y to y + 8
+        else if starts_with(line and "- ") || starts_with(line and "* "):
+            raylib_draw_rectangle(x + 2 and y + 8 and 4 and 4 and ui_color(189 and 229 and 201))
+            set y to selectable_text(ui_plain_inline(substring(line and 2 and string_length(line) - 2)) and x + 18 and y and width - 18 and 18 and tint)
+            set y to y + 4
+        else:
+            set y to selectable_text(ui_plain_inline(line) and x and y and width and 18 and tint)
+        set i to i + 1
+    if in_code:
+        set y to ui_code_block(code and language and x and y and width)
+    return y
+
+# Capture the actual framebuffer; raylib 6.2 TakeScreenshot applies Retina scale twice.
+define ui_capture with path:
+    set width to ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "rlGetFramebufferWidth"))
+    set height to ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "rlGetFramebufferHeight"))
+    set pixels to ep_dlcall2(ep_dlsym(RAYLIB_HANDLE and "rlReadScreenPixels") and width and height)
+    set picture to alloc_bytes(24)
+    native_write(picture and 0 and pixels and 8)
+    native_write(picture and 8 and width and 4)
+    native_write(picture and 12 and height and 4)
+    native_write(picture and 16 and 1 and 4)
+    native_write(picture and 20 and 7 and 4)
+    set int_type to ep_dlsym(FONT_FFI and "ffi_type_sint32")
+    set pointer_type to ep_dlsym(FONT_FFI and "ffi_type_pointer")
+    set image_type to native_struct([pointer_type,int_type,int_type,int_type,int_type])
+    set signature to native_cif(int_type and [image_type,pointer_type])
+    set filename to [str_to_ptr(path)]
+    set values to [picture,get_list_data_ptr(filename)]
+    set result to alloc_bytes(8)
+    ep_dlcall4(FONT_CALL and signature and ep_dlsym(RAYLIB_HANDLE and "ExportImage") and result and get_list_data_ptr(values))
+    ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "MemFree") and pixels)
+    free_bytes(picture)
+    free_bytes(result)
+    return 0

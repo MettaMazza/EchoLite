@@ -5,7 +5,7 @@ import "sql"
 import "../stdlib/bridge/raylib"
 import "text_layout"
 import "chat_view"
-import "chat_editor"
+import "ui_style"
 import "ui_attachment"
 import "ui_schedule"
 import "network_policy"
@@ -17,10 +17,7 @@ define color with red and green and blue:
     return red + green * 256 + blue * 65536 + 4278190080
 
 define panel with x and y and width and height and tint:
-    raylib_draw_rectangle(x + 8 and y and width - 16 and height and tint)
-    raylib_draw_rectangle(x and y + 8 and width and height - 16 and tint)
-    raylib_draw_rectangle(x + 3 and y + 3 and width - 6 and height - 6 and tint)
-    return 0
+    return ui_frame(x and y and width and height and tint and color(46 and 54 and 62))
 
 define label with text and x and y and size and tint:
     font_draw(text and x and y and size and tint)
@@ -70,21 +67,29 @@ define main:
         display "Unable to load native graphics library."
         return 1
     set flags to ep_dlsym(RAYLIB_HANDLE and "SetConfigFlags")
-    # FLAG_WINDOW_RESIZABLE (4); never set FLAG_WINDOW_HIDDEN (128) for desktop launch.
-    ep_dlcall1(flags and 4)
-    raylib_init_window(1180 and 800 and "EchoLite")
+    # Resizable + HighDPI: physical Retina pixels, logical coordinates.
+    set window_flags to 8196
+    ep_dlcall1(flags and window_flags)
+    set initial_width to 1180
+    set initial_height to 800
+    if length_list(args) > 1:
+        if get_env("ECHOLITE_PREVIEW_WIDTH") != "":
+            set initial_width to editor_max(900 and editor_min(1800 and string_to_int(get_env("ECHOLITE_PREVIEW_WIDTH"))))
+        if get_env("ECHOLITE_PREVIEW_HEIGHT") != "":
+            set initial_height to editor_max(600 and editor_min(1000 and string_to_int(get_env("ECHOLITE_PREVIEW_HEIGHT"))))
+    raylib_init_window(initial_width and initial_height and "EchoLite")
     ep_dlcall2(ep_dlsym(RAYLIB_HANDLE and "SetWindowMinSize") and 900 and 600)
     raylib_set_target_fps(30)
     font_init(RAYLIB_HANDLE)
     set escape to ep_dlsym(RAYLIB_HANDLE and "SetExitKey")
     ep_dlcall1(escape and 0)
-    set bg to color(18 and 22 and 21)
-    set sidebar to color(14 and 18 and 17)
-    set surface to color(27 and 33 and 30)
-    set border to color(42 and 51 and 46)
+    set bg to color(20 and 24 and 28)
+    set sidebar to color(17 and 20 and 24)
+    set surface to color(28 and 34 and 39)
+    set border to color(45 and 53 and 61)
     set mint to color(189 and 229 and 201)
     set white to color(232 and 238 and 234)
-    set muted to color(143 and 158 and 149)
+    set muted to color(148 and 159 and 169)
     set attachment to ""
     set attachment_path to ""
     set import_path to ""
@@ -121,6 +126,7 @@ define main:
     set scheduled_run to 0
     set last_activity to transport_now(native_system())
     set last_dispatch to last_activity - 60000
+    set pane_scroll to 0
     set task_scroll to 0
     set task_rows to create_list()
     set exercise_schedule to 0
@@ -162,6 +168,9 @@ define main:
     if length_list(args) == 3 && get_list(args and 1) == "--tasks":
         set section to "tasks"
         set capture to get_list(args and 2)
+    if length_list(args) == 3 && (get_list(args and 1) == "--memory" || get_list(args and 1) == "--identity"):
+        set section to substring(get_list(args and 1) and 2 and string_length(get_list(args and 1)) - 2)
+        set capture to get_list(args and 2)
     set runtime_ready to 0
     set runtime_child to 0
     set token_path to get_env("ECHOLITE_NATIVE_TOKEN_FILE")
@@ -179,8 +188,12 @@ define main:
         ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetMouseCursor") and 0)
         set width to raylib_get_screen_width()
         set height to raylib_get_screen_height()
-        set left to 286
-        set content_width to width - 342
+        set content_width to editor_min(864 and width - 312)
+        set left to 248 + (width - 248 - content_width) / 2
+        set SELECT_TOP to 110
+        set SELECT_BOTTOM to height - 64
+        if section == "chat":
+            set SELECT_BOTTOM to height - 230
         if runtime_child > 0:
             set runtime_exit to process_poll(runtime_child)
             if runtime_exit != 0 - 1:
@@ -279,6 +292,8 @@ define main:
             set scroll to 0
         set clicked to raylib_is_mouse_button_pressed(0)
         set user_activity to clicked || wheel != 0 || raylib_is_key_pressed(259) || raylib_is_key_pressed(257) || raylib_is_key_down(343) || raylib_is_key_pressed(266) || raylib_is_key_pressed(267)
+        if wheel != 0 && (section == "memory" || section == "identity"):
+            set pane_scroll to editor_max(0 and pane_scroll - wheel)
         if wheel != 0 && section == "tasks":
             set task_scroll to task_scroll - wheel
         if task_scroll < 0:
@@ -288,7 +303,7 @@ define main:
 
 
         if clicked == 1:
-            if hit(24 and 104 and 208 and 46) && child == 0 && stop_child == 0:
+            if hit(24 and 104 and 208 and 40) && child == 0 && stop_child == 0:
                 set child to process_start(core and ["session-start",project,"New conversation"])
                 set operation to "new"
                 set draft to ""
@@ -296,21 +311,21 @@ define main:
                 set attachment_path to ""
                 set section to "chat"
                 set follow_bottom to 1
-            if hit(24 and height - 214 and 208 and 38):
+            if hit(16 and height - 214 and 216 and 38):
                 set section to "tasks"
-            if hit(24 and height - 168 and 208 and 38):
+            if hit(16 and height - 168 and 216 and 38):
                 set section to "memory"
-            if hit(24 and height - 122 and 208 and 38):
+            if hit(16 and height - 122 and 216 and 38):
                 set section to "identity"
             set si to 0
             repeat while si < length_list(sessions):
-                if hit(18 and 214 + si * 43 and 220 and 40) && 214 + si * 43 < height - 256:
+                if hit(16 and 192 + si * 42 and 216 and 38) && 192 + si * 42 < height - 256:
                     set selected to get_list(get_list(sessions and si) and 0)
                     set turns to chat_turns(db and selected)
                     set section to "chat"
                     set follow_bottom to 1
                 set si to si + 1
-        set choose_image to clicked && hit(left + 38 and height - 108 and 119 and 27)
+        set choose_image to clicked && hit(left + 16 and height - 108 and 152 and 28)
         if exercise_image != "" && exercise_imported == 0 && frames > 3 && child == 0 && stop_child == 0 && db != 0:
             set choose_image to 1
         if choose_image && section == "chat" && child == 0 && stop_child == 0 && db != 0 && (selected == "" || string_equals(selected and current_session)):
@@ -331,7 +346,7 @@ define main:
             set attachment to ""
             set attachment_path to ""
         set previous_draft to draft
-        set draft to editor_handle(draft and left + 44 and height - 157 and content_width - 140 and 54 and (section == "chat"))
+        set draft to editor_handle(draft and left + 20 and height - 176 and content_width - 88 and 60 and (section == "chat"))
         if string_equals(previous_draft and draft) == 0:
             set user_activity to 1
             set last_activity to transport_now(native_system())
@@ -342,7 +357,7 @@ define main:
             set send_requested to 1
             set exercise_sent to 1
         set stop_clicked to 0
-        if clicked && hit(width - 119 and height - 126 and 43 and 38):
+        if clicked && hit(left + content_width - 56 and height - 112 and 36 and 32):
             if child > 0 && operation == "chat":
                 set stop_clicked to 1
             else:
@@ -416,37 +431,69 @@ define main:
         raylib_begin_drawing()
 
         raylib_clear_background(bg)
-        raylib_draw_rectangle(0 and 0 and 256 and height and sidebar)
-        label("e" and 27 and 32 and 34 and mint)
-        label("EchoLite" and 64 and 36 and 23 and white)
-        label("A mind of your own." and 27 and 74 and 14 and muted)
-        panel(24 and 104 and 208 and 46 and mint)
-        label("+  New conversation" and 40 and 119 and 17 and bg)
-        label("CONVERSATIONS" and 28 and 186 and 12 and muted)
+        raylib_draw_rectangle(0 and 0 and 248 and height and sidebar)
+        raylib_draw_rectangle(247 and 0 and 1 and height and border)
+        ui_icon("echo" and 24 and 29 and 4 and mint)
+        ui_wordmark(60 and 34 and 2 and white)
+        label("A MIND OF YOUR OWN" and 24 and 70 and 11 and muted)
+        set button_tint to surface
+        if hit(24 and 104 and 208 and 40):
+            set button_tint to color(41 and 53 and 47)
+        panel(24 and 104 and 208 and 40 and button_tint)
+        ui_icon("plus" and 38 and 117 and 2 and mint)
+        label("New conversation" and 62 and 117 and 14 and white)
+        label("CONVERSATIONS" and 24 and 170 and 11 and muted)
         set si to 0
-        repeat while si < length_list(sessions) && 214 + si * 43 < height - 256:
+        repeat while si < length_list(sessions) && 192 + si * 42 < height - 256:
             set item to get_list(sessions and si)
-            if string_equals(selected and get_list(item and 0)):
-                panel(18 and 214 + si * 43 and 220 and 40 and surface)
-            label(get_list(item and 1) and 32 and 227 + si * 43 and 15 and white)
+            set active to string_equals(selected and get_list(item and 0)) && section == "chat"
+            set row_tint to sidebar
+            if active || hit(16 and 192 + si * 42 and 216 and 38):
+                set row_tint to surface
+            raylib_draw_rectangle(16 and 192 + si * 42 and 216 and 38 and row_tint)
+            if active:
+                raylib_draw_rectangle(16 and 192 + si * 42 and 2 and 38 and mint)
+            ui_icon("chat" and 30 and 204 + si * 42 and 2 and muted)
+            label(ui_text_fit(get_list(item and 1) and 164 and 14) and 54 and 204 + si * 42 and 14 and white)
             set si to si + 1
         if length_list(sessions) == 0:
-            label("Your conversations live here." and 28 and 229 and 13 and muted)
-        raylib_draw_line(24 and height - 233 and 231 and height - 233 and border)
-        label("Tasks" and 32 and height - 202 and 17 and muted)
-        label("Memory" and 32 and height - 156 and 17 and muted)
-        label("Me" and 32 and height - 110 and 17 and muted)
-        panel(24 and height - 62 and 208 and 38 and surface)
-        label("LOCAL  /  PRIVATE" and 42 and height - 49 and 12 and mint)
-        label("EchoLite" and left and 35 and 20 and white)
-        label("Qwen3.5 4B  /  262K context" and left and 64 and 13 and muted)
-        set network_label to "Offline"
+            label("Nothing here yet." and 24 and 208 and 12 and muted)
+        raylib_draw_line(24 and height - 233 and 224 and height - 233 and border)
+        ui_nav("Tasks" and "tasks" and height - 214 and section == "tasks")
+        ui_nav("Memory" and "memory" and height - 168 and section == "memory")
+        ui_nav("Me" and "me" and height - 122 and section == "identity")
+        raylib_draw_line(24 and height - 70 and 224 and height - 70 and border)
+        set state_tint to mint
+        set state_text to "LOCAL RUNTIME"
+        if runtime_ready != 1:
+            set state_tint to color(217 and 187 and 133)
+            set state_text to "PREPARING RUNTIME"
+        raylib_draw_rectangle(26 and height - 44 and 6 and 6 and state_tint)
+        label(state_text and 44 and height - 46 and 11 and muted)
+        set title to "Conversation"
+        set subtitle to "Qwen3.5 4B / 262K context"
+        if section == "tasks":
+            set title to "Tasks"
+            set subtitle to "Commitments, progress and outcomes"
+        else if section == "memory":
+            set title to "Memory"
+            set subtitle to "Continuity through experience"
+        else if section == "identity":
+            set title to "Me"
+            set subtitle to "Identity and working perspective"
+        label(title and left and 28 and 22 and white)
+        label(subtitle and left and 61 and 12 and muted)
+        set network_label to "OFFLINE"
         if network_mode(home) == "connected":
-            set network_label to "Connected"
-        label(network_label and width - 145 and 39 and 14 and mint)
-        raylib_draw_line(left and 96 and width - 36 and 96 and border)
+            set network_label to "CONNECTED"
+        panel(left + content_width - 98 and 30 and 98 and 28 and surface)
+        label(network_label and left + content_width - 86 and 39 and 11 and mint)
+        raylib_draw_line(left and 92 and left + content_width and 92 and border)
         if section == "chat":
             set viewport to height - 340
+            if attachment != "":
+                set viewport to viewport - 32
+            set SELECT_BOTTOM to 110 + viewport
             if follow_bottom == 1:
                 set scroll to body_height - viewport
             if scroll > body_height - viewport:
@@ -456,16 +503,25 @@ define main:
             ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left and 110 and content_width and viewport)
             set row_y to 125 - scroll
             if length_list(turns) == 0:
-                label("Space to think." and left + 70 and 250 and 36 and white)
-                label("Room to remember." and left + 70 and 298 and 36 and mint)
-                wrap_text("Ask a question, explore an idea, or pick up where you left off. Your conversations and memories stay with you." and left + 70 and 360 and content_width - 140 and 17 and muted)
+                ui_icon("echo" and left + 40 and 140 and 4 and mint)
+                label("Space to think." and left + 40 and 188 and 24 and white)
+                label("Room to remember." and left + 40 and 226 and 24 and mint)
+                wrap_text("Ask a question, explore an idea, or pick up where you left off. Your conversations and memories stay with you." and left + 40 and 278 and content_width - 80 and 15 and muted)
             set ti to 0
             repeat while ti < length_list(turns):
                 set turn to get_list(turns and ti)
                 set speaker to "YOU"
                 if get_list(turn and 8) == "scheduled-event":
                     set speaker to "SCHEDULED TASK"
-                label(speaker and left + 24 and row_y and 12 and muted)
+                set user_height to length_list(layout_lines(get_list(turn and 1) and content_width - 60 and 18)) * 27 + 56
+                set image_index to 0
+                repeat while image_index < length_list(image_turns):
+                    set image_record to get_list(image_turns and image_index)
+                    if string_equals(get_list(image_record and 0) and get_list(turn and 0)):
+                        set user_height to user_height + length_list(layout_lines(concat("Image · " and path_basename(get_list(image_record and 1))) and content_width - 60 and 13)) * 22 + 8
+                    set image_index to image_index + 1
+                panel(left + 8 and row_y - 12 and content_width - 16 and user_height and surface)
+                label(speaker and left + 24 and row_y and 11 and muted)
                 set row_y to row_y + 24
                 set ii to 0
                 repeat while ii < length_list(image_turns):
@@ -475,8 +531,9 @@ define main:
                         set row_y to row_y + 8
                     set ii to ii + 1
                 set row_y to wrap_text(get_list(turn and 1) and left + 24 and row_y and content_width - 60 and 18 and white)
-                set row_y to row_y + 25
-                label("ECHOLITE" and left + 24 and row_y and 12 and mint)
+                set row_y to row_y + 45
+                ui_icon("echo" and left + 24 and row_y - 1 and 2 and mint)
+                label("ECHOLITE" and left + 46 and row_y and 11 and mint)
                 if get_list(turn and 2) != "":
                     label("Copy" and left + content_width - 64 and row_y and 12 and muted)
                     if clicked && hit(left + content_width - 74 and row_y - 4 and 60 and 24) && row_y >= 110 && row_y < height - 220:
@@ -489,14 +546,14 @@ define main:
                         display "UI observed live model thinking before turn completion"
                         set exercise_live_seen to 1
                 if thought != "":
-                    panel(left + 24 and row_y and content_width - 48 and 36 and surface)
+                    panel(left + 24 and row_y and content_width - 48 and 32 and surface)
                     set arrow to ">  Thinking"
                     if string_equals(thinking_open and get_list(turn and 0)):
                         set arrow to "v  Thinking"
                     set thinking_label to concat(arrow and concat("  ·  " and concat(get_list(turn and 5) and " output tokens")))
                     if get_list(turn and 7) == "1":
                         set thinking_label to concat(arrow and "  ·  generating")
-                    label(thinking_label and left + 38 and row_y + 10 and 14 and mint)
+                    label(thinking_label and left + 38 and row_y + 10 and 12 and mint)
                     if clicked && hit(left + 24 and row_y and content_width - 48 and 36) && raylib_get_mouse_y() >= 110 && raylib_get_mouse_y() < height - 200:
                         if string_equals(thinking_open and get_list(turn and 0)):
                             set thinking_open to ""
@@ -514,7 +571,7 @@ define main:
                     display "UI observed a streaming answer draft before turn completion"
                     set exercise_draft_seen to 1
                 if get_list(turn and 2) != "":
-                    set row_y to wrap_text(get_list(turn and 2) and left + 24 and row_y and content_width - 60 and 18 and white)
+                    set row_y to ui_response(get_list(turn and 2) and left + 24 and row_y and content_width - 48 and white)
                 else:
                     set pending_text to concat("Turn " and get_list(turn and 3))
                     if get_list(turn and 3) == "pending":
@@ -528,24 +585,32 @@ define main:
                 set ti to ti + 1
             set body_height to row_y + scroll - 125
             ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
+            if body_height > viewport:
+                set thumb_height to editor_max(24 and viewport * viewport / body_height)
+                set thumb_y to 110 + scroll * (viewport - thumb_height) / (body_height - viewport)
+                raylib_draw_rectangle(left + content_width - 3 and thumb_y and 2 and thumb_height and border)
             if attachment != "":
                 panel(left + 24 and height - 220 and content_width - 48 and 28 and surface)
                 ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left + 35 and height - 218 and content_width - 106 and 26)
                 label(concat("Image: " and path_basename(attachment_path)) and left + 38 and height - 213 and 13 and mint)
                 ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
                 label("x" and left + content_width - 50 and height - 213 and 14 and muted)
-            panel(left + 24 and height - 182 and content_width - 48 and 112 and surface)
-            ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left + 40 and height - 160 and content_width - 130 and 54)
+            set composer_edge to border
+            if EDIT_FOCUS:
+                set composer_edge to color(89 and 120 and 105)
+            ui_frame(left and height - 196 and content_width and 132 and surface and composer_edge)
+            raylib_draw_rectangle(left + 20 and height - 196 and 24 and 2 and mint)
+            ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left + 20 and height - 176 and content_width - 88 and 60)
             if draft == "":
-                label("Message EchoLite..." and left + 44 and height - 157 and 18 and muted)
-            editor_draw(left + 44 and height - 157 and content_width - 140 and 54 and white and mint)
+                label("Message EchoLite..." and left + 20 and height - 176 and 18 and muted)
+            editor_draw(left + 20 and height - 176 and content_width - 88 and 60 and white and mint)
             ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
-            panel(width - 119 and height - 126 and 43 and 38 and mint)
+            raylib_draw_rectangle(left + content_width - 56 and height - 112 and 36 and 32 and mint)
             if child > 0 && operation == "chat":
-                raylib_draw_rectangle(width - 105 and height - 114 and 15 and 15 and bg)
+                raylib_draw_rectangle(left + content_width - 44 and height - 102 and 12 and 12 and bg)
             else:
-                label("^" and width - 106 and height - 118 and 25 and bg)
-            set composer_status to "Enter to send · Shift+Enter newline · Cmd+A/C/X/V · Cmd+Z undo"
+                ui_icon("up" and left + content_width - 43 and height - 103 and 2 and bg)
+            set composer_status to ""
             if EDIT_ERROR != "":
                 set composer_status to EDIT_ERROR
             if child > 0:
@@ -558,15 +623,15 @@ define main:
                 set composer_status to "Preparing local models..."
             if notice != "":
                 set composer_status to notice
-            label("+ Attach image" and left + 40 and height - 100 and 13 and mint)
-            ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left + 174 and height - 104 and content_width - 286 and 24)
-            label(composer_status and left + 180 and height - 100 and 12 and muted)
-            ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
-
-            label("Local memory. Your continuity." and left + 126 and height - 44 and 12 and muted)
+            ui_icon("image" and left + 20 and height - 104 and 2 and mint)
+            label("Attach image" and left + 42 and height - 104 and 12 and mint)
+            label(ui_text_fit(composer_status and content_width - 250 and 11) and left + 170 and height - 103 and 11 and muted)
+            label("Enter to send / Shift+Enter for a new line" and left + 4 and height - 38 and 11 and muted)
+            label("ON DEVICE" and left + content_width - 64 and height - 38 and 10 and mint)
         else if section == "tasks":
-            label("Tasks" and left + 24 and 151 and 32 and white)
-            label("Due tasks run while open and idle. Typing interrupts background work." and left + 24 and 198 and 14 and muted)
+            label("Your next steps" and left + 24 and 143 and 24 and white)
+            wrap_text("Due tasks run while open and idle. Typing interrupts background work." and left + 24 and 184 and content_width - 48 and 12 and muted)
+            set SELECT_TOP to 232
             set task_height to height - 300
             set task_total to 0
             set layout_index to 0
@@ -593,7 +658,7 @@ define main:
                     set task_detail to concat(task_detail and concat("  ·  " and get_list(task_row and 3)))
                 if get_list(task_row and 7) != "":
                     set task_detail to concat(task_detail and concat("  ·  turn " and get_list(task_row and 7)))
-                label(task_detail and left + 40 and task_y + row_height - 23 and 12 and muted)
+                label(ui_text_fit(task_detail and content_width - 90 and 12) and left + 40 and task_y + row_height - 23 and 12 and muted)
                 if get_list(task_row and 2) == "armed":
                     label("Cancel" and left + content_width - 104 and task_y + 12 and 13 and mint)
                     if clicked && child == 0 && stop_child == 0 && hit(left + content_width - 116 and task_y + 5 and 80 and 28) && raylib_get_mouse_y() >= 232 && raylib_get_mouse_y() < 232 + task_height:
@@ -604,40 +669,68 @@ define main:
                 set task_y to task_y + row_height + 14
                 set task_i to task_i + 1
             if length_list(task_rows) == 0:
-                wrap_text("Ask EchoLite to save a task and when to do it. Its objective, due time and outcome will appear here." and left + 40 and 252 and content_width - 100 and 18 and white)
+                panel(left + 24 and 238 and content_width - 48 and 180 and surface)
+                ui_icon("tasks" and left + 44 and 262 and 3 and mint)
+                label("Make room for what matters" and left + 76 and 266 and 17 and white)
+                wrap_text("Ask EchoLite to save a task and when to do it. Its objective, due time and outcome will appear here." and left + 44 and 312 and content_width - 88 and 15 and muted)
             ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
             if notice != "":
                 label(notice and left + 24 and height - 38 and 12 and muted)
         else if section == "memory":
-            label("Memory" and left + 24 and 151 and 32 and white)
-            set row_y to 210
+            label("What stays with you" and left + 24 and 143 and 24 and white)
+            label("Recent retained records / current project" and left + 24 and 184 and 12 and muted)
+            set SELECT_TOP to 220
+            ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left and 220 and content_width and height - 284)
+            set row_y to 228 - pane_scroll
+            set note_count to 0
             if db != 0:
-                set notes to sql_query_params(db and "SELECT layer,substr(body,1,240) FROM memories WHERE status='active' AND source NOT IN ('tool-request','tool-receipt') ORDER BY id DESC LIMIT 12" and [])
+                set notes to sql_query_params(db and "SELECT layer,substr(body,1,600),id,substr(created,1,10) FROM memories WHERE project=? AND status='active' AND source NOT IN ('tool-request','tool-receipt','session') ORDER BY id DESC LIMIT 24" and [project])
+                set note_count to length_list(notes)
                 set note_index to 0
-                repeat while note_index < length_list(notes) && row_y < height - 110:
+                repeat while note_index < length_list(notes):
                     set note to get_list(notes and note_index)
-                    label(get_list(note and 0) and left + 24 and row_y and 12 and mint)
-                    set row_y to wrap_text(get_list(note and 1) and left + 24 and row_y + 25 and content_width - 60 and 17 and white)
-                    set row_y to row_y + 24
+                    set card_height to length_list(layout_lines(get_list(note and 1) and content_width - 88 and 16)) * 25 + 64
+                    panel(left + 24 and row_y and content_width - 48 and card_height and surface)
+                    label(get_list(note and 0) and left + 44 and row_y + 16 and 12 and mint)
+                    label(concat("#" and get_list(note and 2)) and left + content_width - 90 and row_y + 16 and 12 and muted)
+                    wrap_text(get_list(note and 1) and left + 44 and row_y + 42 and content_width - 88 and 16 and white)
+                    set row_y to row_y + card_height + 16
                     set note_index to note_index + 1
-            if row_y == 210:
-                label("Your retained memories will appear here." and left + 24 and row_y and 17 and muted)
+            set pane_total to row_y + pane_scroll - 228
+            set pane_scroll to editor_min(pane_scroll and editor_max(0 and pane_total - (height - 292)))
+            if note_count == 0:
+                panel(left + 24 and 228 and content_width - 48 and 160 and surface)
+                ui_icon("memory" and left + 44 and 250 and 3 and mint)
+                label("Room for experience" and left + 76 and 252 and 17 and white)
+                wrap_text("Relevant experiences and notes will appear here as your conversations develop." and left + 44 and 300 and content_width - 88 and 15 and muted)
+            ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
+            label("Stored locally / scroll to explore" and left + 24 and height - 38 and 11 and muted)
         else:
-            label("Me" and left + 24 and 151 and 32 and white)
+            label("An evolving identity" and left + 24 and 143 and 24 and white)
+            label("Loaded each turn. Revised through experience." and left + 24 and 184 and 12 and muted)
+            set SELECT_TOP to 220
+            ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left and 220 and content_width and height - 284)
             if db != 0:
                 set identities to sql_query_params(db and "SELECT body,id FROM me_versions ORDER BY id DESC LIMIT 1" and [])
                 if length_list(identities) > 0:
                     set identity to get_list(identities and 0)
-                    label(concat("Revision " and get_list(identity and 1)) and left + 24 and 199 and 13 and mint)
-                    wrap_text(get_list(identity and 0) and left + 24 and 240 and content_width - 60 and 18 and white)
+                    set card_height to length_list(layout_lines(get_list(identity and 0) and content_width - 96 and 18)) * 27 + 88
+                    set pane_scroll to editor_min(pane_scroll and editor_max(0 and card_height - (height - 292)))
+                    set card_y to 228 - pane_scroll
+                    panel(left + 24 and card_y and content_width - 48 and card_height and surface)
+                    raylib_draw_rectangle(left + 24 and card_y and 3 and card_height and mint)
+                    label("ME.TXT" and left + 48 and card_y + 18 and 12 and mint)
+                    label(concat("REV " and get_list(identity and 1)) and left + content_width - 100 and card_y + 18 and 12 and muted)
+                    wrap_text(get_list(identity and 0) and left + 48 and card_y + 56 and content_width - 96 and 18 and white)
+            ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
+            label("Versioned identity / changes apply at the next turn" and left + 24 and height - 38 and 11 and muted)
         editor_menu_draw()
         raylib_end_drawing()
         set frames to frames + 1
         if exercise_finished && frames % 15 == 0 && length_list(turns) > 0:
             set thinking_open to get_list(get_list(turns and length_list(turns) - 1) and 0)
         if capture != "" && (exercise_schedule == 0 || exercise_schedule_done) && stop_child == 0 && ((exercise == "" && frames >= 3 && child == 0 && stop_child == 0) || (exercise != "" && exercise_finished && frames % 15 == 3 && length_list(turns) > 0 && get_list(get_list(turns and length_list(turns) - 1) and 3) != "pending")):
-            set shot to ep_dlsym(RAYLIB_HANDLE and "TakeScreenshot")
-            ep_dlcall1(shot and capture)
+            ui_capture(capture)
             raylib_close_window()
             return 0
     raylib_close_window()

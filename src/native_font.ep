@@ -76,9 +76,9 @@ define font_init with raylib:
     set color_type to native_struct([byte_type,byte_type,byte_type,byte_type])
     set load_cif to native_cif(font_type and [pointer_type,int_type,pointer_type,int_type])
     set FONT_VALUE to alloc_bytes(64)
-    set path to "/System/Library/Fonts/SFNS.ttf"
+    set path to "/System/Library/Fonts/SFNSMono.ttf"
     set path_cell to [str_to_ptr(path)]
-    set size_cell to [48]
+    set size_cell to [64]
     set codepoints to alloc_bytes(1254 * 4)
     set glyph to 0
     repeat while glyph < 1248:
@@ -104,7 +104,7 @@ define font_init with raylib:
     set FONT_SPACE to alloc_bytes(4)
     set FONT_COLOR to alloc_bytes(4)
     set FONT_RESULT to alloc_bytes(8)
-    native_write(FONT_SPACE and 0 and native_f32(1) and 4)
+    native_write(FONT_SPACE and 0 and native_f32(0) and 4)
     set FONT_DRAW_CIF to native_cif(ep_dlsym(FONT_FFI and "ffi_type_void") and [font_type,pointer_type,vector_type,float_type,float_type,color_type])
     set FONT_MEASURE_CIF to native_cif(vector_type and [font_type,pointer_type,float_type,float_type])
     set FONT_DRAW_ARGS to [FONT_VALUE,FONT_TEXT,FONT_POSITION,FONT_SIZE,FONT_SPACE,FONT_COLOR]

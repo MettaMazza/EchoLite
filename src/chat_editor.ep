@@ -17,6 +17,8 @@ set SELECT_CLICK_TIME to 0
 set SELECT_CLICK_POS to 0
 set EDIT_UNDO to create_list()
 set EDIT_REDO to create_list()
+set SELECT_TOP to 110
+set SELECT_BOTTOM to 600
 set SELECT_TEXT to ""
 set SELECT_CARET to 0
 set SELECT_ANCHOR to 0
@@ -321,7 +323,7 @@ define selectable_text with text and x and y and width and size and tint:
     set mx to raylib_get_mouse_x()
     set my to raylib_get_mouse_y()
     set bottom to y + length_list(rows) * (size + 9)
-    set inside to mx >= x && mx <= x + width && my >= y && my < bottom && my >= 110 && my < raylib_get_screen_height() - 200
+    set inside to mx >= x && mx <= x + width && my >= y && my < bottom && my >= SELECT_TOP && my < SELECT_BOTTOM
     if inside:
         ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetMouseCursor") and 2)
     if raylib_is_mouse_button_pressed(0) && inside && EDIT_MENU == 0 && EDIT_MENU_USED == 0:
