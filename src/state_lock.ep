@@ -1,0 +1,91 @@
+import "native_calls"
+# Process-lifetime memory-state coordination, implemented in Ernos Plain.
+import "fs"
+import "json"
+set STATE_LEASE_FD to 0 - 1
+set WORKER_LEASE_FD to 0 - 1
+
+define lease_error with message returning Str:
+    set fields to [create_json_string("error"),create_json_string(message)]
+    set result to json_stringify(create_json_object(["status","text"] and fields))
+    return result
+
+define lease_integer with pointer and offset and count:
+    set value to 0
+    set i to count - 1
+    repeat while i >= 0:
+        set value to value * 256 + peek_byte(pointer and offset + i)
+        set i to i - 1
+    return value
+
+define private_lock with home and name:
+    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set resolved to alloc_bytes(1024)
+    set result to ep_dlcall2(ep_dlsym(libc and "realpath") and home and resolved)
+    if result == 0:
+        free_bytes(resolved)
+        return 0 - 1
+    set canonical to ptr_to_str(resolved)
+    free_bytes(resolved)
+    set path to concat(canonical and concat("/" and name))
+    if string_length(path) >= 1024:
+        return 0 - 1
+    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set fd to native_open(path and 16777990 and 384)
+    if fd < 0 || fd > 2147483647:
+        return 0 - 1
+    set info to alloc_bytes(144)
+    set rc to ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info)
+    set mode to lease_integer(info and 4 and 2)
+    set links to lease_integer(info and 6 and 2)
+    set owner to lease_integer(info and 16 and 4)
+    free_bytes(info)
+    if rc != 0 || mode / 4096 != 8 || links != 1 || owner != ep_dlcall0(ep_dlsym(libc and "getuid")):
+        ep_dlcall1(ep_dlsym(libc and "close") and fd)
+        return 0 - 1
+    if ep_dlcall2(ep_dlsym(libc and "fchmod") and fd and 384) != 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and fd)
+        return 0 - 1
+    return fd
+
+define state_lease with home and mode returning Str:
+    if mode != "shared" && mode != "maintenance":
+        return lease_error("Invalid state lease request")
+    if STATE_LEASE_FD >= 0:
+        return lease_error("State lease already acquired in this process")
+    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set close_fn to ep_dlsym(libc and "close")
+    set fd to private_lock(home and "state.lock")
+    if fd < 0:
+        return lease_error("Cannot open private regular state lock")
+    set flags to 5
+    if mode == "maintenance":
+        set flags to 6
+    if ep_dlcall2(ep_dlsym(libc and "flock") and fd and flags) != 0:
+        ep_dlcall1(close_fn and fd)
+        return lease_error("State is busy with another command or offline maintenance")
+    if mode == "shared":
+        set marker to concat(home and "/.restore.pending")
+        if string_length(marker) >= 1024:
+            ep_dlcall1(close_fn and fd)
+            return lease_error("State path is too long")
+        set info to alloc_bytes(144)
+        set rc to ep_dlcall2(ep_dlsym(libc and "lstat") and marker and info)
+        set errno_ptr to ep_dlcall0(ep_dlsym(libc and "__error"))
+        set error_number to lease_integer(errno_ptr and 0 and 4)
+        free_bytes(info)
+        if rc == 0 || error_number != 2:
+            ep_dlcall1(close_fn and fd)
+            return lease_error("Interrupted restore; rerun backup-restore with the original backup ID")
+    else:
+        set worker to private_lock(home and "worker.lock")
+        if worker < 0:
+            ep_dlcall1(close_fn and fd)
+            return lease_error("Cannot open private regular worker lock")
+        if ep_dlcall2(ep_dlsym(libc and "flock") and worker and 6) != 0:
+            ep_dlcall1(close_fn and worker)
+            ep_dlcall1(close_fn and fd)
+            return lease_error("Stop the model worker before offline maintenance")
+        set WORKER_LEASE_FD to worker
+    set STATE_LEASE_FD to fd
+    return "{\"status\":\"ok\"}"

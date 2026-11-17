@@ -1,0 +1,38 @@
+# Inspect the actual native UI stop-and-continue exercise; no model calls here.
+import "../src/result_cache"
+import "../src/transport"
+set checks to 0
+
+define stop_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    stop_assert(result_cache_scalar(db and "SELECT status FROM turns WHERE id=1" and []) == "abandoned" and "stopped turn persisted")
+    stop_assert(result_cache_scalar(db and "SELECT reply_memory IS NULL FROM turns WHERE id=1" and []) == "1" and "unfinished answer not published")
+    stop_assert(result_cache_scalar(db and "SELECT count(*) FROM turns t JOIN memories m ON m.id=t.user_memory WHERE t.id=1 AND m.source='user-message'" and []) == "1" and "original user message retained")
+    stop_assert(result_cache_scalar(db and "SELECT count(*) FROM model_progress" and []) == "0" and "stale streaming output removed")
+    stop_assert(result_cache_scalar(db and "SELECT status FROM turns WHERE id=2" and []) == "completed" and "follow-up UI turn completed")
+    stop_assert(result_cache_scalar(db and "SELECT count(DISTINCT session) FROM session_turns WHERE turn_id IN (1,2)" and []) == "1" and "same conversation continues after stop")
+    set nonce to result_cache_scalar(db and "SELECT nonce FROM turn_signals WHERE turn_id=1" and [])
+    stop_assert(file_exists(concat(home and concat("/cancel-" and nonce))) == 0 and "active core acknowledged and removed stop signal")
+    set log to read_file(concat(home and "/ui.txt"))
+    stop_assert(string_contains(log and "UI observed live model thinking before turn completion") and "stop exercise reached real streaming inference")
+    set prefix to "UI stop-to-idle milliseconds: "
+    set pos to string_index_of(log and prefix)
+    stop_assert(pos >= 0 and "native UI recorded stop latency")
+    set tail to substring(log and pos + string_length(prefix) and string_length(log) - pos - string_length(prefix))
+    set end to string_index_of(tail and "\n")
+    set elapsed to transport_number(substring(tail and 0 and end) and 10 and 60000)
+    stop_assert(elapsed >= 0 && elapsed < 5000 and "stop acknowledged promptly instead of waiting for generation completion")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native UI stop-and-continue checks"))
+    return 0

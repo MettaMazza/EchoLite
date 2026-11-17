@@ -1,0 +1,18 @@
+import "../src/web_transfer"
+import "os"
+
+define main:
+    set db to sql_open(":memory:")
+    set bad to web_transfer(db and "file:///etc/passwd")
+    if string_contains(bad and "\"status\":\"error\"") == 0:
+        display "FAIL: unsupported scheme"
+        return 1
+    set args to get_args()
+    set result to web_transfer(db and get_list(args and 1))
+    display result
+    set valid to result_cache_scalar(db and "SELECT json_extract(?,'$.http_status')=200 AND length(json_extract(?,'$.body'))>0 AND length(json_extract(?,'$.headers'))>0" and [result,result,result])
+    sql_close(db)
+    if valid != "1":
+        return 1
+    display "PASS: native HTTPS status, headers, body and scheme validation"
+    return 0

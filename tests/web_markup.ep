@@ -1,0 +1,39 @@
+import "../src/web_markup"
+import "os"
+set checks to 0
+
+define web_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    web_assert(web_url("https://example.org" and "") == "https://example.org/" and "canonical HTTPS URL")
+    web_assert(web_url("../next?q=1#part" and "https://example.org/docs/page") == "https://example.org/next?q=1" and "relative resolution and fragment removal")
+    set invalid to ["http://example.org/","file:///etc/passwd","https://user:pass@example.org/","https://@example.org/","https://example.org:8443/","https://example.org/a b","https://example.org/\nheader"]
+    set i to 0
+    repeat while i < length_list(invalid):
+        web_assert(web_url(get_list(invalid and i) and "") == "" and "unsupported or credential-bearing URL rejected")
+        set i to i + 1
+    set html to "<html><head><title>Café &amp; sources</title><base href='/reference/'><style>hidden CSS</style></head><body><p>Receipt MAPLE-173.</p><a href='next'>Read <b>more</b></a><a href='next#other'>Duplicate</a><a href='https://other.example/'>Other</a><a href='javascript:alert(1)'>Unsafe target</a><script>hidden script</script></body></html>"
+    set result to web_html(db and html and "https://example.org/docs/start")
+    web_assert(string_contains(result and "MAPLE-173") and "visible source text")
+    web_assert(string_contains(result and "hidden script") == 0 && string_contains(result and "hidden CSS") == 0 and "script and style excluded")
+    web_assert(result_cache_scalar(db and "SELECT json_array_length(?,'$.links')" and [result]) == "2" and "duplicate and unsupported links omitted")
+    web_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.links[0].url')" and [result]) == "https://example.org/reference/next" and "HTML base resolution")
+    web_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.links[0].text')" and [result]) == "Read more" and "anchor label")
+    web_assert(string_contains(web_html(db and "<base href='file:///tmp/'><p>x</p>" and "https://example.org/") and "error") and "invalid base fails explicitly")
+    set builder to create_builder()
+    set i to 0
+    repeat while i < 12:
+        builder_append(builder and concat("<a href='/" and concat(int_to_string(i) and "'>link</a>")))
+        set i to i + 1
+    set result to web_html(db and builder_to_string(builder) and "https://example.org/")
+    web_assert(result_cache_scalar(db and "SELECT json_array_length(?,'$.links')" and [result]) == "8" and "bounded links")
+    web_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.links_truncated')" and [result]) == "1" and "link truncation disclosed")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native web markup checks"))
+    return 0

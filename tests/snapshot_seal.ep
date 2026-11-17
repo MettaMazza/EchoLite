@@ -1,0 +1,64 @@
+import "../src/snapshot_seal"
+import "hash"
+set checks to 0
+
+define seal_assert with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define seal_write with path and data:
+    write_file(path and data)
+    ep_dlcall2(ep_dlsym(native_system() and "chmod") and path and 384)
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set root to get_list(args and 1)
+    set libc to native_system()
+    set dir to native_open(root and 17826048 and 0)
+    seal_assert(dir >= 0 and "fixture directory")
+    set path to concat(root and "/sample.sqlite3")
+    seal_write(path and "abc")
+    seal_assert(snapshot_hash(dir and "sample.sqlite3") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" and "SHA-256 known vector")
+    seal_assert(snapshot_seal_create(dir and "sample.sqlite3") == 1 and "private seal published")
+    seal_assert(snapshot_seal_verify(dir and "sample.sqlite3") == 1 and "seal verified")
+    seal_assert(snapshot_seal_create(dir and "sample.sqlite3") == 0 and "existing seal never overwritten")
+    seal_assert(snapshot_hash(dir and "../sample.sqlite3") == "" and "parent traversal rejected")
+    seal_assert(snapshot_hash(dir and "missing.sqlite3") == "" and "missing snapshot rejected")
+    set linked to concat(root and "/linked.sqlite3")
+    seal_assert(ep_dlcall2(ep_dlsym(libc and "link") and path and linked) == 0 and "hardlink created")
+    seal_assert(snapshot_hash(dir and "sample.sqlite3") == "" and "multiply linked snapshot rejected")
+    ep_dlcall1(ep_dlsym(libc and "unlink") and linked)
+    seal_assert(ep_dlcall2(ep_dlsym(libc and "symlink") and path and linked) == 0 and "symlink created")
+    seal_assert(snapshot_hash(dir and "linked.sqlite3") == "" and "symlink snapshot rejected")
+    ep_dlcall1(ep_dlsym(libc and "unlink") and linked)
+    ep_dlcall2(ep_dlsym(libc and "chmod") and path and 420)
+    seal_assert(snapshot_hash(dir and "sample.sqlite3") == "" and "public snapshot permissions rejected")
+    ep_dlcall2(ep_dlsym(libc and "chmod") and path and 384)
+    set sidecar to concat(path and ".sha256")
+    ep_dlcall2(ep_dlsym(libc and "chmod") and sidecar and 420)
+    seal_assert(snapshot_seal_verify(dir and "sample.sqlite3") == 0 and "public seal permissions rejected")
+    ep_dlcall2(ep_dlsym(libc and "chmod") and sidecar and 384)
+    seal_assert(snapshot_seal_verify(dir and "sample.sqlite3") == 1 and "private original still verifies")
+    seal_write(path and "abd")
+    seal_assert(snapshot_seal_verify(dir and "sample.sqlite3") == 0 and "changed snapshot rejected")
+    seal_write(path and "abc")
+    seal_write(sidecar and "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    seal_assert(snapshot_seal_verify(dir and "sample.sqlite3") == 0 and "missing newline rejected")
+    seal_write(sidecar and "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD\n")
+    seal_assert(snapshot_seal_verify(dir and "sample.sqlite3") == 0 and "noncanonical seal rejected")
+    set text to "bounded streaming checksum buffer\n"
+    repeat while string_length(text) < 300000:
+        set text to concat(text and text)
+    seal_write(path and text)
+    seal_assert(string_equals(snapshot_hash(dir and "sample.sqlite3") and sha256(text)) and "multiple streaming buffer chunks match independent hash")
+    seal_write(path and "")
+    seal_assert(string_equals(snapshot_hash(dir and "sample.sqlite3") and sha256("")) and "empty snapshot digest")
+    ep_dlcall1(ep_dlsym(libc and "close") and dir)
+    display concat("PASS: " and concat(int_to_string(checks) and " EP snapshot seal checks"))
+    return 0

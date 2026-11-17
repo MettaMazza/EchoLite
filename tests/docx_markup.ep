@@ -1,0 +1,50 @@
+import "../src/docx_markup"
+import "os"
+set checks to 0
+
+define verify_docx with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define wrap_docx with body returning Str:
+    return concat("<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" and concat(body and "</w:body></w:document>"))
+
+define main:
+    set db to sql_open(":memory:")
+    set result to docx_xml(db and wrap_docx("<w:p><w:r><w:t>Café &amp; 🌱</w:t><w:tab/><w:t>ALDER-527</w:t></w:r></w:p><w:del><w:p><w:r><w:t>deleted secret</w:t></w:r></w:p></w:del><w:ins><w:p><w:r><w:t>inserted</w:t></w:r></w:p></w:ins><w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"))
+    verify_docx(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result]) and "Café & 🌱\tALDER-527\ninserted\ncell") and "Unicode, entities, revisions and table cells")
+    verify_docx(string_contains(result and "deleted secret") == 0 and "deleted revisions omitted")
+    set cases to ["<broken>","<!DOCTYPE a [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><a/>","<document><body/></document>","<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body/><w:body/></w:document>"]
+    set i to 0
+    repeat while i < length_list(cases):
+        set result to docx_xml(db and get_list(cases and i))
+        verify_docx(string_contains(result and "\"status\":\"error\"") and "invalid or unsafe XML rejected")
+        set i to i + 1
+    set body to "<w:t>kept</w:t>"
+    set i to 0
+    repeat while i < 65:
+        set body to concat("<w:r>" and concat(body and "</w:r>"))
+        set i to i + 1
+    verify_docx(string_contains(docx_xml(db and wrap_docx(body)) and "\"status\":\"error\"") and "depth limit")
+    set builder to create_builder()
+    set i to 0
+    repeat while i < 6000:
+        builder_append(builder and "🌱")
+        set i to i + 1
+    set result to docx_xml(db and wrap_docx(concat("<w:p><w:r><w:t>" and concat(builder_to_string(builder) and "</w:t></w:r></w:p>"))))
+    verify_docx(result_cache_scalar(db and "SELECT json_extract(?,'$.capture_truncated')" and [result]) == "1" and "bounded capture")
+    verify_docx(result_cache_scalar(db and "SELECT length(json_extract(?,'$.text'))" and [result]) == "4999" and "Unicode boundary retained")
+    set result to docx_xml(db and wrap_docx("<w:p><w:r><w:instrText>HIDDEN FIELD</w:instrText><w:t>visible</w:t></w:r><fake:t xmlns:fake='urn:wrong'>wrong namespace</fake:t></w:p>"))
+    verify_docx(result_cache_scalar(db and "SELECT json_extract(?, '$.text')" and [result]) == "visible" and "field instructions and foreign namespaces excluded")
+    set builder to create_builder()
+    set i to 0
+    repeat while i < 50001:
+        builder_append(builder and "<w:r/>")
+        set i to i + 1
+    verify_docx(string_contains(docx_xml(db and wrap_docx(builder_to_string(builder))) and "\"status\":\"error\"") and "node count limit")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native DOCX XML checks"))
+    return 0

@@ -1,0 +1,111 @@
+# Direct argv-based process launch; no shell interpolation or scripting runtime.
+import "native_calls"
+
+define process_integer with pointer and count:
+    set value to 0
+    set multiplier to 1
+    set i to 0
+    repeat while i < count:
+        set value to value + peek_byte(pointer and i) * multiplier
+        set multiplier to multiplier * 256
+        set i to i + 1
+    return value
+
+define process_spawn_streams with executable and arguments and output_fd and error_fd and detached and directory and closed_input:
+    set system to native_system()
+    set argv to alloc_bytes((length_list(arguments) + 2) * 8)
+    native_bytes_write(argv and 0 and str_to_ptr(executable) and 8)
+    set i to 0
+    repeat while i < length_list(arguments):
+        set argument to get_list(arguments and i)
+        native_bytes_write(argv and (i + 1) * 8 and str_to_ptr(argument) and 8)
+        set i to i + 1
+    set environment_pointer to ep_dlcall0(ep_dlsym(system and "_NSGetEnviron"))
+    set environment to process_integer(environment_pointer and 8)
+    set pid_pointer to alloc_bytes(4)
+    set actions to 0
+    if output_fd >= 0 || error_fd >= 0 || directory != "" || closed_input == 1:
+        set actions to alloc_bytes(8)
+        set initialized to ep_dlcall1(ep_dlsym(system and "posix_spawn_file_actions_init") and actions)
+        set action_error to initialized
+        if action_error == 0 && output_fd >= 0:
+            set action_error to ep_dlcall3(ep_dlsym(system and "posix_spawn_file_actions_adddup2") and actions and output_fd and 1)
+        if action_error == 0 && error_fd >= 0:
+            set action_error to ep_dlcall3(ep_dlsym(system and "posix_spawn_file_actions_adddup2") and actions and error_fd and 2)
+        if action_error == 0 && directory != "":
+            set change_directory to ep_dlsym(system and "posix_spawn_file_actions_addchdir_np")
+            if change_directory == 0:
+                set action_error to 1
+            else:
+                set action_error to ep_dlcall2(change_directory and actions and directory)
+        if action_error == 0 && closed_input == 1:
+            set action_error to ep_dlcall5(ep_dlsym(system and "posix_spawn_file_actions_addopen") and actions and 0 and "/dev/null" and 0 and 0)
+        if action_error != 0:
+            if initialized == 0:
+                ep_dlcall1(ep_dlsym(system and "posix_spawn_file_actions_destroy") and actions)
+            free_bytes(actions)
+            free_bytes(pid_pointer)
+            free_bytes(argv)
+            return 0
+    set attributes to 0
+    set attribute_ready to 0
+    set rc to 0
+    if detached == 1:
+        set attributes to alloc_bytes(8)
+        set rc to ep_dlcall1(ep_dlsym(system and "posix_spawnattr_init") and attributes)
+        if rc == 0:
+            set attribute_ready to 1
+            set rc to ep_dlcall2(ep_dlsym(system and "posix_spawnattr_setflags") and attributes and 1024)
+    if rc == 0:
+        set rc to ep_dlcall6(ep_dlsym(system and "posix_spawn") and pid_pointer and executable and actions and attributes and argv and environment)
+    if attributes != 0:
+        if attribute_ready == 1:
+            ep_dlcall1(ep_dlsym(system and "posix_spawnattr_destroy") and attributes)
+        free_bytes(attributes)
+
+    if actions != 0:
+        ep_dlcall1(ep_dlsym(system and "posix_spawn_file_actions_destroy") and actions)
+        free_bytes(actions)
+    set pid to 0
+    if rc == 0:
+        set pid to process_integer(pid_pointer and 4)
+    free_bytes(pid_pointer)
+    free_bytes(argv)
+    return pid
+
+# -1 means still running; -2 means wait error; otherwise the actual exit code.
+define process_poll with pid:
+    set status to alloc_bytes(4)
+    set waited to ep_dlcall3(ep_dlsym(native_system() and "waitpid") and pid and status and 1)
+    set result to 0 - 2
+    if waited == 0:
+        set result to 0 - 1
+    else if waited == pid:
+        set raw to process_integer(status and 4)
+        if raw % 128 == 0:
+            set result to raw / 256 % 256
+        else:
+            set result to 128 + raw % 128
+    if waited >= 2147483648:
+        set error_pointer to ep_dlcall0(ep_dlsym(native_system() and "__error"))
+        if process_integer(error_pointer and 4) == 4:
+            set result to 0 - 1
+    free_bytes(status)
+    return result
+
+define process_start with executable and arguments:
+    set pid to process_launch(executable and arguments and 0 - 1)
+    return pid
+
+define process_launch with executable and arguments and output_fd:
+    set pid to process_spawn(executable and arguments and output_fd and 0)
+    return pid
+
+define process_detached with executable and arguments and output_fd:
+    set pid to process_spawn(executable and arguments and output_fd and 1)
+    return pid
+
+# Preserve the established runtime/document launch interface.
+define process_spawn with executable and arguments and output_fd and detached:
+    set pid to process_spawn_streams(executable and arguments and output_fd and output_fd and detached and "" and 0)
+    return pid

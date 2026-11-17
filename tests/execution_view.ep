@@ -1,0 +1,20 @@
+import "../src/execution_view"
+import "os"
+
+define main:
+    set args to get_args()
+    set db to sql_open(get_list(args and 1))
+    set turn to result_cache_scalar(db and "SELECT id FROM turns WHERE project='native-process-ui' AND status='completed' AND answer_basis='execution' ORDER BY id DESC LIMIT 1" and [])
+    set answer to result_cache_scalar(db and "SELECT json_extract(response,'$.text') FROM generation_rounds WHERE turn_id=? AND json_extract(response,'$.kind')='answer' ORDER BY round DESC LIMIT 1" and [turn])
+    set rendered to execution_answer(db and turn and answer)
+    if string_contains(rendered and "400") == 0 || string_contains(rendered and "exit 0") == 0 || string_contains(rendered and "stdout_excerpt") || string_contains(rendered and "{\"operation\""):
+        display "FAIL: readable execution answer"
+        return 1
+    if length_list(args) == 3 && get_list(args and 2) == "repair-test-display":
+        set rendered to concat("From recorded process execution:\n" and rendered)
+        if sql_execute_params(db and "UPDATE memories SET body=? WHERE id=(SELECT reply_memory FROM turns WHERE id=? AND project='native-process-ui' AND status='completed')" and [rendered,turn]) != 101:
+            return 1
+    display rendered
+    display "PASS: real model answer retained with concise journal exit status; no raw receipt dump"
+    sql_close(db)
+    return 0

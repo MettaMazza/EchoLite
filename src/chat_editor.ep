@@ -1,0 +1,395 @@
+# Native EP editor: byte-safe Unicode caret, selection, clipboard and bounded undo.
+import "text_layout"
+import "chat_view"
+import "transport"
+import "../stdlib/bridge/raylib"
+set EDIT_TEXT to ""
+set EDIT_CARET to 0
+set EDIT_ANCHOR to 0
+set EDIT_FOCUS to 1
+set EDIT_DRAG to 0
+set EDIT_SCROLL to 0
+set EDIT_BLINK to 0
+set EDIT_ERROR to ""
+set EDIT_CLICK_TIME to 0
+set EDIT_CLICK_POS to 0
+set SELECT_CLICK_TIME to 0
+set SELECT_CLICK_POS to 0
+set EDIT_UNDO to create_list()
+set EDIT_REDO to create_list()
+set SELECT_TEXT to ""
+set SELECT_CARET to 0
+set SELECT_ANCHOR to 0
+set SELECT_DRAG to 0
+set EDIT_MENU to 0
+set EDIT_MENU_X to 0
+set EDIT_MENU_Y to 0
+set EDIT_MENU_USED to 0
+
+define editor_previous with text and position:
+    if position <= 0:
+        return 0
+    return layout_boundary(text and position - 1)
+
+define editor_next with text and position:
+    set position to position + 1
+    repeat while position < string_length(text) && get_character(text and position) >= 128 && get_character(text and position) < 192:
+        set position to position + 1
+    return editor_min(position and string_length(text))
+
+define editor_selected with text and caret and anchor returning Str:
+    return substring(text and editor_min(caret and anchor) and editor_max(caret and anchor) - editor_min(caret and anchor))
+
+define editor_splice with text and caret and anchor and inserted returning Str:
+    set start to editor_min(caret and anchor)
+    set finish to editor_max(caret and anchor)
+    return concat(substring(text and 0 and start) and concat(inserted and substring(text and finish and string_length(text) - finish)))
+
+define editor_snapshot:
+    if length_list(EDIT_UNDO) >= 64:
+        remove_list(EDIT_UNDO and 0)
+    append_list(EDIT_UNDO and editor_state())
+    set EDIT_REDO to create_list()
+    return 0
+
+define editor_insert with text:
+    set text to string_replace(string_replace(text and "\r\n" and "\n") and "\r" and "\n")
+    if string_length(EDIT_TEXT) - editor_max(EDIT_CARET and EDIT_ANCHOR) + editor_min(EDIT_CARET and EDIT_ANCHOR) + string_length(text) > 6000:
+        set EDIT_ERROR to "Message limit: 6000 UTF-8 bytes. Shorten the text or attach a document."
+        return 0
+    set EDIT_ERROR to ""
+    if text == "" && EDIT_CARET == EDIT_ANCHOR:
+        return 1
+    editor_snapshot()
+    set EDIT_TEXT to editor_splice(EDIT_TEXT and EDIT_CARET and EDIT_ANCHOR and text)
+    set EDIT_CARET to editor_min(EDIT_CARET and EDIT_ANCHOR) + string_length(text)
+    set EDIT_ANCHOR to EDIT_CARET
+    return 1
+
+define editor_history with redo:
+    set row to 0
+    if redo:
+        if length_list(EDIT_REDO) == 0:
+            return 0
+        set row to get_list(EDIT_REDO and length_list(EDIT_REDO) - 1)
+        append_list(EDIT_UNDO and editor_state())
+        remove_list(EDIT_REDO and length_list(EDIT_REDO) - 1)
+    else:
+        if length_list(EDIT_UNDO) == 0:
+            return 0
+        set row to get_list(EDIT_UNDO and length_list(EDIT_UNDO) - 1)
+        append_list(EDIT_REDO and editor_state())
+        remove_list(EDIT_UNDO and length_list(EDIT_UNDO) - 1)
+    set EDIT_TEXT to get_list(row and 0)
+    set EDIT_CARET to get_list(row and 1)
+    set EDIT_ANCHOR to get_list(row and 2)
+    return 1
+
+define editor_row with rows and caret:
+    set i to 0
+    repeat while i < length_list(rows) - 1:
+        if caret < get_list(get_list(rows and i + 1) and 0):
+            return i
+        set i to i + 1
+    return i
+
+define editor_hit with text and rows and x and y and size:
+    set line to editor_min(editor_max(0 and y / (size + 9)) and length_list(rows) - 1)
+    set row to get_list(rows and line)
+    set start to get_list(row and 0)
+    set finish to get_list(row and 1)
+    set pos to start
+    set previous_width to 0
+    repeat while pos < finish:
+        set next to editor_next(text and pos)
+        set next_width to font_measure(substring(text and start and next - start) and size)
+        if x < (previous_width + next_width) / 2:
+            return pos
+        set previous_width to next_width
+        set pos to next
+    return finish
+
+define editor_move with direction and shift and command and word and width:
+    set destination to EDIT_CARET
+    set rows to layout_ranges(EDIT_TEXT and width and 18)
+    set line to editor_row(rows and EDIT_CARET)
+    set row to get_list(rows and line)
+    if direction == 263 || direction == 262:
+        if command:
+            set destination to get_list(row and 0)
+            if direction == 262:
+                set destination to get_list(row and 1)
+        else if shift == 0 && EDIT_CARET != EDIT_ANCHOR:
+            set destination to editor_min(EDIT_CARET and EDIT_ANCHOR)
+            if direction == 262:
+                set destination to editor_max(EDIT_CARET and EDIT_ANCHOR)
+        else if direction == 263:
+            set destination to editor_previous(EDIT_TEXT and destination)
+            if word:
+                repeat while destination > 0 && get_character(EDIT_TEXT and destination - 1) != 32 && get_character(EDIT_TEXT and destination - 1) != 10:
+                    set destination to editor_previous(EDIT_TEXT and destination)
+        else:
+            set destination to editor_next(EDIT_TEXT and destination)
+            if word:
+                repeat while destination < string_length(EDIT_TEXT) && get_character(EDIT_TEXT and destination) != 32 && get_character(EDIT_TEXT and destination) != 10:
+                    set destination to editor_next(EDIT_TEXT and destination)
+    else if direction == 268:
+        set destination to get_list(row and 0)
+    else if direction == 269:
+        set destination to get_list(row and 1)
+    else:
+        set delta to 1
+        if direction == 265:
+            set delta to 0 - 1
+        set px to font_measure(substring(EDIT_TEXT and get_list(row and 0) and EDIT_CARET - get_list(row and 0)) and 18)
+        set destination to editor_hit(EDIT_TEXT and rows and px and (line + delta) * 27 and 18)
+        if command:
+            set destination to string_length(EDIT_TEXT)
+            if direction == 265:
+                set destination to 0
+    set EDIT_CARET to destination
+    if shift == 0:
+        set EDIT_ANCHOR to destination
+    return 0
+
+define editor_key with key:
+    if raylib_is_key_pressed(key):
+        return 1
+    set repeat_fn to ep_dlsym(RAYLIB_HANDLE and "IsKeyPressedRepeat")
+    if repeat_fn != 0:
+        return ep_dlcall1(repeat_fn and key)
+    return 0
+
+define editor_clipboard returning Str:
+    set pointer to ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "GetClipboardText"))
+    if pointer == 0:
+        return ""
+    return ptr_to_str(pointer)
+
+define editor_handle with draft and x and y and width and height and enabled returning Str:
+    if string_equals(draft and EDIT_TEXT) == 0:
+        set EDIT_TEXT to draft
+        set EDIT_CARET to string_length(draft)
+        set EDIT_ANCHOR to EDIT_CARET
+        set EDIT_UNDO to create_list()
+        set EDIT_REDO to create_list()
+    set EDIT_MENU_USED to 0
+    if EDIT_MENU && raylib_is_mouse_button_pressed(0):
+        set mx to raylib_get_mouse_x()
+        set my to raylib_get_mouse_y()
+        if mx >= EDIT_MENU_X && mx <= EDIT_MENU_X + 190 && my >= EDIT_MENU_Y && my < EDIT_MENU_Y + 160:
+            set item to (my - EDIT_MENU_Y) / 32
+            if item == 0:
+                if EDIT_FOCUS:
+                    ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and editor_selected(EDIT_TEXT and EDIT_CARET and EDIT_ANCHOR))
+                else:
+                    ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and editor_selected(SELECT_TEXT and SELECT_CARET and SELECT_ANCHOR))
+            if item == 1 && EDIT_FOCUS:
+                ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and editor_selected(EDIT_TEXT and EDIT_CARET and EDIT_ANCHOR))
+                editor_insert("")
+            if item == 2 && EDIT_FOCUS:
+                editor_insert(editor_clipboard())
+            if item == 3:
+                if EDIT_FOCUS:
+                    set EDIT_ANCHOR to 0
+                    set EDIT_CARET to string_length(EDIT_TEXT)
+                else:
+                    set SELECT_ANCHOR to 0
+                    set SELECT_CARET to string_length(SELECT_TEXT)
+            if item == 4 && EDIT_FOCUS:
+                editor_history(0)
+        set EDIT_MENU to 0
+        set EDIT_MENU_USED to 1
+        return EDIT_TEXT
+    if raylib_is_key_pressed(256):
+        set EDIT_MENU to 0
+    set shift to raylib_is_key_down(340) || raylib_is_key_down(344)
+    set command to raylib_is_key_down(343) || raylib_is_key_down(347) || raylib_is_key_down(341) || raylib_is_key_down(345)
+    set word to raylib_is_key_down(342) || raylib_is_key_down(346)
+    set rows to layout_ranges(EDIT_TEXT and width and 18)
+    set mx to raylib_get_mouse_x()
+    set my to raylib_get_mouse_y()
+    set clicked to raylib_is_mouse_button_pressed(0)
+    if enabled && mx >= x && mx <= x + width && my >= y && my <= y + height:
+        ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetMouseCursor") and 2)
+    if raylib_is_mouse_button_pressed(1) && enabled && mx >= x && mx <= x + width && my >= y && my <= y + height:
+        set EDIT_FOCUS to 1
+        editor_menu_open(mx and my)
+    if clicked:
+        set EDIT_FOCUS to enabled && mx >= x && mx <= x + width && my >= y && my <= y + height
+        set EDIT_DRAG to EDIT_FOCUS
+        if EDIT_FOCUS:
+            set SELECT_TEXT to ""
+            set SELECT_DRAG to 0
+            set EDIT_CARET to editor_hit(EDIT_TEXT and rows and mx - x and my - y + EDIT_SCROLL and 18)
+            if shift == 0:
+                set EDIT_ANCHOR to EDIT_CARET
+            set now to transport_now(native_system())
+            if now - EDIT_CLICK_TIME < 400 && EDIT_CARET == EDIT_CLICK_POS:
+                set bounds to editor_word(EDIT_TEXT and EDIT_CARET)
+                set EDIT_ANCHOR to get_list(bounds and 0)
+                set EDIT_CARET to get_list(bounds and 1)
+            set EDIT_CLICK_TIME to now
+            set EDIT_CLICK_POS to EDIT_CARET
+    if EDIT_DRAG && raylib_is_mouse_button_down(0) && clicked == 0:
+        if my < y:
+            set EDIT_SCROLL to editor_max(0 and EDIT_SCROLL - 8)
+        if my > y + height:
+            set EDIT_SCROLL to EDIT_SCROLL + 8
+        set EDIT_CARET to editor_hit(EDIT_TEXT and rows and mx - x and my - y + EDIT_SCROLL and 18)
+    if raylib_is_mouse_button_down(0) == 0:
+        set EDIT_DRAG to 0
+        set SELECT_DRAG to 0
+    if enabled && EDIT_FOCUS:
+        if command && raylib_is_key_pressed(65):
+            set EDIT_ANCHOR to 0
+            set EDIT_CARET to string_length(EDIT_TEXT)
+        if command && (raylib_is_key_pressed(67) || raylib_is_key_pressed(88)) && EDIT_CARET != EDIT_ANCHOR:
+            ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and editor_selected(EDIT_TEXT and EDIT_CARET and EDIT_ANCHOR))
+            if raylib_is_key_pressed(88):
+                editor_insert("")
+        if command && raylib_is_key_pressed(86):
+            editor_insert(editor_clipboard())
+        if command && raylib_is_key_pressed(90):
+            editor_history(shift)
+        if command && raylib_is_key_pressed(89):
+            editor_history(1)
+        set keys to [263,262,265,264,268,269]
+        set i to 0
+        repeat while i < length_list(keys):
+            if editor_key(get_list(keys and i)):
+                editor_move(get_list(keys and i) and shift and command and word and width)
+            set i to i + 1
+        if editor_key(259) || editor_key(261):
+            if EDIT_CARET == EDIT_ANCHOR:
+                if editor_key(259):
+                    set EDIT_ANCHOR to editor_previous(EDIT_TEXT and EDIT_CARET)
+                else:
+                    set EDIT_ANCHOR to editor_next(EDIT_TEXT and EDIT_CARET)
+            editor_insert("")
+        if shift && raylib_is_key_pressed(257):
+            editor_insert("\n")
+    else if command && SELECT_TEXT != "":
+        if raylib_is_key_pressed(65):
+            set SELECT_ANCHOR to 0
+            set SELECT_CARET to string_length(SELECT_TEXT)
+        if raylib_is_key_pressed(67) && SELECT_CARET != SELECT_ANCHOR:
+            ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and editor_selected(SELECT_TEXT and SELECT_CARET and SELECT_ANCHOR))
+    set code to raylib_get_char_pressed()
+    repeat while code > 0:
+        if enabled && EDIT_FOCUS && command == 0 && code >= 32:
+            editor_insert(chat_character(code))
+        set code to raylib_get_char_pressed()
+    if clicked || raylib_get_key_pressed() != 0:
+        set EDIT_BLINK to transport_now(native_system())
+    return EDIT_TEXT
+
+define editor_paint with text and rows and x and y and size and tint and anchor and caret and selected:
+    set i to 0
+    repeat while i < length_list(rows):
+        set row to get_list(rows and i)
+        set start to get_list(row and 0)
+        set finish to get_list(row and 1)
+        if selected && editor_max(anchor and caret) > start && editor_min(anchor and caret) < finish:
+            set a to editor_max(start and editor_min(anchor and caret))
+            set b to editor_min(finish and editor_max(anchor and caret))
+            set left to font_measure(substring(text and start and a - start) and size)
+            set span to editor_max(3 and font_measure(substring(text and a and b - a) and size))
+            raylib_draw_rectangle(x + left and y + i * (size + 9) and span and size + 5 and 4284117825)
+        font_draw(substring(text and start and finish - start) and x and y + i * (size + 9) and size and tint)
+        set i to i + 1
+    return y + length_list(rows) * (size + 9)
+
+define editor_draw with x and y and width and height and tint and caret_color:
+    set rows to layout_ranges(EDIT_TEXT and width and 18)
+    set line to editor_row(rows and EDIT_CARET)
+    if line * 27 < EDIT_SCROLL:
+        set EDIT_SCROLL to line * 27
+    if line * 27 + 23 > EDIT_SCROLL + height:
+        set EDIT_SCROLL to line * 27 + 23 - height
+    set EDIT_SCROLL to editor_max(0 and EDIT_SCROLL)
+    editor_paint(EDIT_TEXT and rows and x and y - EDIT_SCROLL and 18 and tint and EDIT_ANCHOR and EDIT_CARET and EDIT_FOCUS)
+    if EDIT_FOCUS && ((transport_now(native_system()) - EDIT_BLINK) / 500) % 2 == 0:
+        set row to get_list(rows and line)
+        set px to font_measure(substring(EDIT_TEXT and get_list(row and 0) and EDIT_CARET - get_list(row and 0)) and 18)
+        raylib_draw_rectangle(x + px and y + line * 27 - EDIT_SCROLL and 2 and 23 and caret_color)
+    return 0
+
+# Read-only selectable text uses the same lossless layout as the composer.
+define selectable_text with text and x and y and width and size and tint:
+    set rows to layout_ranges(text and width - 1 and size)
+    set mx to raylib_get_mouse_x()
+    set my to raylib_get_mouse_y()
+    set bottom to y + length_list(rows) * (size + 9)
+    set inside to mx >= x && mx <= x + width && my >= y && my < bottom && my >= 110 && my < raylib_get_screen_height() - 200
+    if inside:
+        ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetMouseCursor") and 2)
+    if raylib_is_mouse_button_pressed(0) && inside && EDIT_MENU == 0 && EDIT_MENU_USED == 0:
+        set SELECT_TEXT to text
+        set SELECT_ANCHOR to editor_hit(text and rows and mx - x and my - y and size)
+        set SELECT_CARET to SELECT_ANCHOR
+        set now to transport_now(native_system())
+        if now - SELECT_CLICK_TIME < 400 && SELECT_CARET == SELECT_CLICK_POS:
+            set bounds to editor_word(text and SELECT_CARET)
+            set SELECT_ANCHOR to get_list(bounds and 0)
+            set SELECT_CARET to get_list(bounds and 1)
+        set SELECT_CLICK_TIME to now
+        set SELECT_CLICK_POS to SELECT_CARET
+        set SELECT_DRAG to 1
+        set EDIT_FOCUS to 0
+    if SELECT_DRAG && raylib_is_mouse_button_down(0) && raylib_is_mouse_button_pressed(0) == 0 && string_equals(SELECT_TEXT and text):
+        set SELECT_CARET to editor_hit(text and rows and mx - x and my - y and size)
+    if raylib_is_mouse_button_pressed(1) && inside:
+        set EDIT_FOCUS to 0
+        if string_equals(SELECT_TEXT and text) == 0:
+            set SELECT_TEXT to text
+            set SELECT_ANCHOR to 0
+            set SELECT_CARET to string_length(text)
+        editor_menu_open(mx and my)
+    return editor_paint(text and rows and x and y and size and tint and SELECT_ANCHOR and SELECT_CARET and (EDIT_FOCUS == 0 && string_equals(SELECT_TEXT and text)))
+
+define editor_min with a and b:
+    if a < b:
+        return a
+    return b
+
+define editor_max with a and b:
+    if a > b:
+        return a
+    return b
+
+define editor_state:
+    set row to create_list()
+    append_list(row and EDIT_TEXT)
+    append_list(row and EDIT_CARET)
+    append_list(row and EDIT_ANCHOR)
+    return row
+
+define editor_word with text and position:
+    set start to position
+    set finish to position
+    repeat while start > 0 && get_character(text and start - 1) > 32:
+        set start to editor_previous(text and start)
+    repeat while finish < string_length(text) && get_character(text and finish) > 32:
+        set finish to editor_next(text and finish)
+    return [start,finish]
+
+define editor_menu_open with x and y:
+    set EDIT_MENU to 1
+    set EDIT_MENU_X to editor_min(x and raylib_get_screen_width() - 200)
+    set EDIT_MENU_Y to editor_max(10 and editor_min(y and raylib_get_screen_height() - 170))
+    return 0
+
+define editor_menu_draw:
+    if EDIT_MENU == 0:
+        return 0
+    raylib_draw_rectangle(EDIT_MENU_X and EDIT_MENU_Y and 190 and 160 and 4281218857)
+    set items to ["Copy", "Cut", "Paste", "Select all", "Undo"]
+    set i to 0
+    repeat while i < 5:
+        set tint to 4293848808
+        if EDIT_FOCUS == 0 && (i == 1 || i == 2 || i == 4):
+            set tint to 4286545791
+        font_draw(get_list(items and i) and EDIT_MENU_X + 14 and EDIT_MENU_Y + i * 32 + 7 and 16 and tint)
+        set i to i + 1
+    return 0

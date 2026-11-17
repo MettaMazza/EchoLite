@@ -1,0 +1,145 @@
+# Native libcurl multi transfer with bounded anonymous body/header storage.
+import "web_markup"
+import "document"
+import "native_calls"
+import "transport"
+
+define web_setopt with handle and option and value and kind:
+    set arguments to [handle,option,value]
+    set kinds to [1,0,kind]
+    return native_variadic_int(ep_dlsym(web_url_library() and "curl_easy_setopt") and 2 and arguments and kinds)
+
+define web_info with handle and option and pointer:
+    set arguments to [handle,option,pointer]
+    return native_variadic_int(ep_dlsym(web_url_library() and "curl_easy_getinfo") and 2 and arguments and [1,0,1])
+
+define web_file_size with file:
+    ep_dlcall1(ep_dlsym(native_system() and "fflush") and file)
+    set fd to ep_dlcall1(ep_dlsym(native_system() and "fileno") and file)
+    set info to alloc_bytes(144)
+    set size to 0 - 1
+    if ep_dlcall2(ep_dlsym(native_system() and "fstat") and fd and info) == 0:
+        set size to lease_integer(info and 96 and 8)
+    free_bytes(info)
+    return size
+
+define web_file_text with file and size returning Str:
+    set fd to ep_dlcall1(ep_dlsym(native_system() and "fileno") and file)
+    set data to alloc_bytes(size + 1)
+    set used to ep_dlcall4(ep_dlsym(native_system() and "pread") and fd and data and size and 0)
+    set result to ""
+    if used == size && document_utf8(data and used) && ep_dlcall3(ep_dlsym(native_system() and "memchr") and data and 0 and used) == 0:
+        set result to ptr_to_str(data)
+    free_bytes(data)
+    return result
+
+# One hop only. The caller validates and resolves each redirect explicitly.
+define web_transfer_request with db and url and etag and modified returning Str:
+    if web_url(url and "") == "":
+        return web_markup_error(db and "A credential-free HTTPS URL on port 443 is required")
+    if string_length(etag) > 4096 || string_length(modified) > 4096 || string_contains(etag and "\r") || string_contains(etag and "\n") || string_contains(modified and "\r") || string_contains(modified and "\n"):
+        return web_markup_error(db and "Invalid web cache validator")
+    set library to web_url_library()
+    set libc to native_system()
+    set body to ep_dlcall0(ep_dlsym(libc and "tmpfile"))
+    set headers to ep_dlcall0(ep_dlsym(libc and "tmpfile"))
+    set handle to ep_dlcall0(ep_dlsym(library and "curl_easy_init"))
+    set multi to ep_dlcall0(ep_dlsym(library and "curl_multi_init"))
+    set problem to ""
+    if body == 0 || headers == 0 || handle == 0 || multi == 0:
+        set problem to "Cannot allocate HTTPS transfer resources"
+    set request_headers to 0
+    set attached to 0
+    set response to 0
+    if problem == "":
+        set options to [[10002,str_to_ptr(url),1],[10001,body,1],[10029,headers,1],[10318,str_to_ptr("https"),1],[10004,str_to_ptr(""),1],[10018,str_to_ptr("EchoLite/0.1 native-web-reader"),1],[155,15000,2],[156,5000,2],[99,1,2],[64,1,2],[81,2,2],[30117,524288,2]]
+        set i to 0
+        repeat while i < length_list(options) && problem == "":
+            set option to get_list(options and i)
+            if web_setopt(handle and get_list(option and 0) and get_list(option and 1) and get_list(option and 2)) != 0:
+                set problem to "Cannot configure bounded HTTPS transfer"
+            set i to i + 1
+        set fields to ["Accept: text/html,text/plain","Accept-Encoding: identity"]
+        if etag != "":
+            append_list(fields and concat("If-None-Match: " and etag))
+        else if modified != "":
+            append_list(fields and concat("If-Modified-Since: " and modified))
+        set i to 0
+        repeat while i < length_list(fields) && problem == "":
+            set updated to ep_dlcall2(ep_dlsym(library and "curl_slist_append") and request_headers and get_list(fields and i))
+            if updated == 0:
+                set problem to "Cannot allocate HTTPS request headers"
+            else:
+                set request_headers to updated
+            set i to i + 1
+        if problem == "" && web_setopt(handle and 10023 and request_headers and 1) != 0:
+            set problem to "Cannot set HTTPS request headers"
+        if problem == "":
+            if ep_dlcall2(ep_dlsym(library and "curl_multi_add_handle") and multi and handle) != 0:
+                set problem to "Cannot begin HTTPS transfer"
+            else:
+                set attached to 1
+    set running to alloc_bytes(4)
+    set remaining to alloc_bytes(4)
+    set deadline to transport_now(libc) + 16000
+    set finished to 0
+    repeat while problem == "" && finished == 0:
+        if ep_dlcall2(ep_dlsym(library and "curl_multi_perform") and multi and running) != 0:
+            set problem to "HTTPS transfer processing failed"
+        set body_size to web_file_size(body)
+        set header_size to web_file_size(headers)
+        if body_size < 0 || body_size > 524288 || header_size < 0 || header_size > 65536:
+            set problem to "HTTPS response exceeds body/header byte budget"
+        if transport_now(libc) > deadline:
+            set problem to "HTTPS transfer deadline exceeded"
+        if lease_integer(running and 0 and 4) == 0:
+            set finished to 1
+            set message to ep_dlcall2(ep_dlsym(library and "curl_multi_info_read") and multi and remaining)
+            if message == 0:
+                set problem to "HTTPS transfer ended without a completion receipt"
+            else:
+                set code to lease_integer(message and 16 and 4)
+                if code != 0:
+                    set detail to ptr_to_str(ep_dlcall1(ep_dlsym(library and "curl_easy_strerror") and code))
+                    set problem to concat("HTTPS transfer failed: " and detail)
+        else if problem == "":
+            if ep_dlcall5(ep_dlsym(library and "curl_multi_poll") and multi and 0 and 0 and 50 and remaining) != 0:
+                set problem to "HTTPS transfer polling failed"
+    free_bytes(running)
+    free_bytes(remaining)
+    set result to ""
+    if problem == "":
+        set value to alloc_bytes(8)
+        if web_info(handle and 2097154 and value) != 0:
+            set problem to "Missing HTTPS response status"
+        else:
+            set response to lease_integer(value and 0 and 8)
+        free_bytes(value)
+        set body_size to web_file_size(body)
+        set header_size to web_file_size(headers)
+        set content to web_file_text(body and body_size)
+        set header_text to web_file_text(headers and header_size)
+        if string_length(content) != body_size || string_length(header_text) != header_size:
+            set problem to "HTTPS response is not faithful UTF-8 text"
+        else:
+            set params to [int_to_string(response),content,header_text]
+            set result to result_cache_scalar(db and "SELECT json_object('status','ok','http_status',CAST(? AS INTEGER),'body',?,'headers',?)" and params)
+    if attached == 1:
+        ep_dlcall2(ep_dlsym(library and "curl_multi_remove_handle") and multi and handle)
+    if handle != 0:
+        ep_dlcall1(ep_dlsym(library and "curl_easy_cleanup") and handle)
+    if request_headers != 0:
+        ep_dlcall1(ep_dlsym(library and "curl_slist_free_all") and request_headers)
+    if multi != 0:
+        ep_dlcall1(ep_dlsym(library and "curl_multi_cleanup") and multi)
+    if body != 0:
+        ep_dlcall1(ep_dlsym(libc and "fclose") and body)
+    if headers != 0:
+        ep_dlcall1(ep_dlsym(libc and "fclose") and headers)
+    if problem != "":
+        return web_markup_error(db and problem)
+    return result
+
+define web_transfer with db and url returning Str:
+    set result to web_transfer_request(db and url and "" and "")
+    return result

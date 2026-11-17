@@ -1,0 +1,36 @@
+# Run under the launcher's offline sandbox profile. No HTTP request or token is sent.
+import "../src/transport"
+
+define main:
+    set libc to native_system()
+    set address to alloc_bytes(16)
+    poke_byte(address and 0 and 16)
+    poke_byte(address and 1 and 2)
+    poke_byte(address and 2 and 1)
+    poke_byte(address and 3 and 187)
+    # TEST-NET-3 reserved documentation address; sandbox must deny before routing.
+    poke_byte(address and 4 and 203)
+    poke_byte(address and 6 and 113)
+    poke_byte(address and 7 and 1)
+    set fd to ep_dlcall3(ep_dlsym(libc and "socket") and 2 and 1 and 0)
+    native_fcntl_int(fd and 4 and 4)
+    set result to ep_dlcall3(ep_dlsym(libc and "connect") and fd and address and 16)
+    set error to transport_errno(libc)
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    if result == 0 || error != 1:
+        display concat("FAIL: external connect must be denied with EPERM; errno=" and int_to_string(error))
+        return 1
+    # Local inference service remains available without sending data.
+    poke_byte(address and 2 and 32)
+    poke_byte(address and 3 and 208)
+    poke_byte(address and 4 and 127)
+    poke_byte(address and 6 and 0)
+    set fd to ep_dlcall3(ep_dlsym(libc and "socket") and 2 and 1 and 0)
+    set result to ep_dlcall3(ep_dlsym(libc and "connect") and fd and address and 16)
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    free_bytes(address)
+    if result != 0:
+        display "FAIL: local inference service unavailable under offline profile"
+        return 1
+    display "PASS: external connection denied with EPERM; local inference connection allowed"
+    return 0

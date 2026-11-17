@@ -1,0 +1,63 @@
+import "../src/native_conversation"
+import "os"
+set checks to 0
+
+define catalog_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    set base to "{\"identity\":\"I am EchoLite\",\"input\":\"What is 7*9?\",\"context\":\"\",\"tool_trace\":[],\"tool_budget\":8,\"allowed_bases\":[[\"calculation\"]]}"
+    set compact to result_cache_scalar(db and "SELECT json_set(?,'$.tool_discovery','1')" and [base])
+    set full_schema to action_schemas(db and base)
+    set compact_schema to action_schemas(db and compact)
+    catalog_assert(string_length(compact_schema)<string_length(full_schema) and "default schema is smaller than the complete tool set")
+    catalog_assert(tool_family_enabled(db and compact and "system") == 0 and "system tools start deferred")
+    catalog_assert(action_validate(db and compact_schema and "{\"type\":\"tool\",\"name\":\"calculator\",\"expression\":\"7*9\"}") == "" and "calculator remains immediately available")
+    catalog_assert(action_validate(db and compact_schema and "{\"type\":\"tool\",\"name\":\"process_run\",\"argv\":[\"/usr/bin/true\"],\"cwd\":\"/private/tmp\",\"timeout_seconds\":5}") != "" and "deferred schemas cannot be called before selection")
+    set select_action to "{\"type\":\"tool\",\"name\":\"tool_select\",\"group\":\"system\"}"
+    catalog_assert(action_validate(db and compact_schema and select_action) == "" and "model can select a capability family")
+    catalog_assert(action_validate(db and compact_schema and "{\"type\":\"tool\",\"name\":\"tool_select\",\"group\":\"unrestricted\"}") != "" and "unknown capability family is rejected")
+    set decoded to action_decode(db and compact_schema and select_action)
+    set expression to result_cache_scalar(db and "SELECT json_extract(?,'$.expression')" and [decoded])
+    set receipt to tool_selection(db and expression)
+    catalog_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [receipt]) == "completed" and "selection returns a real configuration receipt")
+    set selected to result_cache_scalar(db and "SELECT json_set(?,'$.tool_trace',json_array(json_array('tool_select',?,?)))" and [compact,expression,receipt])
+    catalog_assert(tool_family_enabled(db and selected and "system") and "successful recorded selection reconstructs enabled family")
+    catalog_assert(action_validate(db and action_schemas(db and selected) and "{\"type\":\"tool\",\"name\":\"process_run\",\"argv\":[\"/usr/bin/true\"],\"cwd\":\"/private/tmp\",\"timeout_seconds\":5}") == "" and "selected family exposes executable schema")
+    catalog_assert(tool_family_enabled(db and selected and "documents") == 0 and "selecting one family does not enable unrelated tools")
+    set failed to result_cache_scalar(db and "SELECT json_set(?,'$.tool_trace',json_array(json_array('tool_select',?,'{\"outcome\":\"failed\"}')))" and [compact,expression])
+    catalog_assert(tool_family_enabled(db and failed and "system") == 0 and "failed configuration receipt cannot enable tools")
+    set ordinary_messages to conversation_messages(db and compact)
+    set system_messages to conversation_messages(db and selected)
+    catalog_assert(string_contains(ordinary_messages and "CAPABILITY CATALOG") and "compact catalog explains discovery")
+    catalog_assert(string_contains(ordinary_messages and "Use process_retry to deliberately") == 0 and "unselected detailed manual stays off context")
+    catalog_assert(string_contains(system_messages and "Use process_retry to deliberately") and "selected manual accompanies schema")
+    catalog_assert(string_contains(system_messages and "Use docx_read for Word") == 0 and "unrelated detailed manual remains unloaded")
+    catalog_assert(string_length(ordinary_messages)<string_length(conversation_messages(db and base)) and "ordinary prompt is smaller than all manuals")
+    set scheduled to result_cache_scalar(db and "SELECT json_set(?,'$.scheduled_task_id','4')" and [compact])
+    catalog_assert(tool_family_enabled(db and scheduled and "tasks") and "dispatched scheduled work retains task execution tools")
+    set browser to result_cache_scalar(db and "SELECT json_set(?,'$.temporary_browser_sessions',json('[{\"session_id\":\"A\"}]'))" and [compact])
+    catalog_assert(tool_family_enabled(db and browser and "system") and "browser cleanup cannot be hidden by discovery")
+    catalog_assert(tool_family_enabled(db and compact and "core") and "core tools always remain available")
+    set launch_request to result_cache_scalar(db and "SELECT json_set(?,'$.input','Open this file in TextEdit')" and [compact])
+    catalog_assert(tool_family_enabled(db and launch_request and "system") and "clear application launch request exposes system tools without another model call")
+    set document_request to result_cache_scalar(db and "SELECT json_set(?,'$.input','Read the attached PDF document')" and [compact])
+    catalog_assert(tool_family_enabled(db and document_request and "documents") and "document request exposes relevant extraction tools")
+    catalog_assert(tool_family_enabled(db and document_request and "system") == 0 and "document hint does not enable unrelated process tools")
+    catalog_assert(tool_family_hint("schedule a task" and "tasks") and "scheduled intent exposes task family")
+    catalog_assert(tool_family_hint("remember a correction" and "memory") and "memory intent exposes correction family")
+    set active to result_cache_scalar(db and "SELECT json_set(?,'$.active_working_records',1)" and [compact])
+    catalog_assert(tool_family_enabled(db and active and "tasks") and "persisted active work keeps checkpoint tools available")
+    set recalled to result_cache_scalar(db and "SELECT json_set(?,'$.tool_trace',json_array(json_array('memory_search','preference','{\"outcome\":\"completed\"}')))" and [compact])
+    catalog_assert(tool_family_enabled(db and recalled and "memory") and "successful recall exposes deeper memory and correction tools")
+    catalog_assert(tool_family_hint("Actually I prefer short updates from now on" and "memory") and "natural preference correction exposes memory tools")
+    display concat("Schema bytes full/compact: " and concat(int_to_string(string_length(full_schema)) and concat("/" and int_to_string(string_length(compact_schema)))))
+    display concat("Message bytes full/compact: " and concat(int_to_string(string_length(conversation_messages(db and base))) and concat("/" and int_to_string(string_length(ordinary_messages)))))
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " tool discovery checks"))
+    return 0

@@ -1,0 +1,38 @@
+import "../src/web_snapshot"
+import "os"
+set checks to 0
+
+define snapshot_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define http_fixture with db and status and headers and body returning Str:
+    set params to [int_to_string(status),headers,body]
+    return result_cache_scalar(db and "SELECT json_object('status','ok','http_status',CAST(? AS INTEGER),'headers',?,'body',?)" and params)
+
+define main:
+    set db to sql_open(":memory:")
+    set url to "https://example.org/source"
+    set response to http_fixture(db and 200 and "HTTP/2 200\r\nContent-Type: text/html; charset=UTF-8\r\nCache-Control: max-age=120\r\nETag: \"v1\"\r\n\r\n" and "<title>Fixture</title><p>Café MAPLE-173</p>")
+    set original to web_snapshot(db and url and response and "")
+    snapshot_assert(string_contains(original and "Café MAPLE-173") and "HTML source extracted")
+    snapshot_assert(result_cache_scalar(db and "SELECT length(json_extract(?,'$.content_sha256'))" and [original]) == "64" and "body digest retained")
+    snapshot_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.expires_at')>CAST(strftime('%s','now') AS INTEGER)" and [original]) == "1" and "fresh snapshot expiry")
+    set response to http_fixture(db and 304 and "HTTP/2 304\r\nCache-Control: no-cache\r\n\r\n" and "")
+    set updated to web_snapshot(db and url and response and original)
+    snapshot_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.revalidated')" and [updated]) == "1" and "304 revalidation disclosed")
+    snapshot_assert(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.content_sha256')" and [updated]) and result_cache_scalar(db and "SELECT json_extract(?,'$.content_sha256')" and [original])) and "304 retains same content digest")
+    snapshot_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.expires_at')<=CAST(strftime('%s','now') AS INTEGER)" and [updated]) == "1" and "no-cache response must revalidate")
+    snapshot_assert(string_contains(web_snapshot(db and url and response and "") and "error") and "304 without snapshot rejected")
+    snapshot_assert(string_contains(web_snapshot(db and "https://other.example/" and response and original) and "error") and "304 wrong URL rejected")
+    set response to http_fixture(db and 200 and "HTTP/2 200\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\n\r\n" and "new source")
+    set updated to web_snapshot(db and url and response and original)
+    snapshot_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.store')" and [updated]) == "0" and "no-store preserved for cache dispatcher")
+    set response to http_fixture(db and 200 and "HTTP/2 200\r\nContent-Type: application/octet-stream\r\n\r\n" and "binary")
+    snapshot_assert(string_contains(web_snapshot(db and url and response and "") and "error") and "unsupported media rejected")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native web snapshot checks"))
+    return 0

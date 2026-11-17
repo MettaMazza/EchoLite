@@ -1,0 +1,94 @@
+import "../src/chat_editor"
+import "../src/document"
+import "os"
+set checks to 0
+
+define editor_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    display concat("PASS: " and label)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    set RAYLIB_HANDLE to ep_dlopen(get_list(args and 1))
+    raylib_init_window(900 and 600 and "EchoLite editor validation")
+    font_init(RAYLIB_HANDLE)
+    set original_clipboard to editor_clipboard()
+    set EDIT_TEXT to "Hello 🌱 café"
+    set EDIT_CARET to 10
+    set EDIT_ANCHOR to 6
+    editor_assert(editor_selected(EDIT_TEXT and EDIT_CARET and EDIT_ANCHOR) == "🌱" and "select exact Unicode codepoint")
+    editor_assert(editor_previous(EDIT_TEXT and 10) == 6 && editor_next(EDIT_TEXT and 6) == 10 and "left and right preserve UTF-8 boundaries")
+    editor_assert(editor_insert("mint") && EDIT_TEXT == "Hello mint café" && EDIT_CARET == 10 && EDIT_ANCHOR == 10 and "typing replaces selection at caret")
+    editor_assert(editor_history(0) && EDIT_TEXT == "Hello 🌱 café" and "undo restores text and selection")
+    editor_assert(editor_history(1) && EDIT_TEXT == "Hello mint café" and "redo restores replacement")
+    set EDIT_CARET to 5
+    set EDIT_ANCHOR to 5
+    editor_insert(", local")
+    editor_assert(EDIT_TEXT == "Hello, local mint café" and "insertion edits the middle, not the tail")
+    set EDIT_ANCHOR to 7
+    set EDIT_CARET to 12
+    ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and editor_selected(EDIT_TEXT and EDIT_CARET and EDIT_ANCHOR))
+    editor_assert(editor_clipboard() == "local" and "real system clipboard copies only selection")
+    editor_insert("")
+    editor_assert(EDIT_TEXT == "Hello,  mint café" and "cut removes selected range")
+    editor_insert(editor_clipboard())
+    editor_assert(EDIT_TEXT == "Hello, local mint café" and "paste restores at caret")
+    set EDIT_CARET to string_length(EDIT_TEXT)
+    set EDIT_ANCHOR to EDIT_CARET
+    editor_insert("\r\nSecond line")
+    editor_assert(string_contains(EDIT_TEXT and "\nSecond line") && string_contains(EDIT_TEXT and "\r") == 0 and "clipboard newlines normalized")
+    editor_move(268 and 0 and 0 and 0 and 600)
+    editor_assert(EDIT_CARET == string_length("Hello, local mint café\n") and "Home reaches visual line start")
+    editor_move(269 and 1 and 0 and 0 and 600)
+    editor_assert(editor_selected(EDIT_TEXT and EDIT_CARET and EDIT_ANCHOR) == "Second line" and "Shift End selects line")
+    editor_move(263 and 0 and 0 and 0 and 600)
+    editor_assert(EDIT_CARET == EDIT_ANCHOR && EDIT_CARET == string_length("Hello, local mint café\n") and "left collapses selection to start")
+    set rows to layout_ranges("  café 🌱\nnext" and 600 and 18)
+    editor_assert(length_list(rows) == 2 && get_list(get_list(rows and 1) and 0) == 13 and "layout retains exact byte offsets and whitespace")
+    editor_assert(editor_hit("hello" and layout_ranges("hello" and 600 and 18) and 0 and 0 and 18) == 0 and "mouse hit starts at first character")
+    editor_assert(editor_hit("hello" and layout_ranges("hello" and 600 and 18) and 1000 and 0 and 18) == 5 and "mouse hit clamps to line end")
+    set word to editor_word("hello café world" and 8)
+    editor_assert(editor_selected("hello café world" and get_list(word and 1) and get_list(word and 0)) == "café" and "double-click word range preserves Unicode")
+    set long_text to "x"
+    repeat while string_length(long_text) < 6000:
+        set long_text to concat(long_text and long_text)
+    set EDIT_TEXT to substring(long_text and 0 and 6000)
+    set EDIT_CARET to 6000
+    set EDIT_ANCHOR to 6000
+    editor_assert(editor_insert("x") == 0 && string_length(EDIT_TEXT) == 6000 && EDIT_ERROR != "" and "limit rejects overflow with visible explanation")
+    set EDIT_ANCHOR to 0
+    editor_assert(editor_insert("replacement") && EDIT_TEXT == "replacement" and "replacement at limit counts removed selection")
+    set EDIT_TEXT to ""
+    set EDIT_CARET to 0
+    set EDIT_ANCHOR to 0
+    set i to 0
+    repeat while i < 80:
+        editor_insert("x")
+        set i to i + 1
+    editor_assert(length_list(EDIT_UNDO) == 64 and "undo history bounded for local memory budget")
+    set EDIT_TEXT to "Select and edit this message.\nUnicode works: café 🌱"
+    set EDIT_ANCHOR to 11
+    set EDIT_CARET to 28
+    set EDIT_FOCUS to 1
+    set EDIT_BLINK to transport_now(native_system())
+    set frame to 0
+    repeat while frame < 4:
+        raylib_begin_drawing()
+        raylib_clear_background(4279571986)
+        font_draw("EchoLite · native editing" and 50 and 40 and 25 and 4291429821)
+        editor_draw(50 and 130 and 750 and 100 and 4293848808 and 4291429821)
+        set SELECT_TEXT to "Conversation text can be highlighted and copied."
+        set SELECT_ANCHOR to 25
+        set SELECT_CARET to 36
+        editor_paint(SELECT_TEXT and layout_ranges(SELECT_TEXT and 750 and 18) and 50 and 300 and 18 and 4293848808 and SELECT_ANCHOR and SELECT_CARET and 1)
+        raylib_end_drawing()
+        set frame to frame + 1
+    ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "TakeScreenshot") and get_list(args and 2))
+    ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and original_clipboard)
+    raylib_close_window()
+    display concat("PASS: " and concat(int_to_string(checks) and " native chat editor checks"))
+    return 0

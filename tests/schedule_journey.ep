@@ -1,0 +1,58 @@
+# Inspect real UI/model/tool state; no synthetic task or model receipts.
+import "../src/result_cache"
+import "os"
+import "../src/transport"
+set checks to 0
+
+define journey_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set db to sql_open(get_list(args and 1))
+    sql_execute(db and "PRAGMA query_only=ON")
+    set mode to get_list(args and 2)
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM tasks" and []) == "1" and "one tracked task")
+    if mode == "completed":
+        journey_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs WHERE name='task_create' AND status='completed'" and []) == "1" and "actual model created task once")
+    if mode == "completed":
+        journey_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs WHERE name='task_schedule' AND status='completed'" and []) == "1" and "actual model armed schedule once")
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM task_schedules WHERE status='dispatched' AND turn_id IS NOT NULL" and []) == "1" and "one schedule automatically dispatched")
+    set turn to result_cache_scalar(db and "SELECT turn_id FROM task_schedules WHERE status='dispatched'" and [])
+    journey_assert(result_cache_scalar(db and "SELECT m.source FROM turns t JOIN memories m ON m.id=t.user_memory WHERE t.id=?" and [turn]) == "scheduled-event" and "scheduler event identified separately from user speech")
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs WHERE name='calculator' AND turn_id<?" and [turn]) == "0" and "creation turn did not prematurely execute task")
+    journey_assert(result_cache_scalar(db and "SELECT tool_limit||':'||model_limit FROM turn_limits WHERE turn_id=?" and [turn]) == "8:12" and "scheduled turn budgets enforced")
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM derivations d JOIN task_schedules s ON d.parent=s.memory JOIN turns t ON t.id=s.turn_id WHERE d.child=t.user_memory" and []) == "1" and "dispatch provenance linked")
+    if mode == "completed":
+        journey_assert(result_cache_scalar(db and "SELECT status FROM turns WHERE id=?" and [turn]) == "completed" and "scheduled chat completed")
+        journey_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN memories m ON m.id=r.observation WHERE r.turn_id=? AND r.name='calculator' AND r.status='completed' AND instr(m.body,'893')>0" and [turn]) == "1" and "real scheduled calculator result is 893")
+        journey_assert(result_cache_scalar(db and "SELECT status FROM tasks" and []) == "completed" and "original task completed")
+        journey_assert(result_cache_scalar(db and "SELECT count(*) FROM tasks t JOIN memories m ON m.id=t.current_memory JOIN tool_runs r ON r.observation=json_extract(m.body,'$.evidence') WHERE r.turn_id=? AND r.name='calculator' AND r.status='completed'" and [turn]) == "1" and "task success references actual calculator receipt")
+    else:
+        journey_assert(mode == "stopped" and "known journey mode")
+        journey_assert(result_cache_scalar(db and "SELECT status FROM turns WHERE id=?" and [turn]) == "abandoned" and "background turn acknowledged stop")
+        journey_assert(result_cache_scalar(db and "SELECT count(*) FROM tasks WHERE status='completed'" and []) == "0" and "interrupted task not reported complete")
+        set log to read_file(concat(path_dirname(path_dirname(get_list(args and 1))) and "/ui.txt"))
+        journey_assert(string_contains(log and "UI inserted a draft during scheduled thinking") and "actual scheduled generation received UI activity")
+        journey_assert(string_contains(log and "UI preserved the unsent draft") and "draft survives scheduled cancellation")
+        set prefix to "UI stop-to-idle milliseconds: "
+        set position to string_index_of(log and prefix)
+        journey_assert(position >= 0 and "stop latency recorded")
+        set tail to substring(log and position + string_length(prefix) and string_length(log) - position - string_length(prefix))
+        set end to string_index_of(tail and "\n")
+        set elapsed to transport_number(substring(tail and 0 and end) and 10 and 60000)
+        journey_assert(elapsed >= 0 && elapsed < 5000 and "scheduled work yields promptly to the user")
+
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM turns WHERE status='pending'" and []) == "0" and "no pending turn left")
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM memories WHERE source='scheduled-event'" and []) == "1" and "no duplicate scheduled event")
+    journey_assert(result_cache_scalar(db and "WITH RECURSIVE paths(a,b) AS (SELECT parent,child FROM derivations UNION SELECT p.a,d.child FROM paths p JOIN derivations d ON d.parent=p.b) SELECT count(*) FROM paths WHERE a=b" and []) == "0" and "memory provenance remains acyclic")
+    journey_assert(result_cache_scalar(db and "PRAGMA integrity_check" and []) == "ok" and "integrity check")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " actual scheduled UI journey checks"))
+    return 0

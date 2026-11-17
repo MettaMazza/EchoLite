@@ -1,0 +1,80 @@
+# Persistent exact inference results, scoped by runtime identity and forgetting epoch.
+import "sql"
+import "hash"
+import "json"
+import "string"
+
+define result_cache_error with text returning Str:
+    set values to [create_json_string("error"),create_json_string(text)]
+    set result to json_stringify(create_json_object(["status","text"] and values))
+    return result
+
+define result_cache_scalar with db and statement and params returning Str:
+    set rows to sql_query_params(db and statement and params)
+    if length_list(rows) != 1:
+        return ""
+    return get_list(get_list(rows and 0) and 0)
+
+define result_cache_key with db and namespace and request returning Str:
+    set material to result_cache_scalar(db and "SELECT json_array(?,?)" and [namespace,request])
+    return sha256(material)
+
+define result_cache_epoch with db and epoch:
+    if epoch == "":
+        return 0
+    set current to result_cache_scalar(db and "SELECT value FROM metadata WHERE key='cache_epoch'" and [])
+    return string_equals(current and epoch)
+
+define result_cache_get with db and namespace and request and epoch returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot acquire inference cache transaction")
+    if result_cache_epoch(db and epoch) == 0:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Memory changed through forgetting; rebuild the request")
+    set key to result_cache_key(db and namespace and request)
+    set rows to sql_query_params(db and "SELECT payload,digest FROM response_cache WHERE key=? AND epoch=?" and [key,epoch])
+    set result to ""
+    set rc to 101
+    if length_list(rows) == 1:
+        set row to get_list(rows and 0)
+        set payload to get_list(row and 0)
+        set valid to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.status')='ok' AND json_type(?,'$.text')='text' ELSE 0 END" and [payload,payload,payload])
+        if string_equals(sha256(payload) and get_list(row and 1)) && valid == "1":
+            set result to payload
+            set rc to sql_execute_params(db and "UPDATE response_cache SET used=(SELECT coalesce(max(used),0)+1 FROM response_cache) WHERE key=?" and [key])
+        else:
+            set rc to sql_execute_params(db and "DELETE FROM response_cache WHERE key=?" and [key])
+    if rc != 101:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Cannot update inference cache")
+    if sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Cannot commit inference cache read")
+    return result
+
+define result_cache_put with db and namespace and request and epoch and payload returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot acquire inference cache transaction")
+    if result_cache_epoch(db and epoch) == 0:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Memory forgotten during inference; result discarded")
+    set valid to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.status')='ok' AND json_type(?,'$.text')='text' ELSE 0 END" and [payload,payload,payload])
+    if valid != "1" || string_length(payload) > 1048576:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Incomplete or oversized result cannot enter inference cache")
+    set key to result_cache_key(db and namespace and request)
+    set rc to sql_execute_params(db and "INSERT OR REPLACE INTO response_cache(key,epoch,payload,digest,bytes,used) VALUES(?,?,?,?,?,(SELECT coalesce(max(used),0)+1 FROM response_cache))" and [key,epoch,payload,sha256(payload),int_to_string(string_length(payload))])
+    if rc != 101:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Cannot persist inference result")
+    set over to result_cache_scalar(db and "SELECT count(*)>1024 OR coalesce(sum(bytes),0)>67108864 FROM response_cache" and [])
+    repeat while over == "1":
+        set rc to sql_execute_params(db and "DELETE FROM response_cache WHERE key=(SELECT key FROM response_cache ORDER BY used,key LIMIT 1)" and [])
+        if rc != 101:
+            sql_execute(db and "ROLLBACK")
+            return result_cache_error("Cannot enforce inference cache limit")
+        set over to result_cache_scalar(db and "SELECT count(*)>1024 OR coalesce(sum(bytes),0)>67108864 FROM response_cache" and [])
+    if sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Cannot commit inference result")
+    return payload

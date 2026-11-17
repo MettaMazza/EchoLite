@@ -1,0 +1,70 @@
+# Native macOS selection and non-blocking EP image import for the composer.
+import "pdf_native"
+import "native_process"
+
+define attachment_pick returning Str:
+    set PDF_OBJC to ep_dlopen("/usr/lib/libobjc.A.dylib")
+    set appkit to ep_dlopen("/System/Library/Frameworks/AppKit.framework/AppKit")
+    if PDF_OBJC == 0 || appkit == 0:
+        return ""
+    set get_class to ep_dlsym(PDF_OBJC and "objc_getClass")
+    set pool to pdf_message(pdf_message(ep_dlcall1(get_class and "NSAutoreleasePool") and "alloc") and "init")
+    set panel to pdf_message(ep_dlcall1(get_class and "NSOpenPanel") and "openPanel")
+    pdf_argument(panel and "setCanChooseFiles:" and 1)
+    pdf_argument(panel and "setCanChooseDirectories:" and 0)
+    pdf_argument(panel and "setAllowsMultipleSelection:" and 0)
+    set strings to ep_dlcall1(get_class and "NSString")
+    set title to pdf_argument(strings and "stringWithUTF8String:" and "Attach an image")
+    pdf_argument(panel and "setTitle:" and title)
+    set prompt to pdf_argument(strings and "stringWithUTF8String:" and "Attach")
+    pdf_argument(panel and "setPrompt:" and prompt)
+    set types to pdf_message(ep_dlcall1(get_class and "NSMutableArray") and "array")
+    set extensions to ["png","jpg","jpeg","heic","heif"]
+    set i to 0
+    repeat while i < length_list(extensions):
+        pdf_argument(types and "addObject:" and pdf_argument(strings and "stringWithUTF8String:" and get_list(extensions and i)))
+        set i to i + 1
+    pdf_argument(panel and "setAllowedFileTypes:" and types)
+    set path to ""
+    if pdf_message(panel and "runModal") == 1:
+        set url to pdf_message(panel and "URL")
+        if url != 0:
+            set value to pdf_message(url and "path")
+            if value != 0:
+                set path to ptr_to_str(pdf_message(value and "UTF8String"))
+    pdf_message(pool and "drain")
+    return path
+
+define attachment_begin with core and project and path:
+    set file to ep_dlcall0(ep_dlsym(native_system() and "tmpfile"))
+    set pid to 0
+    if file != 0:
+        set fd to ep_dlcall1(ep_dlsym(native_system() and "fileno") and file)
+        native_fcntl_int(fd and 2 and 1)
+        set pid to process_launch(core and ["image-import",project,path] and fd)
+        if pid == 0:
+            ep_dlcall1(ep_dlsym(native_system() and "fclose") and file)
+            set file to 0
+    return [pid,file]
+
+define attachment_finish with db and project and file and code returning Str:
+    if file == 0:
+        return pdf_error(db and "Unable to start image import")
+    set fd to ep_dlcall1(ep_dlsym(native_system() and "fileno") and file)
+    set bytes to alloc_bytes(4097)
+    set count to ep_dlcall4(ep_dlsym(native_system() and "pread") and fd and bytes and 4096 and 0)
+    set text to ""
+    if count > 0 && count < 4096:
+        set text to string_trim(ptr_to_str(bytes))
+    free_bytes(bytes)
+    ep_dlcall1(ep_dlsym(native_system() and "fclose") and file)
+    if code != 0:
+        if text == "":
+            set text to "Image import failed; try a supported still image under 8 MiB"
+        return pdf_error(db and text)
+    if transport_number(text and 10 and 999999999999999999) < 1:
+        return pdf_error(db and "Image import returned an invalid attachment")
+    set id to result_cache_scalar(db and "SELECT a.memory FROM image_assets a JOIN memories m ON m.id=a.memory WHERE a.memory=? AND a.project=? AND m.project=a.project AND m.status='active'" and [text,project])
+    if id == "":
+        return pdf_error(db and "Imported image is no longer available")
+    return result_cache_scalar(db and "SELECT json_object('status','ok','memory',?)" and [id])

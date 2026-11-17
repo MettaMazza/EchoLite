@@ -1,0 +1,59 @@
+# Durable one-shot task dispatch. Call mutations inside the core transaction.
+import "result_cache"
+
+define schedule_init with db:
+    return sql_execute(db and "CREATE TABLE IF NOT EXISTS task_schedules(memory INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,task INTEGER NOT NULL REFERENCES tasks(memory) ON DELETE CASCADE,task_revision INTEGER NOT NULL,due_at INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN ('armed','cancelled','dispatched')),turn_id INTEGER REFERENCES turns(id) ON DELETE SET NULL); CREATE UNIQUE INDEX IF NOT EXISTS schedule_one_armed ON task_schedules(task) WHERE status='armed'; CREATE INDEX IF NOT EXISTS schedule_due ON task_schedules(status,due_at); CREATE TRIGGER IF NOT EXISTS schedule_task_changed AFTER UPDATE OF revision,status ON tasks BEGIN UPDATE task_schedules SET status='cancelled' WHERE task=new.memory AND status='armed'; END;")
+
+define schedule_error with db and message returning Str:
+    if db == 0:
+        return ""
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','outcome','failed','text',?)" and [message])
+    return result
+
+define schedule_result with db and project returning Str:
+    if db == 0:
+        return ""
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','outcome','completed','text','Armed schedules and recent history (up to 20); due work runs while EchoLite is open and idle. Dispatched does not mean the task succeeded.','schedules',json((SELECT coalesce(json_group_array(json_object('schedule_id',s.memory,'task_id',s.task,'task_revision',s.task_revision,'due_at_utc',strftime('%Y-%m-%dT%H:%M:%SZ',s.due_at,'unixepoch'),'status',s.status,'turn_id',s.turn_id)), '[]') FROM (SELECT s.* FROM task_schedules s JOIN tasks t ON t.memory=s.task WHERE t.project=? ORDER BY s.status='armed' DESC,s.memory DESC LIMIT 20) s)))" and [project])
+    return result
+
+define schedule_set with db and project and task and revision and delay and origin returning Str:
+    if result_cache_scalar(db and "SELECT length(?) BETWEEN 1 AND 8 AND ? NOT GLOB '*[^0-9]*' AND CAST(? AS INTEGER) BETWEEN 0 AND 31536000 AND EXISTS(SELECT 1 FROM tasks WHERE memory=? AND project=? AND revision=? AND status='planned') AND EXISTS(SELECT 1 FROM memories WHERE id=? AND project=? AND status='active')" and [delay,delay,delay,task,project,revision,origin,project]) != "1":
+        return schedule_error(db and "Schedule needs a planned task at its current revision, an active source in this project, and delay_seconds 0-31536000.")
+    if result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM task_schedules WHERE task=? AND status='armed')" and [task]) == "1":
+        return schedule_error(db and "Task already has an armed schedule; cancel it explicitly before replacing it.")
+    set body to result_cache_scalar(db and "SELECT json_object('task_id',?,'task_revision',?,'delay_seconds',CAST(? AS INTEGER),'due_at_utc',strftime('%Y-%m-%dT%H:%M:%SZ','now','+'||?||' seconds'),'kind','one-shot scheduled task')" and [task,revision,delay,delay])
+    if sql_execute_params(db and "INSERT INTO memories(layer,project,source,body) VALUES('episodic',?,'task-schedule',?)" and [project,body]) != 101:
+        return schedule_error(db and "Cannot record schedule")
+    set identifier to result_cache_scalar(db and "SELECT last_insert_rowid()" and [])
+    if sql_execute_params(db and "INSERT INTO task_schedules(memory,task,task_revision,due_at,status) VALUES(?,?,CAST(? AS INTEGER),CAST(strftime('%s','now') AS INTEGER)+CAST(? AS INTEGER),'armed')" and [identifier,task,revision,delay]) != 101:
+        return schedule_error(db and "Cannot arm schedule")
+    sql_execute_params(db and "INSERT OR IGNORE INTO derivations(parent,child) VALUES(?,?),(?,?)" and [origin,identifier,task,identifier])
+    sql_execute_params(db and "INSERT OR IGNORE INTO derivations(parent,child) SELECT current_memory,? FROM tasks WHERE memory=?" and [identifier,task])
+    return schedule_result(db and project)
+
+define schedule_cancel with db and project and identifier returning Str:
+    if result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM task_schedules s JOIN tasks t ON t.memory=s.task WHERE s.memory=? AND t.project=? AND s.status IN ('armed','cancelled'))" and [identifier,project]) != "1":
+        return schedule_error(db and "No cancellable schedule in this project. A dispatched turn must be stopped using its turn ID.")
+    sql_execute_params(db and "UPDATE task_schedules SET status='cancelled' WHERE memory=? AND status='armed'" and [identifier])
+    return schedule_result(db and project)
+
+define schedule_due with db and project returning Str:
+    if db == 0:
+        return ""
+    set result to result_cache_scalar(db and "SELECT s.memory FROM task_schedules s JOIN tasks t ON t.memory=s.task WHERE t.project=? AND t.status='planned' AND t.revision=s.task_revision AND s.status='armed' AND s.due_at<=CAST(strftime('%s','now') AS INTEGER) AND NOT EXISTS(SELECT 1 FROM turns WHERE status='pending') ORDER BY s.due_at,s.memory LIMIT 1" and [project])
+    return result
+
+define schedule_claim with db and identifier and project and turn and input:
+    sql_execute_params(db and "UPDATE task_schedules SET status='dispatched',turn_id=? WHERE memory=? AND status='armed' AND due_at<=CAST(strftime('%s','now') AS INTEGER) AND EXISTS(SELECT 1 FROM tasks t WHERE t.memory=task_schedules.task AND t.project=? AND t.status='planned' AND t.revision=task_schedules.task_revision) AND EXISTS(SELECT 1 FROM turns WHERE id=? AND project=? AND status='pending' AND user_memory=?) AND NOT EXISTS(SELECT 1 FROM turns WHERE status='pending' AND id<>?)" and [turn,identifier,project,turn,project,input,turn])
+    if result_cache_scalar(db and "SELECT changes()" and []) != "1":
+        return 0
+    sql_execute_params(db and "UPDATE memories SET source='scheduled-event' WHERE id=?" and [input])
+    sql_execute_params(db and "INSERT INTO derivations(parent,child) VALUES(?,?)" and [identifier,input])
+    return 1
+
+# Only the active task checkpoint can end a scheduled execution phase.
+define schedule_needs_work with db and turn:
+    if db == 0:
+        return 1
+    set pending to result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM task_schedules s JOIN tasks t ON t.memory=s.task WHERE s.turn_id=? AND s.status='dispatched' AND t.status IN ('planned','running'))" and [turn])
+    return pending == "1"

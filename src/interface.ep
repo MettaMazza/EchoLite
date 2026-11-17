@@ -1,0 +1,644 @@
+import "os"
+import "string"
+import "fs"
+import "sql"
+import "../stdlib/bridge/raylib"
+import "text_layout"
+import "chat_view"
+import "chat_editor"
+import "ui_attachment"
+import "ui_schedule"
+import "network_policy"
+
+# Native EchoLite interface. All application and interaction code is Ernos Plain.
+# raylib is a third-party graphics dependency, accessed through Ernos bindings.
+
+define color with red and green and blue:
+    return red + green * 256 + blue * 65536 + 4278190080
+
+define panel with x and y and width and height and tint:
+    raylib_draw_rectangle(x + 8 and y and width - 16 and height and tint)
+    raylib_draw_rectangle(x and y + 8 and width and height - 16 and tint)
+    raylib_draw_rectangle(x + 3 and y + 3 and width - 6 and height - 6 and tint)
+    return 0
+
+define label with text and x and y and size and tint:
+    font_draw(text and x and y and size and tint)
+    return 0
+
+define hit with x and y and width and height:
+    set mx to raylib_get_mouse_x()
+    set my to raylib_get_mouse_y()
+    return mx >= x && mx <= x + width && my >= y && my <= y + height
+
+define wrap_text with text and x and y and width and size and tint:
+    return selectable_text(text and x and y and width and size and tint)
+
+define main:
+    set args to get_args()
+    set resolved to alloc_bytes(4096)
+    set full_path to ep_dlcall2(ep_dlsym(native_system() and "realpath") and get_list(args and 0) and resolved)
+    if full_path == 0:
+        return 1
+    set root to path_dirname(path_dirname(ptr_to_str(resolved)))
+    free_bytes(resolved)
+    set core to concat(root and "/bin/echolite-core")
+    set project to get_env("ECHOLITE_PROJECT")
+    if project == "":
+        set project to "local"
+
+    set home to get_env("ECHOLITE_HOME")
+    if home == "":
+        set home to concat(root and "/data")
+    if is_directory(home) == 0:
+        ep_dlcall2(ep_dlsym(native_system() and "mkdir") and home and 448)
+    ep_dlcall3(ep_dlsym(native_system() and "setenv") and "ECHOLITE_HOME" and home and 1)
+    set child to 0
+    set operation to ""
+    set child to process_start(core and ["init"])
+    set operation to "init"
+    set db to 0
+
+    if file_exists(concat(home and "/memory.sqlite3")) == 1:
+        set db to sql_open(concat(home and "/memory.sqlite3"))
+        sql_execute(db and "PRAGMA query_only=ON; PRAGMA busy_timeout=1000;")
+    set library to get_env("ECHOLITE_GRAPHICS_LIBRARY")
+    if library == "":
+        set library to concat(root and "/models/runtime/libraylib.dylib")
+    set RAYLIB_HANDLE to ep_dlopen(library)
+    if RAYLIB_HANDLE == 0:
+        display "Unable to load native graphics library."
+        return 1
+    set flags to ep_dlsym(RAYLIB_HANDLE and "SetConfigFlags")
+    # FLAG_WINDOW_RESIZABLE (4); never set FLAG_WINDOW_HIDDEN (128) for desktop launch.
+    ep_dlcall1(flags and 4)
+    raylib_init_window(1180 and 800 and "EchoLite")
+    ep_dlcall2(ep_dlsym(RAYLIB_HANDLE and "SetWindowMinSize") and 900 and 600)
+    raylib_set_target_fps(30)
+    font_init(RAYLIB_HANDLE)
+    set escape to ep_dlsym(RAYLIB_HANDLE and "SetExitKey")
+    ep_dlcall1(escape and 0)
+    set bg to color(18 and 22 and 21)
+    set sidebar to color(14 and 18 and 17)
+    set surface to color(27 and 33 and 30)
+    set border to color(42 and 51 and 46)
+    set mint to color(189 and 229 and 201)
+    set white to color(232 and 238 and 234)
+    set muted to color(143 and 158 and 149)
+    set attachment to ""
+    set attachment_path to ""
+    set import_path to ""
+    set import_file to 0
+    set submitted_attachment to ""
+    set submitted_attachment_path to ""
+    set exercise_image to ""
+    set exercise_imported to 0
+    set stop_child to 0
+    set stop_started to 0
+    set stop_requested to 0
+    set active_turn to ""
+    set turn_floor to "0"
+    set exercise_stop to 0
+    set submitted to ""
+    set exercise to ""
+    set exercise_sent to 0
+    set exercise_finished to 0
+    set exercise_live_seen to 0
+    set exercise_draft_seen to 0
+    set draft to ""
+    set thinking_open to ""
+    set selected to ""
+    set sessions to create_list()
+    set turns to create_list()
+    set image_turns to create_list()
+    set scroll to 0
+    set body_height to 0
+    set follow_bottom to 1
+    set notice to ""
+    set current_session to ""
+
+    set section to "chat"
+    set scheduled_run to 0
+    set last_activity to transport_now(native_system())
+    set last_dispatch to last_activity - 60000
+    set task_scroll to 0
+    set task_rows to create_list()
+    set exercise_schedule to 0
+    set exercise_schedule_done to 0
+    set exercise_schedule_interrupt to 0
+    set frames to 0
+    set args to get_args()
+    set capture to ""
+    if length_list(args) > 1:
+        set capture to get_list(args and 1)
+        if capture == "--exercise" && length_list(args) == 4:
+            set exercise to get_list(args and 2)
+            set draft to exercise
+            set capture to get_list(args and 3)
+    if length_list(args) == 5 && get_list(args and 1) == "--exercise-image":
+        set exercise_image to get_list(args and 2)
+        set exercise to get_list(args and 3)
+        set draft to exercise
+        set capture to get_list(args and 4)
+    if length_list(args) == 4 && get_list(args and 1) == "--exercise-stop":
+        set exercise_stop to 1
+        set exercise to get_list(args and 2)
+        set draft to exercise
+        set capture to get_list(args and 3)
+    if length_list(args) == 4 && (get_list(args and 1) == "--exercise-schedule" || get_list(args and 1) == "--exercise-schedule-stop"):
+        set exercise_schedule to 1
+        if get_list(args and 1) == "--exercise-schedule-stop":
+            set exercise_schedule_interrupt to 1
+        set exercise to get_list(args and 2)
+        set draft to exercise
+        set capture to get_list(args and 3)
+    if length_list(args) == 3 && get_list(args and 1) == "--exercise-due-stop":
+        set exercise_schedule to 1
+        set exercise_schedule_interrupt to 1
+        set exercise to "Existing scheduled task restart exercise"
+        set exercise_sent to 1
+        set exercise_finished to 1
+        set capture to get_list(args and 2)
+    if length_list(args) == 3 && get_list(args and 1) == "--tasks":
+        set section to "tasks"
+        set capture to get_list(args and 2)
+    set runtime_ready to 0
+    set runtime_child to 0
+    set token_path to get_env("ECHOLITE_NATIVE_TOKEN_FILE")
+    if token_path == "":
+        set token_path to concat(home and "/native-runtime.token")
+        ep_dlcall3(ep_dlsym(native_system() and "setenv") and "ECHOLITE_NATIVE_TOKEN_FILE" and token_path and 1)
+    if capture != "" && exercise == "":
+        set runtime_ready to 1
+    else:
+        set runtime_child to process_start(concat(root and "/bin/echolite-runtime") and [root,home,token_path])
+        if runtime_child == 0:
+            set runtime_ready to 0 - 1
+            set notice to "Unable to start the native runtime manager."
+    repeat while raylib_window_should_close() == 0:
+        ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetMouseCursor") and 0)
+        set width to raylib_get_screen_width()
+        set height to raylib_get_screen_height()
+        set left to 286
+        set content_width to width - 342
+        if runtime_child > 0:
+            set runtime_exit to process_poll(runtime_child)
+            if runtime_exit != 0 - 1:
+                set runtime_child to 0
+                if runtime_exit == 0:
+                    set runtime_ready to 1
+                    set notice to ""
+                else:
+                    set runtime_ready to 0 - 1
+                    set notice to "Local model startup needs attention. See native-runtime.log in your state folder."
+                    if exercise != "":
+                        display notice
+                        raylib_close_window()
+                        return 1
+        if stop_child > 0:
+            set stop_exit to process_poll(stop_child)
+            if stop_exit != 0 - 1:
+                set stop_child to 0
+                if stop_exit != 0:
+                    set notice to "Stop request finished; checking the saved turn."
+        if child > 0:
+            set exit_code to process_poll(child)
+            if exit_code != 0 - 1:
+                set child to 0
+                if operation == "image-import":
+                    set imported to attachment_finish(db and project and import_file and exit_code)
+                    set import_file to 0
+                    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [imported]) == "ok":
+                        set attachment to result_cache_scalar(db and "SELECT json_extract(?,'$.memory')" and [imported])
+                        set attachment_path to import_path
+                        set exercise_imported to 1
+                        set notice to ""
+                    else:
+                        set notice to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [imported])
+                        if exercise_image != "":
+                            display notice
+                            raylib_close_window()
+                            return 1
+                set was_stopped to 0
+                if operation == "chat":
+                    set exercise_finished to 1
+                    if db != 0 && active_turn != "":
+                        set was_stopped to result_cache_scalar(db and "SELECT status FROM turns WHERE id=? AND project=?" and [active_turn,project]) == "abandoned"
+                if exit_code != 0:
+                    if operation == "chat" && was_stopped == 0 && scheduled_run == 0:
+                        set draft to submitted
+                        set attachment to submitted_attachment
+                        set attachment_path to submitted_attachment_path
+                    if operation != "image-import":
+                        set notice to concat("The local operation stopped (exit " and concat(int_to_string(exit_code) and "). Your draft and saved conversation are retained."))
+                else:
+                    if operation != "image-import":
+                        set notice to ""
+                if was_stopped:
+                    set notice to "Stopped. Conversation saved; completed tool effects remain."
+                    display "UI confirmed abandoned turn and retained conversation"
+                    if stop_started > 0:
+                        display concat("UI stop-to-idle milliseconds: " and int_to_string(transport_now(native_system()) - stop_started))
+                if exit_code != 0 && operation == "chat" && exercise != "" && was_stopped == 0:
+                    display notice
+                    raylib_close_window()
+                    return 1
+                if operation == "new":
+                    set selected to ""
+                if scheduled_run:
+                    set scheduled_run to 0
+                    set exercise_schedule_done to 1
+                    set last_activity to transport_now(native_system())
+                    if was_stopped:
+                        set notice to "Scheduled work stopped. Your draft is retained; inspect Tasks before rescheduling."
+                        if exercise_schedule_interrupt == 2 && draft == "User draft preserved while scheduled work stops.":
+                            display "UI preserved the unsent draft after scheduled interruption"
+                set operation to ""
+        if frames % 15 == 0:
+            if db == 0 && file_exists(concat(home and "/memory.sqlite3")) == 1:
+                set db to sql_open(concat(home and "/memory.sqlite3"))
+                sql_execute(db and "PRAGMA query_only=ON; PRAGMA busy_timeout=100;")
+            if db != 0:
+                set sessions to chat_sessions(db and project)
+                set task_rows to ui_schedule_rows(db and project)
+                set current_session to result_cache_scalar(db and "SELECT memory FROM sessions WHERE project=? AND closed IS NULL" and [project])
+                if selected == "":
+                    set selected to current_session
+                set turns to chat_turns(db and selected)
+                set image_turns to sql_query_params(db and "SELECT i.turn_id,a.path FROM turn_images i JOIN image_assets a ON a.memory=i.image JOIN session_turns s ON s.turn_id=i.turn_id WHERE s.session=? AND a.project=?" and [selected,project])
+        set wheel to chat_wheel(RAYLIB_HANDLE)
+        if wheel != 0 && section == "chat":
+            set scroll to scroll - wheel
+            set follow_bottom to 0
+        if raylib_is_key_pressed(266):
+            set scroll to scroll - 260
+            set follow_bottom to 0
+        if raylib_is_key_pressed(267):
+            set scroll to scroll + 260
+        if scroll < 0:
+            set scroll to 0
+        set clicked to raylib_is_mouse_button_pressed(0)
+        set user_activity to clicked || wheel != 0 || raylib_is_key_pressed(259) || raylib_is_key_pressed(257) || raylib_is_key_down(343) || raylib_is_key_pressed(266) || raylib_is_key_pressed(267)
+        if wheel != 0 && section == "tasks":
+            set task_scroll to task_scroll - wheel
+        if task_scroll < 0:
+            set task_scroll to 0
+        if user_activity:
+            set last_activity to transport_now(native_system())
+
+
+        if clicked == 1:
+            if hit(24 and 104 and 208 and 46) && child == 0 && stop_child == 0:
+                set child to process_start(core and ["session-start",project,"New conversation"])
+                set operation to "new"
+                set draft to ""
+                set attachment to ""
+                set attachment_path to ""
+                set section to "chat"
+                set follow_bottom to 1
+            if hit(24 and height - 214 and 208 and 38):
+                set section to "tasks"
+            if hit(24 and height - 168 and 208 and 38):
+                set section to "memory"
+            if hit(24 and height - 122 and 208 and 38):
+                set section to "identity"
+            set si to 0
+            repeat while si < length_list(sessions):
+                if hit(18 and 214 + si * 43 and 220 and 40) && 214 + si * 43 < height - 256:
+                    set selected to get_list(get_list(sessions and si) and 0)
+                    set turns to chat_turns(db and selected)
+                    set section to "chat"
+                    set follow_bottom to 1
+                set si to si + 1
+        set choose_image to clicked && hit(left + 38 and height - 108 and 119 and 27)
+        if exercise_image != "" && exercise_imported == 0 && frames > 3 && child == 0 && stop_child == 0 && db != 0:
+            set choose_image to 1
+        if choose_image && section == "chat" && child == 0 && stop_child == 0 && db != 0 && (selected == "" || string_equals(selected and current_session)):
+            set chosen to exercise_image
+            if chosen == "":
+                set chosen to attachment_pick()
+            if chosen != "":
+                set pending to attachment_begin(core and project and chosen)
+                set child to get_list(pending and 0)
+                set import_file to get_list(pending and 1)
+                if child > 0:
+                    set import_path to chosen
+                    set operation to "image-import"
+                    set notice to "Adding image..."
+                else:
+                    set notice to "Unable to start image import"
+        if clicked && child == 0 && stop_child == 0 && attachment != "" && hit(left + content_width - 58 and height - 220 and 28 and 28):
+            set attachment to ""
+            set attachment_path to ""
+        set previous_draft to draft
+        set draft to editor_handle(draft and left + 44 and height - 157 and content_width - 140 and 54 and (section == "chat"))
+        if string_equals(previous_draft and draft) == 0:
+            set user_activity to 1
+            set last_activity to transport_now(native_system())
+        if EDIT_MENU_USED:
+            set clicked to 0
+        set send_requested to EDIT_FOCUS && raylib_is_key_pressed(257) && raylib_is_key_down(340) == 0 && raylib_is_key_down(344) == 0
+        if exercise != "" && (exercise_image == "" || exercise_imported == 1) && exercise_sent == 0 && frames > 3 && db != 0 && child == 0 && stop_child == 0 && runtime_ready == 1:
+            set send_requested to 1
+            set exercise_sent to 1
+        set stop_clicked to 0
+        if clicked && hit(width - 119 and height - 126 and 43 and 38):
+            if child > 0 && operation == "chat":
+                set stop_clicked to 1
+            else:
+                set send_requested to 1
+        if exercise_stop && exercise_live_seen && stop_requested == 0:
+            set stop_clicked to 1
+        if scheduled_run && exercise_schedule_interrupt == 1 && exercise_live_seen:
+            set draft to "User draft preserved while scheduled work stops."
+            set user_activity to 1
+            set exercise_schedule_interrupt to 2
+            display "UI inserted a draft during scheduled thinking through the activity cancellation path"
+        if scheduled_run && user_activity:
+            set stop_clicked to 1
+        if child > 0 && operation == "chat" && db != 0:
+            if active_turn == "":
+                set active_turn to result_cache_scalar(db and "SELECT id FROM turns WHERE project=? AND id>CAST(? AS INTEGER) ORDER BY id LIMIT 1" and [project,turn_floor])
+            if stop_clicked:
+                if stop_requested == 0:
+                    set stop_started to transport_now(native_system())
+                set stop_requested to 1
+                set notice to "Stopping..."
+            if stop_requested && stop_child == 0 && active_turn != "":
+                if result_cache_scalar(db and "SELECT status FROM turns WHERE id=? AND project=?" and [active_turn,project]) == "pending":
+                    set stop_child to process_start(core and ["turn-abandon",project,active_turn])
+                    if stop_child == 0:
+                        set stop_requested to 0
+                        set notice to "Unable to send stop request. Try Stop again."
+        if send_requested && section == "chat" && runtime_ready == 1 && child == 0 && stop_child == 0 && (string_trim(draft) != "" || attachment != "") && (selected == "" || string_equals(selected and current_session)):
+            set stop_requested to 0
+            set active_turn to ""
+            set turn_floor to result_cache_scalar(db and "SELECT coalesce(max(id),0) FROM turns" and [])
+            if string_trim(draft) == "" && attachment != "":
+                set draft to "Describe this image."
+            if attachment == "":
+                set child to process_start(core and ["chat",project,draft])
+            else:
+                set child to process_start(core and ["chat-image",project,attachment,draft])
+            if child > 0:
+                set operation to "chat"
+                set submitted to draft
+                set submitted_attachment to attachment
+                set submitted_attachment_path to attachment_path
+                set attachment to ""
+                set attachment_path to ""
+                set draft to ""
+                set follow_bottom to 1
+                set notice to ""
+            else:
+                set notice to "Unable to start the local conversation core."
+        # Idle initiative uses the same child, turn journal and Stop path as chat.
+        if frames % 30 == 0 && db != 0 && (capture == "" || exercise_schedule) && (exercise == "" || exercise_finished):
+            set now to transport_now(native_system())
+            if ui_schedule_ready(now and last_activity and last_dispatch and (child > 0 || stop_child > 0) and runtime_ready and draft and attachment):
+                if schedule_due(db and project) != "":
+                    set last_dispatch to now
+                    set turn_floor to result_cache_scalar(db and "SELECT coalesce(max(id),0) FROM turns" and [])
+                    set active_turn to ""
+                    set stop_requested to 0
+                    set child to process_start(core and ["chat-due",project])
+                    if child > 0:
+                        set scheduled_run to 1
+                        set exercise_live_seen to 0
+                        set operation to "chat"
+                        set submitted to ""
+                        set submitted_attachment to ""
+                        set submitted_attachment_path to ""
+                        set selected to current_session
+                        set follow_bottom to 1
+                        set notice to "Running a due task locally. Type or click Stop to interrupt."
+                        display "UI dispatched one due task through the normal conversation core"
+        raylib_begin_drawing()
+
+        raylib_clear_background(bg)
+        raylib_draw_rectangle(0 and 0 and 256 and height and sidebar)
+        label("e" and 27 and 32 and 34 and mint)
+        label("EchoLite" and 64 and 36 and 23 and white)
+        label("A mind of your own." and 27 and 74 and 14 and muted)
+        panel(24 and 104 and 208 and 46 and mint)
+        label("+  New conversation" and 40 and 119 and 17 and bg)
+        label("CONVERSATIONS" and 28 and 186 and 12 and muted)
+        set si to 0
+        repeat while si < length_list(sessions) && 214 + si * 43 < height - 256:
+            set item to get_list(sessions and si)
+            if string_equals(selected and get_list(item and 0)):
+                panel(18 and 214 + si * 43 and 220 and 40 and surface)
+            label(get_list(item and 1) and 32 and 227 + si * 43 and 15 and white)
+            set si to si + 1
+        if length_list(sessions) == 0:
+            label("Your conversations live here." and 28 and 229 and 13 and muted)
+        raylib_draw_line(24 and height - 233 and 231 and height - 233 and border)
+        label("Tasks" and 32 and height - 202 and 17 and muted)
+        label("Memory" and 32 and height - 156 and 17 and muted)
+        label("Me" and 32 and height - 110 and 17 and muted)
+        panel(24 and height - 62 and 208 and 38 and surface)
+        label("LOCAL  /  PRIVATE" and 42 and height - 49 and 12 and mint)
+        label("EchoLite" and left and 35 and 20 and white)
+        label("Qwen3.5 4B  /  262K context" and left and 64 and 13 and muted)
+        set network_label to "Offline"
+        if network_mode(home) == "connected":
+            set network_label to "Connected"
+        label(network_label and width - 145 and 39 and 14 and mint)
+        raylib_draw_line(left and 96 and width - 36 and 96 and border)
+        if section == "chat":
+            set viewport to height - 340
+            if follow_bottom == 1:
+                set scroll to body_height - viewport
+            if scroll > body_height - viewport:
+                set scroll to body_height - viewport
+            if scroll < 0:
+                set scroll to 0
+            ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left and 110 and content_width and viewport)
+            set row_y to 125 - scroll
+            if length_list(turns) == 0:
+                label("Space to think." and left + 70 and 250 and 36 and white)
+                label("Room to remember." and left + 70 and 298 and 36 and mint)
+                wrap_text("Ask a question, explore an idea, or pick up where you left off. Your conversations and memories stay with you." and left + 70 and 360 and content_width - 140 and 17 and muted)
+            set ti to 0
+            repeat while ti < length_list(turns):
+                set turn to get_list(turns and ti)
+                set speaker to "YOU"
+                if get_list(turn and 8) == "scheduled-event":
+                    set speaker to "SCHEDULED TASK"
+                label(speaker and left + 24 and row_y and 12 and muted)
+                set row_y to row_y + 24
+                set ii to 0
+                repeat while ii < length_list(image_turns):
+                    set image_row to get_list(image_turns and ii)
+                    if string_equals(get_list(image_row and 0) and get_list(turn and 0)):
+                        set row_y to wrap_text(concat("Image · " and path_basename(get_list(image_row and 1))) and left + 24 and row_y and content_width - 60 and 13 and mint)
+                        set row_y to row_y + 8
+                    set ii to ii + 1
+                set row_y to wrap_text(get_list(turn and 1) and left + 24 and row_y and content_width - 60 and 18 and white)
+                set row_y to row_y + 25
+                label("ECHOLITE" and left + 24 and row_y and 12 and mint)
+                if get_list(turn and 2) != "":
+                    label("Copy" and left + content_width - 64 and row_y and 12 and muted)
+                    if clicked && hit(left + content_width - 74 and row_y - 4 and 60 and 24) && row_y >= 110 && row_y < height - 220:
+                        ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and get_list(turn and 2))
+                set row_y to row_y + 26
+                set thought to get_list(turn and 4)
+                if exercise != "" && get_list(turn and 7) == "1" && thought != "":
+                    set thinking_open to get_list(turn and 0)
+                    if exercise_live_seen == 0:
+                        display "UI observed live model thinking before turn completion"
+                        set exercise_live_seen to 1
+                if thought != "":
+                    panel(left + 24 and row_y and content_width - 48 and 36 and surface)
+                    set arrow to ">  Thinking"
+                    if string_equals(thinking_open and get_list(turn and 0)):
+                        set arrow to "v  Thinking"
+                    set thinking_label to concat(arrow and concat("  ·  " and concat(get_list(turn and 5) and " output tokens")))
+                    if get_list(turn and 7) == "1":
+                        set thinking_label to concat(arrow and "  ·  generating")
+                    label(thinking_label and left + 38 and row_y + 10 and 14 and mint)
+                    if clicked && hit(left + 24 and row_y and content_width - 48 and 36) && raylib_get_mouse_y() >= 110 && raylib_get_mouse_y() < height - 200:
+                        if string_equals(thinking_open and get_list(turn and 0)):
+                            set thinking_open to ""
+                        else:
+                            set thinking_open to get_list(turn and 0)
+                        set follow_bottom to 0
+                    set row_y to row_y + 46
+                    if string_equals(thinking_open and get_list(turn and 0)):
+                        set row_y to wrap_text(thought and left + 38 and row_y and content_width - 90 and 15 and muted)
+                        set row_y to row_y + 15
+                if get_list(turn and 6) != "":
+                    set row_y to wrap_text(get_list(turn and 6) and left + 24 and row_y and content_width - 60 and 13 and mint)
+                    set row_y to row_y + 10
+                if exercise != "" && get_list(turn and 7) == "1" && starts_with(get_list(turn and 2) and "Draft while generating:") && exercise_draft_seen == 0:
+                    display "UI observed a streaming answer draft before turn completion"
+                    set exercise_draft_seen to 1
+                if get_list(turn and 2) != "":
+                    set row_y to wrap_text(get_list(turn and 2) and left + 24 and row_y and content_width - 60 and 18 and white)
+                else:
+                    set pending_text to concat("Turn " and get_list(turn and 3))
+                    if get_list(turn and 3) == "pending":
+                        set pending_text to "Working locally..."
+                    else if get_list(turn and 3) == "abandoned":
+                        set pending_text to "Response stopped. Your message is saved."
+                        if get_list(turn and 8) == "scheduled-event":
+                            set pending_text to "Scheduled work stopped. Completed effects remain."
+                    set row_y to wrap_text(pending_text and left + 24 and row_y and content_width - 60 and 17 and muted)
+                set row_y to row_y + 40
+                set ti to ti + 1
+            set body_height to row_y + scroll - 125
+            ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
+            if attachment != "":
+                panel(left + 24 and height - 220 and content_width - 48 and 28 and surface)
+                ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left + 35 and height - 218 and content_width - 106 and 26)
+                label(concat("Image: " and path_basename(attachment_path)) and left + 38 and height - 213 and 13 and mint)
+                ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
+                label("x" and left + content_width - 50 and height - 213 and 14 and muted)
+            panel(left + 24 and height - 182 and content_width - 48 and 112 and surface)
+            ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left + 40 and height - 160 and content_width - 130 and 54)
+            if draft == "":
+                label("Message EchoLite..." and left + 44 and height - 157 and 18 and muted)
+            editor_draw(left + 44 and height - 157 and content_width - 140 and 54 and white and mint)
+            ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
+            panel(width - 119 and height - 126 and 43 and 38 and mint)
+            if child > 0 && operation == "chat":
+                raylib_draw_rectangle(width - 105 and height - 114 and 15 and 15 and bg)
+            else:
+                label("^" and width - 106 and height - 118 and 25 and bg)
+            set composer_status to "Enter to send · Shift+Enter newline · Cmd+A/C/X/V · Cmd+Z undo"
+            if EDIT_ERROR != "":
+                set composer_status to EDIT_ERROR
+            if child > 0:
+                set composer_status to "Working locally..."
+                if operation == "chat":
+                    set composer_status to "Generating locally · Click square to stop"
+            else if selected != "" && string_equals(selected and current_session) == 0:
+                set composer_status to "Saved conversation  ·  Start a new conversation to continue"
+            if runtime_child > 0:
+                set composer_status to "Preparing local models..."
+            if notice != "":
+                set composer_status to notice
+            label("+ Attach image" and left + 40 and height - 100 and 13 and mint)
+            ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left + 174 and height - 104 and content_width - 286 and 24)
+            label(composer_status and left + 180 and height - 100 and 12 and muted)
+            ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
+
+            label("Local memory. Your continuity." and left + 126 and height - 44 and 12 and muted)
+        else if section == "tasks":
+            label("Tasks" and left + 24 and 151 and 32 and white)
+            label("Due tasks run while open and idle. Typing interrupts background work." and left + 24 and 198 and 14 and muted)
+            set task_height to height - 300
+            set task_total to 0
+            set layout_index to 0
+            repeat while layout_index < length_list(task_rows):
+                set layout_row to get_list(task_rows and layout_index)
+                set task_total to task_total + length_list(layout_lines(get_list(layout_row and 4) and content_width - 101 and 16)) * 25 + 89
+                set layout_index to layout_index + 1
+            if task_scroll > task_total - task_height:
+                set task_scroll to task_total - task_height
+            if task_scroll < 0:
+                set task_scroll to 0
+            ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and left + 20 and 232 and content_width - 40 and task_height)
+            set task_y to 238 - task_scroll
+            set task_i to 0
+            repeat while task_i < length_list(task_rows):
+                set task_row to get_list(task_rows and task_i)
+                set row_height to length_list(layout_lines(get_list(task_row and 4) and content_width - 101 and 16)) * 25 + 75
+                panel(left + 24 and task_y and content_width - 48 and row_height and surface)
+                set task_title to concat("Task " and concat(get_list(task_row and 1) and concat("  ·  " and get_list(task_row and 5))))
+                label(task_title and left + 40 and task_y + 12 and 13 and mint)
+                wrap_text(get_list(task_row and 4) and left + 40 and task_y + 35 and content_width - 100 and 16 and white)
+                set task_detail to get_list(task_row and 2)
+                if get_list(task_row and 3) != "":
+                    set task_detail to concat(task_detail and concat("  ·  " and get_list(task_row and 3)))
+                if get_list(task_row and 7) != "":
+                    set task_detail to concat(task_detail and concat("  ·  turn " and get_list(task_row and 7)))
+                label(task_detail and left + 40 and task_y + row_height - 23 and 12 and muted)
+                if get_list(task_row and 2) == "armed":
+                    label("Cancel" and left + content_width - 104 and task_y + 12 and 13 and mint)
+                    if clicked && child == 0 && stop_child == 0 && hit(left + content_width - 116 and task_y + 5 and 80 and 28) && raylib_get_mouse_y() >= 232 && raylib_get_mouse_y() < 232 + task_height:
+                        set child to process_start(core and ["schedule-cancel",project,get_list(task_row and 0)])
+                        if child > 0:
+                            set operation to "schedule-cancel"
+                            set notice to "Cancelling saved schedule..."
+                set task_y to task_y + row_height + 14
+                set task_i to task_i + 1
+            if length_list(task_rows) == 0:
+                wrap_text("Ask EchoLite to save a task and when to do it. Its objective, due time and outcome will appear here." and left + 40 and 252 and content_width - 100 and 18 and white)
+            ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
+            if notice != "":
+                label(notice and left + 24 and height - 38 and 12 and muted)
+        else if section == "memory":
+            label("Memory" and left + 24 and 151 and 32 and white)
+            set row_y to 210
+            if db != 0:
+                set notes to sql_query_params(db and "SELECT layer,substr(body,1,240) FROM memories WHERE status='active' AND source NOT IN ('tool-request','tool-receipt') ORDER BY id DESC LIMIT 12" and [])
+                set note_index to 0
+                repeat while note_index < length_list(notes) && row_y < height - 110:
+                    set note to get_list(notes and note_index)
+                    label(get_list(note and 0) and left + 24 and row_y and 12 and mint)
+                    set row_y to wrap_text(get_list(note and 1) and left + 24 and row_y + 25 and content_width - 60 and 17 and white)
+                    set row_y to row_y + 24
+                    set note_index to note_index + 1
+            if row_y == 210:
+                label("Your retained memories will appear here." and left + 24 and row_y and 17 and muted)
+        else:
+            label("Me" and left + 24 and 151 and 32 and white)
+            if db != 0:
+                set identities to sql_query_params(db and "SELECT body,id FROM me_versions ORDER BY id DESC LIMIT 1" and [])
+                if length_list(identities) > 0:
+                    set identity to get_list(identities and 0)
+                    label(concat("Revision " and get_list(identity and 1)) and left + 24 and 199 and 13 and mint)
+                    wrap_text(get_list(identity and 0) and left + 24 and 240 and content_width - 60 and 18 and white)
+        editor_menu_draw()
+        raylib_end_drawing()
+        set frames to frames + 1
+        if exercise_finished && frames % 15 == 0 && length_list(turns) > 0:
+            set thinking_open to get_list(get_list(turns and length_list(turns) - 1) and 0)
+        if capture != "" && (exercise_schedule == 0 || exercise_schedule_done) && stop_child == 0 && ((exercise == "" && frames >= 3 && child == 0 && stop_child == 0) || (exercise != "" && exercise_finished && frames % 15 == 3 && length_list(turns) > 0 && get_list(get_list(turns and length_list(turns) - 1) and 3) != "pending")):
+            set shot to ep_dlsym(RAYLIB_HANDLE and "TakeScreenshot")
+            ep_dlcall1(shot and capture)
+            raylib_close_window()
+            return 0
+    raylib_close_window()
+    return 0

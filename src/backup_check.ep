@@ -1,0 +1,66 @@
+import "snapshot_seal"
+import "health"
+
+define backup_check_error with text returning Str:
+    set fields to [create_json_string("error"),create_json_string(text)]
+    return json_stringify(create_json_object(["status","text"] and fields))
+
+define backup_check with home and identifier returning Str:
+    if snapshot_hex(identifier and 32) == 0:
+        return backup_check_error("Backup ID must be 32 lowercase hexadecimal characters")
+    set libc to native_system()
+    set resolved to alloc_bytes(1024)
+    set found to ep_dlcall2(ep_dlsym(libc and "realpath") and home and resolved)
+    set canonical to ptr_to_str(resolved)
+    free_bytes(resolved)
+    if found == 0 || string_length(canonical) > 900:
+        return backup_check_error("Cannot resolve state directory or path is too long")
+    set parent to native_open(canonical and 17826048 and 0)
+    if parent < 0:
+        return backup_check_error("Cannot open state directory")
+    set info to alloc_bytes(144)
+    set owned to ep_dlcall2(ep_dlsym(libc and "fstat") and parent and info) == 0 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid"))
+    free_bytes(info)
+    if owned == 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and parent)
+        return backup_check_error("State directory must be owned by the current user")
+    set guard to snapshot_read_hex(parent and "recovery.guard")
+    if guard == "":
+        ep_dlcall1(ep_dlsym(libc and "close") and parent)
+        return backup_check_error("Recovery authority is missing or invalid; snapshot is not authorized")
+    set directory to native_openat(parent and "backups" and 17826048 and 0)
+    set problem to ""
+    if directory < 0:
+        set problem to "Backup directory is unavailable or is a symlink"
+    else:
+        set info to alloc_bytes(144)
+        if ep_dlcall2(ep_dlsym(libc and "fstat") and directory and info) != 0 || lease_integer(info and 16 and 4) != ep_dlcall0(ep_dlsym(libc and "getuid")):
+            set problem to "Backup directory must be owned by the current user"
+        free_bytes(info)
+    set name to concat("backup-" and concat(identifier and ".sqlite3"))
+    set path to concat(canonical and concat("/backups/" and name))
+    if problem == "" && snapshot_seal_verify(directory and name) == 0:
+        set problem to "Snapshot checksum is missing, unsafe or does not match its exact contents"
+    if problem == "" && string_contains(health_check(path) and "\"status\":\"ok\"") == 0:
+        set problem to "Snapshot structural integrity check failed"
+    if problem == "":
+        set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+        set handle to alloc_bytes(8)
+        set code to ep_dlcall4(ep_dlsym(sqlite and "sqlite3_open_v2") and path and handle and 16777217 and 0)
+        set db to lease_integer(handle and 0 and 8)
+        free_bytes(handle)
+        set authorized to 0
+        if code == 0:
+            set binding to health_scalar(db and "SELECT value FROM metadata WHERE key='backup_guard'" and 65)
+            set identity to health_scalar(db and "SELECT value FROM metadata WHERE key='backup_id'" and 33)
+            set authorized to string_equals(binding and guard) && string_equals(identity and identifier)
+        if db != 0:
+            sql_close(db)
+        if authorized == 0 || string_equals(snapshot_read_hex(parent and "recovery.guard") and guard) == 0:
+            set problem to "Snapshot belongs to another recovery generation or identity, or predates authorization"
+    if directory >= 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and directory)
+    ep_dlcall1(ep_dlsym(libc and "close") and parent)
+    if problem != "":
+        return backup_check_error(problem)
+    return concat("{\"status\":\"ok\",\"id\":\"" and concat(identifier and "\",\"authorized_at_check\":true,\"restored\":false}"))

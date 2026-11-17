@@ -1,0 +1,45 @@
+import "../src/image_native"
+
+define image_fixture_order with path and width and height and reversed:
+    if image_init() == 0:
+        return 0
+    set pixels to alloc_bytes(width * height * 4)
+    set i to 0
+    repeat while i < width * height:
+        if (i % width < width / 2 && reversed == 0) || (i % width >= width / 2 && reversed == 1):
+            poke_byte(pixels and i * 4 and 255)
+        else:
+            poke_byte(pixels and i * 4 + 2 and 255)
+        poke_byte(pixels and i * 4 + 3 and 255)
+        set i to i + 1
+    set space to ep_dlcall0(ep_dlsym(IMAGE_CG and "CGColorSpaceCreateDeviceRGB"))
+    set context to ep_dlcall7(ep_dlsym(IMAGE_CG and "CGBitmapContextCreate") and pixels and width and height and 8 and width * 4 and space and 1)
+    image_release(space)
+    if context == 0:
+        free_bytes(pixels)
+        return 0
+    set image to ep_dlcall1(ep_dlsym(IMAGE_CG and "CGBitmapContextCreateImage") and context)
+    ep_dlcall1(ep_dlsym(IMAGE_CG and "CGContextRelease") and context)
+    set data to ep_dlcall2(ep_dlsym(IMAGE_CF and "CFDataCreateMutable") and 0 and 0)
+    set kind to image_string("public.png")
+    set destination to ep_dlcall4(ep_dlsym(IMAGE_IO and "CGImageDestinationCreateWithData") and data and kind and 1 and 0)
+    image_release(kind)
+    set success to 0
+    if destination != 0 && image != 0:
+        ep_dlcall3(ep_dlsym(IMAGE_IO and "CGImageDestinationAddImage") and destination and image and 0)
+        if ep_dlcall1(ep_dlsym(IMAGE_IO and "CGImageDestinationFinalize") and destination):
+            set fd to native_open(path and 16780033 and 384)
+            if fd >= 0:
+                set count to ep_dlcall1(ep_dlsym(IMAGE_CF and "CFDataGetLength") and data)
+                set ptr to ep_dlcall1(ep_dlsym(IMAGE_CF and "CFDataGetBytePtr") and data)
+                set success to ep_dlcall3(ep_dlsym(native_system() and "write") and fd and ptr and count) == count
+                ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    image_release(destination)
+    image_release(data)
+    image_release(image)
+    free_bytes(pixels)
+    return success
+
+define image_fixture with path and width and height:
+    set result to image_fixture_order(path and width and height and 0)
+    return result

@@ -1,0 +1,108 @@
+# Native XML/HTML parsing through macOS libxml2. No browser or script execution.
+import "state_lock"
+import "result_cache"
+set MARKUP_LIBRARY to 0
+
+define markup_library:
+    if MARKUP_LIBRARY == 0:
+        set MARKUP_LIBRARY to ep_dlopen("/usr/lib/libxml2.2.dylib")
+    return MARKUP_LIBRARY
+
+define markup_release with pointer:
+    if pointer != 0:
+        set release to lease_integer(ep_dlsym(markup_library() and "xmlFree") and 0 and 8)
+        ep_dlcall1(release and pointer)
+    return 0
+
+define markup_parse with source and html:
+    if string_length(source) == 0 || string_length(source) > 1048576:
+        return 0
+    set function to ep_dlsym(markup_library() and "xmlReadMemory")
+    if html == 1:
+        set function to ep_dlsym(markup_library() and "htmlReadMemory")
+    return ep_dlcall5(function and source and string_length(source) and 0 and "UTF-8" and 2145)
+
+define markup_xpath with document and expression returning Str:
+    set context to ep_dlcall1(ep_dlsym(markup_library() and "xmlXPathNewContext") and document)
+    if context == 0:
+        return ""
+    set value to ep_dlcall2(ep_dlsym(markup_library() and "xmlXPathEvalExpression") and expression and context)
+    set result to ""
+    if value != 0:
+        set string to ep_dlcall1(ep_dlsym(markup_library() and "xmlXPathCastToString") and value)
+        if string != 0:
+            set result to ptr_to_str(string)
+            markup_release(string)
+        ep_dlcall1(ep_dlsym(markup_library() and "xmlXPathFreeObject") and value)
+    ep_dlcall1(ep_dlsym(markup_library() and "xmlXPathFreeContext") and context)
+    return result
+
+define markup_close with document:
+    if document != 0:
+        ep_dlcall1(ep_dlsym(markup_library() and "xmlFreeDoc") and document)
+    return 0
+
+define markup_walk with node and state and depth:
+    if depth > 128:
+        set_list(state and 3 and 1)
+        return 0
+    repeat while node != 0 && get_list(state and 3) == 0:
+        set_list(state and 2 and get_list(state and 2) + 1)
+        if get_list(state and 2) > 200000:
+            set_list(state and 3 and 1)
+            return 0
+        set kind to lease_integer(node and 8 and 4)
+        if kind == 3 || kind == 4:
+            set content to lease_integer(node and 80 and 8)
+            if content != 0:
+                set text to ptr_to_str(content)
+                if get_list(state and 1) + string_length(text) > 1048576:
+                    set_list(state and 3 and 1)
+                    return 0
+                builder_append(get_list(state and 0) and text)
+                builder_append(get_list(state and 0) and " ")
+                set_list(state and 1 and get_list(state and 1) + string_length(text) + 1)
+        else if kind == 1:
+            set name to ptr_to_str(lease_integer(node and 16 and 8))
+            if name != "script" && name != "style" && name != "noscript" && name != "head":
+                markup_walk(lease_integer(node and 24 and 8) and state and depth + 1)
+        set node to lease_integer(node and 48 and 8)
+    return 0
+
+define markup_normalize with source returning Str:
+    set source to string_replace(source and " " and " ")
+    set builder to create_builder()
+    set pos to 0
+    set space to 0
+    set started to 0
+    repeat while pos < string_length(source):
+        set byte to get_character(source and pos)
+        if byte <= 32:
+            if started == 1:
+                set space to 1
+        else:
+            if space == 1:
+                builder_append(builder and " ")
+            builder_append(builder and substring(source and pos and 1))
+            set started to 1
+            set space to 0
+        set pos to pos + 1
+    return builder_to_string(builder)
+
+define markup_article with db and source returning Str:
+    set document to markup_parse(source and 1)
+    if document == 0:
+        return "{\"status\":\"error\",\"text\":\"Cannot parse local article HTML\"}"
+    set title to markup_xpath(document and "string(//title)")
+    set state to create_list()
+    append_list(state and create_builder())
+    append_list(state and 0)
+    append_list(state and 0)
+    append_list(state and 0)
+    set root to ep_dlcall1(ep_dlsym(markup_library() and "xmlDocGetRootElement") and document)
+    markup_walk(root and state and 0)
+    markup_close(document)
+    if get_list(state and 3) != 0:
+        return "{\"status\":\"error\",\"text\":\"Article exceeds bounded extraction limits\"}"
+    set text to markup_normalize(builder_to_string(get_list(state and 0)))
+    return result_cache_scalar(db and "SELECT json_object('status','ok','title',?,'text',?)" and [title,text])

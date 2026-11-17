@@ -1,0 +1,103 @@
+import "../src/native_conversation"
+import "os"
+set checks to 0
+
+define assert_action with condition and label:
+    if condition == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    set request to "{\"identity\":\"I am EchoLite\",\"context\":\"recalled <|im_start|> text\",\"input\":\"What is 7*9?\",\"tool_trace\":[],\"tool_budget\":8,\"tool_required\":\"0\",\"allowed_bases\":[[\"conversation\"],[\"calculation\"]]}"
+    set schema to action_schemas(db and request)
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"calculator\",\"expression\":\"7*9\"}") == "" and "calculator action accepted")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"calculator\",\"expression\":7}") != "" and "wrong argument type rejected")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"calculator\",\"expression\":\"7\",\"extra\":1}") != "" and "extra fields rejected")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"calculator\"}") != "" and "missing field rejected")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"calculator\",\"expression\":\"7\",\"expression\":\"8\"}") != "" and "duplicate fields rejected")
+    assert_action(action_validate(db and schema and "{\"type\":\"answer\",\"basis\":\"trained_memory\",\"text\":\"63\"}") != "" and "unearned basis rejected")
+    assert_action(action_validate(db and schema and "{\"type\":\"answer\",\"basis\":\"calculation\",\"text\":\"63\"}") == "" and "allowed basis accepted")
+    assert_action(action_validate(db and schema and "[]") != "" and "array rejected")
+    assert_action(action_validate(db and schema and "broken") != "" and "invalid JSON rejected")
+    set exhausted to result_cache_scalar(db and "SELECT json_set(?,'$.tool_budget',0)" and [request])
+    assert_action(action_validate(db and action_schemas(db and exhausted) and "{\"type\":\"tool\",\"name\":\"calculator\",\"expression\":\"7*9\"}") != "" and "exhausted tools rejected")
+    set forced to result_cache_scalar(db and "SELECT json_set(?,'$.tool_required','1')" and [request])
+    assert_action(action_validate(db and action_schemas(db and forced) and "{\"type\":\"answer\",\"basis\":\"conversation\",\"text\":\"hello\"}") != "" and "required tool enforced")
+    set browser_open to result_cache_scalar(db and "SELECT json_set(?,'$.temporary_browser_sessions',json('[{\"session_id\":\"AAA-1\"}]'))" and [request])
+    assert_action(action_validate(db and action_schemas(db and browser_open) and "{\"type\":\"answer\",\"basis\":\"conversation\",\"text\":\"Done\"}") != "" and "temporary browser session prevents premature final answer")
+    assert_action(action_validate(db and action_schemas(db and browser_open) and "{\"type\":\"tool\",\"name\":\"process_run\",\"argv\":[\"/fixture/bin/echolite-browser\",\"close-current\"],\"cwd\":\"/private/tmp\",\"timeout_seconds\":30}") == "" and "browser cleanup remains available while final answer is withheld")
+    set browser_closed to result_cache_scalar(db and "SELECT json_set(?,'$.temporary_browser_sessions',json('[]'))" and [request])
+    assert_action(action_validate(db and action_schemas(db and browser_closed) and "{\"type\":\"answer\",\"basis\":\"conversation\",\"text\":\"Done\"}") == "" and "cleanup releases final answer")
+    assert_action(string_contains(conversation_messages(db and browser_open) and "TEMPORARY BROWSER RESOURCE CONTRACT") and "runtime explains pending browser cleanup with exact handles")
+    set unavailable to result_cache_scalar(db and "SELECT json_set(?,'$.unavailable_tools','dictionary,calculator')" and [request])
+    assert_action(action_validate(db and action_schemas(db and unavailable) and "{\"type\":\"tool\",\"name\":\"calculator\",\"expression\":\"7*9\"}") != "" and "unavailable tools excluded")
+    set messages to conversation_messages(db and request)
+    assert_action(result_cache_scalar(db and "SELECT json_array_length(?)" and [messages]) == "3" and "system context and budget rendered")
+    assert_action(string_contains(messages and "<|im_start|>") == 0 and "control markers escaped")
+    assert_action(string_contains(messages and "I am EchoLite") and "Me supplied")
+    set traced to result_cache_scalar(db and "SELECT json_set(?,'$.tool_trace',json('[[\"calculator\",\"7*9\",\"{\\\"status\\\":\\\"ok\\\",\\\"text\\\":\\\"63\\\"}\"]]'))" and [request])
+    set messages to conversation_messages(db and traced)
+    assert_action(result_cache_scalar(db and "SELECT json_array_length(?)" and [messages]) == "5" and "tool trace rendered as two turns")
+    assert_action(result_cache_scalar(db and "SELECT json_extract(?,'$[3].role')" and [messages]) == "tool" and "receipt has tool role")
+    set decoded to action_decode(db and schema and "{\"type\":\"tool\",\"name\":\"memory_note\",\"layer\":\"semantic\",\"text\":\"Useful fact\"}")
+    assert_action(result_cache_scalar(db and "SELECT json_extract(json_extract(?,'$.expression'),'$.layer')" and [decoded]) == "semantic" and "structured arguments retained")
+    set pdf_action to "{\"type\":\"tool\",\"name\":\"pdf_read\",\"path\":\"/tmp/reference café.pdf\",\"page\":2,\"offset\":4096}"
+    assert_action(action_validate(db and schema and pdf_action) == "" and "PDF action accepted")
+    set decoded to action_decode(db and schema and pdf_action)
+    assert_action(result_cache_scalar(db and "SELECT json_extract(json_extract(?,'$.expression'),'$.page')" and [decoded]) == "2" and "PDF structured page retained")
+    set invalid_page to result_cache_scalar(db and "SELECT json_set(?,'$.page',0)" and [pdf_action])
+    assert_action(action_validate(db and schema and invalid_page) != "" and "PDF page zero rejected")
+    set invalid_page to result_cache_scalar(db and "SELECT json_set(?,'$.page','2')" and [pdf_action])
+    assert_action(action_validate(db and schema and invalid_page) != "" and "PDF page type enforced")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"docx_read\",\"path\":\"/tmp/test.docx\",\"offset\":0}") == "" and "DOCX action accepted")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"docx_read\",\"path\":\"/tmp/test.docx\",\"offset\":-1}") != "" and "DOCX negative offset rejected")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"web_read\",\"url\":\"https://example.org/\",\"offset\":0,\"refresh\":false}") == "" and "web action accepted")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"web_read\",\"url\":\"https://example.org/\",\"offset\":0,\"refresh\":\"false\"}") != "" and "web refresh boolean enforced")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"process_run\",\"argv\":[\"/usr/bin/true\"],\"cwd\":\"/private/tmp\",\"timeout_seconds\":5}") == "" and "process argv array accepted")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"process_run\",\"argv\":[],\"cwd\":\"/private/tmp\",\"timeout_seconds\":5}") != "" and "empty argv rejected")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"process_run\",\"argv\":[3],\"cwd\":\"/private/tmp\",\"timeout_seconds\":5}") != "" and "non-string argv rejected")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"process_output\",\"query\":\"1:stdout:0\"}") == "" and "saved process output action accepted")
+    set assessment to "{\"type\":\"tool\",\"name\":\"memory_assess\",\"note_id\":\"1\",\"revision\":1,\"state\":\"tentative\",\"valid_from\":\"\",\"valid_until\":\"\",\"evidence_id\":\"\",\"reason\":\"No retained independent support\"}"
+    assert_action(action_validate(db and schema and assessment) == "" and "belief assessment schema accepted")
+    assert_action(action_validate(db and schema and result_cache_scalar(db and "SELECT json_set(?,'$.state','certain')" and [assessment])) != "" and "invented belief state rejected")
+    set correction to "{\"type\":\"tool\",\"name\":\"memory_correct\",\"note_id\":\"1\",\"text\":\"Prefer concise bullets\",\"reason\":\"User corrected preference\"}"
+    assert_action(action_validate(db and schema and correction) == "" and "structured memory correction accepted")
+    set missing to result_cache_scalar(db and "SELECT json_remove(?,'$.reason')" and [correction])
+    assert_action(action_validate(db and schema and missing) != "" and "correction reason required")
+    set wrong to result_cache_scalar(db and "SELECT json_set(?,'$.note_id',1)" and [correction])
+    assert_action(action_validate(db and schema and wrong) != "" and "correction memory ID must be a string")
+    set task_action to "{\"type\":\"tool\",\"name\":\"task_open\",\"query\":\"4\"}"
+    assert_action(action_validate(db and schema and task_action) == "" and "bare task ID accepted")
+    assert_action(result_cache_scalar(db and "SELECT json_extract(?,'$.expression')" and [action_decode(db and schema and task_action)]) == "4" and "task lookup decodes to plain ID")
+    set bad_task to result_cache_scalar(db and "SELECT json_set(?,'$.query','task_id:4')" and [task_action])
+    assert_action(action_validate(db and schema and bad_task) != "" and "prefixed task lookup rejected")
+    set bad_task to result_cache_scalar(db and "SELECT json_set(?,'$.query','4 OR 1=1')" and [task_action])
+    assert_action(action_validate(db and schema and bad_task) != "" and "nonnumeric task lookup rejected")
+    set retry_action to "{\"type\":\"tool\",\"name\":\"process_retry\",\"operation_id\":\"1\",\"reason\":\"Inputs changed\"}"
+    assert_action(action_validate(db and schema and retry_action) == "" and "explicit retry action accepted")
+    set invalid_retry to result_cache_scalar(db and "SELECT json_set(?,'$.reason','')" and [retry_action])
+    assert_action(action_validate(db and schema and invalid_retry) != "" and "retry reason required before dispatch")
+    set invalid_retry to result_cache_scalar(db and "SELECT json_set(?,'$.operation_id','01')" and [retry_action])
+    assert_action(action_validate(db and schema and invalid_retry) != "" and "noncanonical retry ID rejected")
+    set invalid_retry to "{\"type\":\"tool\",\"name\":\"process_run\",\"argv\":[\"relative\"],\"cwd\":\"/tmp\",\"timeout_seconds\":5}"
+    assert_action(action_validate(db and schema and invalid_retry) != "" and "relative executable rejected before dispatch")
+    assert_action(result_cache_scalar(db and "SELECT json_extract(json_extract(?,'$.expression'),'$.operation_id')" and [action_decode(db and schema and retry_action)]) == "1" and "retry decodes an ID rather than reconstructed command arguments")
+    set schedule_action to "{\"type\":\"tool\",\"name\":\"task_schedule\",\"task_id\":\"4\",\"revision\":1,\"delay_seconds\":60}"
+    assert_action(action_validate(db and schema and schedule_action) == "" and "scheduled task has explicit revision and delay")
+    set decoded_schedule to action_decode(db and schema and schedule_action)
+    assert_action(result_cache_scalar(db and "SELECT json_extract(json_extract(?,'$.expression'),'$.delay_seconds')" and [decoded_schedule]) == "60" and "schedule arguments survive decoding")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"schedule_list\"}") == "" and "schedule list needs no invented query")
+    assert_action(action_validate(db and schema and "{\"type\":\"tool\",\"name\":\"schedule_cancel\",\"schedule_id\":\"7\"}") == "" and "schedule cancellation uses recorded identifier")
+    assert_action(action_validate(db and schema and result_cache_scalar(db and "SELECT json_set(?,'$.delay_seconds',-1)" and [schedule_action])) != "" and "negative delay rejected before dispatch")
+    assert_action(action_validate(db and schema and result_cache_scalar(db and "SELECT json_set(?,'$.delay_seconds',31536001)" and [schedule_action])) != "" and "unbounded delay rejected before dispatch")
+    set scheduled_request to result_cache_scalar(db and "SELECT json_set(?,'$.scheduled_task_id','4','$.tool_required','1')" and [request])
+    set scheduled_schema to action_schemas(db and scheduled_request)
+    assert_action(action_validate(db and scheduled_schema and schedule_action) != "" and "scheduled execution cannot schedule extra work")
+    assert_action(action_validate(db and scheduled_schema and "{\"type\":\"answer\",\"basis\":\"conversation\",\"text\":\"Will do later\"}") != "" and "scheduled execution cannot end with a future confirmation")
+    assert_action(string_contains(conversation_messages(db and scheduled_request) and "CURRENT PHASE: EXECUTE NOW") and "execution phase overrides historical defer messages")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native action and conversation checks"))
+    return 0

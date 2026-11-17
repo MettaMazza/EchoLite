@@ -1,0 +1,34 @@
+# Inspect the actual model-selected local EP write/compile/run workflow.
+import "../src/result_cache"
+import "os"
+import "fs"
+set checks to 0
+
+define coding_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: coding_journey STATE PROJECT_DIRECTORY"
+        return 1
+    set home to get_list(args and 1)
+    set directory to get_list(args and 2)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    coding_assert(result_cache_scalar(db and "SELECT count(*)>0 FROM turns WHERE status='completed'" and []) == "1" and "actual UI conversation completed")
+    coding_assert(result_cache_scalar(db and "SELECT count(*)>0 FROM tool_runs WHERE name='file_read' AND status='completed' AND (instr(arguments,'Local-Toolchain.txt')>0 OR instr(arguments,'LANGUAGE_REFERENCE.md')>0)" and []) == "1" and "model consulted installed local documentation")
+    set source to read_file(concat(directory and "/hello.ep"))
+    coding_assert(string_contains(source and "define main:") && string_contains(source and "ECHO-PLAIN-731") and "authored source is the requested EP program")
+    coding_assert(file_exists(concat(directory and "/hello")) and "compiled executable exists beside source")
+    coding_assert(result_cache_scalar(db and "SELECT count(*)>0 FROM process_operations WHERE status='completed' AND json_extract(result,'$.exit_code')=0 AND instr(json_extract(result,'$.stdout_excerpt'),'Successfully compiled into native binary')>0" and []) == "1" and "actual successful compiler receipt retained")
+    coding_assert(result_cache_scalar(db and "SELECT count(*)>0 FROM process_operations WHERE status='completed' AND json_extract(result,'$.exit_code')=0 AND json_extract(result,'$.argv[0]')=? AND json_extract(result,'$.stdout_excerpt')='ECHO-PLAIN-731'||char(10)" and [concat(directory and "/hello")]) == "1" and "successful execution output retained")
+    coding_assert(result_cache_scalar(db and "SELECT count(*)>0 FROM turns t JOIN memories m ON m.id=t.reply_memory WHERE t.status='completed' AND t.answer_basis='execution' AND instr(m.body,'ECHO-PLAIN-731')>0 AND instr(m.body,'0')>0" and []) == "1" and "answer reports output and zero exit status from execution")
+    coding_assert(result_cache_scalar(db and "SELECT count(*) FROM turns WHERE status='pending'" and []) == "0" and "no unfinished conversation remains")
+    coding_assert(result_cache_scalar(db and "PRAGMA integrity_check" and []) == "ok" and "saved state integrity maintained")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " actual EP coding journey checks"))
+    return 0

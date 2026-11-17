@@ -1,0 +1,299 @@
+{
+  "description": "Authored fresh challenge fixture frozen before scoring; not independently collected. Related-memory rows deliberately distinguish retrieval relevance from support for the requested fact. No inference answers are evaluated here.",
+  "records": [
+    {
+      "key": "solder",
+      "body": "Mira keeps the soldering iron in the locked orange cabinet in the garage."
+    },
+    {
+      "key": "expenses",
+      "body": "Leonie reconciles travel reimbursements on the last Thursday of each month."
+    },
+    {
+      "key": "launch",
+      "body": "The Juniper public launch was postponed until 18 September because accessibility testing is unfinished."
+    },
+    {
+      "key": "entrance",
+      "body": "Visitors using wheelchairs should enter the studio through the courtyard ramp, not the front steps."
+    },
+    {
+      "key": "contact",
+      "body": "For urgent laboratory equipment faults, telephone technician Arun on extension 204."
+    },
+    {
+      "key": "watering",
+      "body": "During winter the greenhouse succulents are watered once every three weeks."
+    },
+    {
+      "key": "allergy",
+      "body": "Celia cannot eat sesame; meals for her must exclude tahini and sesame oil."
+    },
+    {
+      "key": "printer",
+      "body": "The upstairs label printer jams unless the glossy side of the roll faces downward."
+    },
+    {
+      "key": "backup",
+      "body": "The encrypted design archive is copied to the external silver SSD every Friday before shutdown."
+    },
+    {
+      "key": "mentor",
+      "body": "Tomas mentors new volunteers during their first two Saturday shifts at the repair cafe."
+    },
+    {
+      "key": "lease",
+      "body": "The ceramics workshop lease expires on 30 November; renewal discussions must start in August."
+    },
+    {
+      "key": "battery",
+      "body": "The field recorder takes two rechargeable AA cells; spare batteries are in the microphone pouch."
+    },
+    {
+      "key": "invoice",
+      "body": "Send supplier invoices as PDF attachments to Priya, who assigns each one a purchase-order number."
+    },
+    {
+      "key": "meeting",
+      "body": "The neighbourhood seed exchange meets in the library basement at 10:30 on the first Sunday."
+    },
+    {
+      "key": "paint",
+      "body": "Use water-based varnish on the toy shelves because solvent fumes trigger Daniel's headaches."
+    },
+    {
+      "key": "bike",
+      "body": "After the rear tyre punctured, Noor left the folding bicycle at Elm Street Cycles for collection on Tuesday."
+    },
+    {
+      "key": "password",
+      "body": "The guest wireless password is printed inside the reception drawer; do not read it aloud in the waiting room."
+    },
+    {
+      "key": "seedlings",
+      "body": "Keep the tomato seedlings indoors until overnight temperatures remain above ten degrees Celsius."
+    },
+    {
+      "key": "refund",
+      "body": "Refunds for the cancelled weaving class will be issued to the original payment cards within seven working days."
+    },
+    {
+      "key": "shipping",
+      "body": "Fragile glass samples go in foam-lined boxes with upright arrows on every side."
+    },
+    {
+      "key": "quiet",
+      "body": "The shared study room is reserved for silent work until noon; group discussions move to the kitchen."
+    },
+    {
+      "key": "calibrate",
+      "body": "Calibrate the digital scale with the sealed 100-gram reference weight before weighing pigments."
+    },
+    {
+      "key": "museum",
+      "body": "Our museum visit booking is under the surname Iqbal, and the confirmation code is RIVER-682."
+    },
+    {
+      "key": "translator",
+      "body": "For the oral-history recordings, Malika translates spoken Arabic and Joana checks the English subtitles."
+    },
+    {
+      "key": "authored_procedure",
+      "body": "Model-authored note; not independently verified: Before comparing monthly accounts, open the original ledger and check its reporting period."
+    }
+  ],
+  "queries": [
+    {
+      "query": "Where should someone on wheels get into our studio?",
+      "expected": [
+        "entrance"
+      ],
+      "answer_coverage": "supported"
+    },
+    {
+      "query": "Who should I ring when lab apparatus stops working urgently?",
+      "expected": [
+        "contact"
+      ],
+      "answer_coverage": "supported"
+    },
+    {
+      "query": "Which direction does the shiny paper surface face in the label machine?",
+      "expected": [
+        "printer"
+      ],
+      "answer_coverage": "supported"
+    },
+    {
+      "query": "What do we do with the design files before turning everything off on Fridays?",
+      "expected": [
+        "backup"
+      ],
+      "answer_coverage": "supported"
+    },
+    {
+      "query": "When should we begin talking about keeping the pottery workspace?",
+      "expected": [
+        "lease"
+      ],
+      "answer_coverage": "supported"
+    },
+    {
+      "query": "Who allocates order references to bills from vendors?",
+      "expected": [
+        "invoice"
+      ],
+      "answer_coverage": "supported"
+    },
+    {
+      "query": "How long will it take to get the weaving lesson payment back?",
+      "expected": [
+        "refund"
+      ],
+      "answer_coverage": "supported"
+    },
+    {
+      "query": "Which person converts the Arabic interviews and who reviews the translated captions?",
+      "expected": [
+        "translator"
+      ],
+      "answer_coverage": "supported"
+    },
+    {
+      "query": "What brand is the soldering iron in the orange cabinet?",
+      "expected": [
+        "solder"
+      ],
+      "answer_coverage": "missing_fact_related_memory_only"
+    },
+    {
+      "query": "What is the price of the silver SSD used for our design backups?",
+      "expected": [
+        "backup"
+      ],
+      "answer_coverage": "missing_fact_related_memory_only"
+    },
+    {
+      "query": "What is the street address of the library where our seed exchange meets?",
+      "expected": [
+        "meeting"
+      ],
+      "answer_coverage": "missing_fact_related_memory_only"
+    },
+    {
+      "query": "How much rent do we pay for the ceramics workshop?",
+      "expected": [
+        "lease"
+      ],
+      "answer_coverage": "missing_fact_related_memory_only"
+    },
+    {
+      "query": "What is the serial number of our upstairs label printer?",
+      "expected": [
+        "printer"
+      ],
+      "answer_coverage": "missing_fact_related_memory_only"
+    },
+    {
+      "query": "What exact wireless password is printed in the reception drawer?",
+      "expected": [
+        "password"
+      ],
+      "answer_coverage": "missing_fact_related_memory_only"
+    },
+    {
+      "query": "What is the museum admission fee for our Iqbal booking?",
+      "expected": [
+        "museum"
+      ],
+      "answer_coverage": "missing_fact_related_memory_only"
+    },
+    {
+      "query": "What is the current account balance in the ledger we should review?",
+      "expected": [
+        "authored_procedure"
+      ],
+      "answer_coverage": "missing_fact_related_memory_only"
+    },
+    {
+      "query": "How does a smartphone lithium-ion battery chemically store energy?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "What caused the invention of the first printing press in Europe?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "Who wrote the novel The Glass Bead Game?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "How is a PDF attachment encoded inside an email message?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "Which September dates offer the best aurora viewing in Iceland?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "What is the mathematical definition of an inverse function?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "Why does spoken Arabic have regional dialects?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "What pigments did prehistoric cave artists use?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "How are computer processor instructions translated into machine code?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "Why do desert succulents use a different photosynthetic pathway?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "What is the chemical formula of sesame oil?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "How does encryption of an external drive work mathematically?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "Who invented the folding bicycle?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "What physical principle makes a digital weighing scale work?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "How does a wireless router convert electrical signals to radio waves?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    },
+    {
+      "query": "What is the history of the surname Iqbal?",
+      "expected": [],
+      "answer_coverage": "no_relevant_personal_record"
+    }
+  ]
+}

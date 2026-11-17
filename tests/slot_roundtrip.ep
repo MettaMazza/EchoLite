@@ -1,0 +1,66 @@
+# Save and reload an idle slot without generating or changing its prompt.
+import "../src/slot_manifest"
+import "fs"
+import "os"
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set credential to get_list(args and 1)
+    set home to path_dirname(credential)
+    set lock to slot_lock(home)
+    if lock < 0:
+        display "Native slot is busy."
+        return 1
+    set token to string_trim(read_file(credential))
+    set state to get_list(args and 2)
+    set database to concat(state and "/memory.sqlite3")
+    if file_exists(database):
+        display "Use new isolated state."
+        return 1
+    set db to sql_open(database)
+    if sql_execute(db and "PRAGMA synchronous=FULL; CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE prompt_cache(namespace TEXT,epoch TEXT,name TEXT,payload BLOB,digest TEXT,bytes INTEGER,used INTEGER,PRIMARY KEY(namespace,name));") != 0:
+        return 1
+    set binding to slot_binding(db and state and "native-roundtrip-v1" and "0")
+    set slots to transport_get(8400 and "/slots" and token)
+    if result_cache_scalar(db and "SELECT CASE WHEN json_type(?)='array' THEN json_array_length(?)=1 AND json_extract(?,'$[0].id')=0 AND json_extract(?,'$[0].is_processing')=0 ELSE 0 END" and [slots,slots,slots,slots]) != "1":
+        display "Runtime must have one idle slot."
+        return 1
+    set name to concat("echolite-" and concat(result_cache_scalar(db and "SELECT lower(hex(randomblob(32)))" and []) and ".bin"))
+    set path to concat(home and concat("/native-slots/" and name))
+    if file_exists(path):
+        return 1
+    set saved to slot_control(db and token and "save" and name)
+    display saved
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [saved]) != "ok":
+        return 1
+    if string_equals(result_cache_scalar(db and "SELECT CAST(json_extract(?,'$.n_written') AS TEXT)" and [saved]) and int_to_string(file_size(path))) == 0:
+        display "Saved byte count does not match disk."
+        return 1
+    set directory to native_open(concat(home and "/native-slots") and 17826048 and 0)
+    set published to slot_manifest_publish(db and state and directory and "native-roundtrip-v1" and "0" and binding and saved)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [published]) != "ok":
+        display published
+        return 1
+    sql_close(db)
+    set db to sql_open(database)
+    set manifest to slot_manifest_load(db and state and directory and "native-roundtrip-v1" and "0")
+    if manifest == "":
+        display "Saved manifest did not survive reopen and integrity validation."
+        return 1
+    set selected to result_cache_scalar(db and "SELECT json_extract(?,'$.filename')" and [manifest])
+    if string_equals(selected and name) == 0:
+        return 1
+    set restored to slot_control(db and token and "restore" and selected)
+    display restored
+    set passed to result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.n_saved')=json_extract(?,'$.n_restored') AND json_extract(?,'$.n_written')=json_extract(?,'$.n_read')" and [restored,saved,restored,saved,restored])
+    if passed != "1":
+        display "Saved snapshot retained for recovery."
+        return 1
+    if ep_dlcall1(ep_dlsym(native_system() and "unlink") and path) != 0:
+        return 1
+    ep_dlcall1(ep_dlsym(native_system() and "close") and directory)
+    slot_unlock(lock)
+    sql_close(db)
+    display "PASS: native slot disk save/restore, durable manifest reopen and integrity validation; no generation request"
+    return 0

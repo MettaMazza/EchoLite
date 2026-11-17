@@ -1,0 +1,16 @@
+import "../src/transport"
+import "../src/result_cache"
+import "fs"
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set token to string_trim(read_file(get_list(args and 1)))
+    set response to transport_get(8400 and "/slots" and token)
+    set db to sql_open(":memory:")
+    if result_cache_scalar(db and "SELECT json_type(?)" and [response]) != "array":
+        display response
+        return 1
+    display result_cache_scalar(db and "SELECT json_group_array(json_object('id',json_extract(value,'$.id'),'is_processing',json_extract(value,'$.is_processing'),'n_ctx',json_extract(value,'$.n_ctx'),'n_tokens',json_extract(value,'$.n_tokens'))) FROM json_each(?)" and [response])
+    sql_close(db)
+    return 0

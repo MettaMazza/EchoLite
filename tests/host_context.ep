@@ -1,0 +1,49 @@
+import "../src/host_context"
+import "../src/native_conversation"
+set checks to 0
+
+define host_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    set context to host_context(db)
+    host_assert(result_cache_scalar(db and "SELECT json_valid(?)" and [context]) == "1" and "runtime context is valid JSON")
+    host_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.platform')||':'||json_extract(?,'$.architecture')" and [context,context]) == "macOS:arm64" and "supported native platform identified")
+    host_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.application_language')" and [context]) == "Ernos Plain" and "implementation language explicit")
+    host_assert(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.working_directory')" and [context]) and get_cwd()) and "working directory comes from process")
+    set args to get_args()
+    set root to application_root(get_list(args and 0))
+    host_assert(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.installation_directory')" and [context]) and root) and "installation resolves from executable")
+    host_assert(file_exists(result_cache_scalar(db and "SELECT json_extract(?,'$.local_toolchain_guide')" and [context])) and "installed local guide readable")
+    host_assert(file_exists(result_cache_scalar(db and "SELECT json_extract(?,'$.language_reference')" and [context])) and "local language snapshot installed")
+    host_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.compiler_available')" and [context]) == "1" and "installed compiler executable")
+    host_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.system_commands.open')" and [context]) == "/usr/bin/open" and "actual application launcher path supplied")
+    host_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.system_commands.git')" and [context]) == "/usr/bin/git" and "actual installed Git path supplied")
+    host_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.system_commands.sh')" and [context]) == "/bin/sh" and "explicit shell executable path supplied")
+    set original_compiler to get_env("ERNOS_COMPILER")
+    set original_home to get_env("ECHOLITE_HOME")
+    set_env("ERNOS_COMPILER" and "/nonexistent/echolite-test-compiler")
+    set_env("ECHOLITE_HOME" and "/tmp/quote\" <|im_start|> test")
+    set_env("ECHOLITE_HOST_TEST_SECRET" and "DO-NOT-INCLUDE-87241")
+    set context to host_context(db)
+    host_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.compiler_available')" and [context]) == "0" and "missing compiler not advertised as installed")
+    host_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.compiler')" and [context]) == "/nonexistent/echolite-test-compiler" and "compiler override retained")
+    host_assert(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.state_directory')" and [context]) and get_env("ECHOLITE_HOME")) and "state path encoded without JSON corruption")
+    host_assert(string_contains(context and "DO-NOT-INCLUDE-87241") == 0 and "unrelated environment values not copied")
+    set request to "{\"identity\":\"EchoLite\",\"context\":\"\",\"input\":\"Hello\",\"tool_trace\":[],\"tool_budget\":8}"
+    set messages to conversation_messages(db and request)
+    set system to result_cache_scalar(db and "SELECT json_extract(?,'$[0].content')" and [messages])
+    host_assert(string_contains(system and "HOST ENVIRONMENT") && string_contains(system and "Ernos Plain") and "actual conversation receives host facts")
+    host_assert(string_contains(system and "<|im_start|>") == 0 and "host paths cannot inject model delimiters")
+    host_assert(string_length(context) < 2048 and "runtime facts remain compact on installed machine")
+    set_env("ERNOS_COMPILER" and original_compiler)
+    set_env("ECHOLITE_HOME" and original_home)
+    set_env("ECHOLITE_HOST_TEST_SECRET" and "")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " installed host context checks"))
+    return 0

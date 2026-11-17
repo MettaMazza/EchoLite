@@ -1,0 +1,81 @@
+# EP orchestration for the native model runtime. All model text is streamed.
+import "transport"
+import "model_stream"
+import "native_progress"
+
+define native_model_request with token and payload and events and cancel:
+    set response to transport_request_cancel("POST" and 8400 and "/v1/chat/completions" and token and payload and 1 and events and cancel)
+    set finished to concat("done\n" and response)
+    send finished to events
+    return 0
+
+define native_model_generate with db and token and payload and updates returning Str:
+    set events to channel
+    set state to model_stream()
+    set cancel to ""
+    if PROGRESS_TURN != "":
+        set nonce to result_cache_scalar(db and "SELECT nonce FROM turn_signals WHERE turn_id=? AND length(nonce)=32 AND nonce NOT GLOB '*[^0-9a-f]*'" and [PROGRESS_TURN])
+        if nonce != "" && get_env("ECHOLITE_HOME") != "":
+            set cancel to concat(get_env("ECHOLITE_HOME") and concat("/cancel-" and nonce))
+    spawn native_model_request(token and payload and events and cancel)
+    set finished to 0
+    repeat while finished == 0:
+        set incoming to receive from events
+        set event to ptr_to_str(incoming)
+        if starts_with(event and "data\n"):
+            model_stream_feed(db and state and substring(event and 5 and string_length(event) - 5) and 0)
+            set live_snapshot to model_stream_result(db and state)
+            progress_publish(db and live_snapshot and transport_now(native_system()) and 0)
+            if updates != 0:
+                set snapshot to live_snapshot
+                send snapshot to updates
+        else if starts_with(event and "done\n"):
+            set response to substring(event and 5 and string_length(event) - 5)
+            if starts_with(response and "{\"status\":\"transport_error\""):
+                set_list(state and 7 and response)
+            else:
+                model_stream_feed(db and state and "" and 1)
+            set finished to 1
+    set result to model_stream_result(db and state)
+    progress_publish(db and result and transport_now(native_system()) and 1)
+    return result
+
+# Keep the cache in the same database and deletion epoch as retained memory.
+import "result_cache"
+import "slot_lifecycle"
+
+define native_model_cached with db and token and payload and namespace and epoch and updates returning Str:
+    set cached to result_cache_get(db and namespace and payload and epoch)
+    if cached != "":
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [cached]) == "ok":
+            set cached to result_cache_scalar(db and "SELECT json_set(?,'$.cache_hit',json('true'))" and [cached])
+        progress_publish(db and cached and transport_now(native_system()) and 1)
+        if updates != 0:
+            send cached to updates
+        return cached
+    set home to get_env("ECHOLITE_HOME")
+    set runtime_home to slot_runtime_home()
+    if home == "" || runtime_home == "":
+        return lease_error("Persistent inference requires configured local state")
+    set lock to slot_lock(runtime_home)
+    if lock < 0:
+        return lease_error("Native inference slot is busy; wait for the current operation")
+    set directory to slot_directory(runtime_home)
+    if directory < 0:
+        slot_unlock(lock)
+        return lease_error("Cannot open private native slot directory")
+    set prepared to slot_prepare(db and home and directory and namespace and epoch and token)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [prepared]) != "ok":
+        ep_dlcall1(ep_dlsym(native_system() and "close") and directory)
+        slot_unlock(lock)
+        return prepared
+    set result to native_model_generate(db and token and payload and updates)
+    set valid to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.status') ELSE '' END" and [result,result])
+    if valid == "ok":
+        set saved to slot_save(db and home and directory and namespace and epoch and token)
+        set result to result_cache_scalar(db and "SELECT json_set(?,'$.slot_restore',json(?),'$.slot_save',json(?),'$.cache_hit',json('false'))" and [result,prepared,saved])
+    ep_dlcall1(ep_dlsym(native_system() and "close") and directory)
+    slot_unlock(lock)
+    if valid != "ok":
+        return result
+    return result_cache_put(db and namespace and payload and epoch and result)

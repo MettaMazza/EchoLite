@@ -1,0 +1,63 @@
+# An on-demand driver guardian owns a private lifetime lock. No browser actions
+# are retried, no OS settings are changed, and no existing service is killed.
+import "browser_wire"
+import "application_paths"
+import "state_lock"
+
+define browser_available with db and reply:
+    set params to [reply,reply]
+    return result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')='completed' AND json_type(?,'$.value.ready') IN ('true','false')" and params) == "1"
+
+define browser_absent with db and reply:
+    set params to [reply]
+    return result_cache_scalar(db and "SELECT json_extract(?,'$.curl_exit_code')=7" and params) == "1"
+
+define browser_serve with db and root:
+    set libc to native_system()
+    set lock to private_lock(concat(root and "/data") and "browser-driver.lock")
+    if lock < 0:
+        return 1
+    if ep_dlcall2(ep_dlsym(libc and "flock") and lock and 6) != 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and lock)
+        return 0
+    set observed to browser_request(db and "GET" and "/status" and "")
+    set code to 1
+    if browser_absent(db and observed):
+        set pid to process_spawn_streams("/usr/bin/safaridriver" and ["--port","8410"] and 1 and 2 and 0 and "/private/tmp" and 1)
+        if pid > 0:
+            set code to process_poll(pid)
+            repeat while code == 0 - 1:
+                ep_dlcall1(ep_dlsym(libc and "usleep") and 250000)
+                set code to process_poll(pid)
+    else if browser_available(db and observed):
+        set code to 0
+    ep_dlcall1(ep_dlsym(libc and "close") and lock)
+    return code
+
+define browser_ensure with db and root returning Str:
+    set observed to browser_request(db and "GET" and "/status" and "")
+    if browser_available(db and observed):
+        return ""
+    if browser_absent(db and observed) == 0:
+        return "Port 8410 did not return a usable WebDriver status; no service was replaced."
+    if root == "" || application_directory(concat(root and "/data") and 0) == 0:
+        return "Cannot locate the private browser service directory."
+    set libc to native_system()
+    set log to private_lock(concat(root and "/data") and "browser-driver.log")
+    if log < 0:
+        return "Cannot open the private browser driver log."
+    native_fcntl_int(log and 4 and 8)
+    set executable to concat(root and "/bin/echolite-browser")
+    set pid to process_spawn_streams(executable and ["--serve-driver"] and log and log and 1 and "/private/tmp" and 1)
+    ep_dlcall1(ep_dlsym(libc and "close") and log)
+    if pid == 0:
+        return "Could not launch the browser driver guardian."
+    set deadline to transport_now(libc) + 10000
+    repeat while transport_now(libc) < deadline:
+        set observed to browser_request(db and "GET" and "/status" and "")
+        if browser_available(db and observed):
+            return ""
+        if browser_absent(db and observed) == 0:
+            return "Browser startup returned an unexpected response; no session was created."
+        ep_dlcall1(ep_dlsym(libc and "usleep") and 200000)
+    return "Browser driver is not ready; check browser status and data/browser-driver.log. No session was created."

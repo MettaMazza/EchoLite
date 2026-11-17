@@ -1,0 +1,107 @@
+import "../src/application_paths"
+import "../src/task_schedule"
+import "../src/process_capture"
+import "../src/process_bytes"
+set checks to 0
+
+define schedule_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define schedule_preview with core and home returning Str:
+    set captured to process_capture(core and ["retention-preview","scheduled","2099-01-01"] and home and 10000 and 0 - 1)
+    set output to get_list(process_display(get_list(captured and 2) and get_list(captured and 3) and 1) and 0)
+    schedule_assert(get_list(captured and 0) == 0 and "retention preview executes")
+    capture_release(captured)
+    return output
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set home to get_list(args and 1)
+    set core to get_list(args and 2)
+    schedule_assert(ep_dlcall2(ep_dlsym(native_system() and "mkdir") and home and 448) == 0 and "private fixture")
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and concat(home and "/absent-token"))
+    schedule_assert(application_wait(core and ["init"]) == 0 and "core initializes scheduling")
+    application_wait(core and ["remember","episodic","scheduled","user","Calculate 47*19 later"])
+    application_wait(core and ["task-create","scheduled","1","Calculate 47*19","Calculator result 893"])
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(db and "PRAGMA foreign_keys=ON")
+    schedule_assert(application_wait(core and ["schedule-set","scheduled","2","1","3600","1"]) == 0 and "future schedule through core")
+    set identifier to result_cache_scalar(db and "SELECT memory FROM task_schedules" and [])
+    schedule_assert(schedule_due(db and "scheduled") == "" and "future work not due")
+    schedule_assert(string_contains(schedule_preview(core and home) and "task-schedule") == 0 and "armed schedule protected from retention")
+    sql_close(db)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(db and "PRAGMA foreign_keys=ON")
+    schedule_assert(result_cache_scalar(db and "SELECT status FROM task_schedules" and []) == "armed" and "schedule survives reopen")
+    schedule_assert(application_wait(core and ["schedule-set","scheduled","2","1","0","1"]) != 0 and "duplicate does not change due time")
+    schedule_assert(application_wait(core and ["schedule-cancel","other",identifier]) != 0 and "cross-project cancellation rejected")
+    schedule_assert(application_wait(core and ["schedule-cancel","scheduled",identifier]) == 0 and "cancellation persisted")
+    schedule_assert(application_wait(core and ["schedule-cancel","scheduled",identifier]) == 0 and "cancellation is idempotent")
+    schedule_assert(string_contains(schedule_preview(core and home) and "task-schedule") and "cancelled schedule can enter retention review")
+    schedule_assert(application_wait(core and ["schedule-set","scheduled","2","2","0","1"]) != 0 and "stale task revision rejected")
+    schedule_assert(application_wait(core and ["schedule-set","scheduled","2","1","-1","1"]) != 0 and "negative delay rejected")
+    schedule_assert(application_wait(core and ["schedule-set","scheduled","2","1","31536001","1"]) != 0 and "bounded delay enforced")
+    schedule_assert(application_wait(core and ["schedule-set","scheduled","2","1","0","1"]) == 0 and "explicit replacement due immediately")
+    set identifier to schedule_due(db and "scheduled")
+    schedule_assert(identifier != "" and "due work selected")
+    schedule_assert(schedule_due(db and "other") == "" and "dispatch project isolated")
+    sql_execute(db and "INSERT INTO turns(project,user_memory,me_version,status) VALUES('other',1,1,'pending')")
+    schedule_assert(schedule_due(db and "scheduled") == "" and "pending interactive work blocks dispatch globally")
+    sql_execute(db and "UPDATE turns SET status='completed'")
+    application_wait(core and ["task-update","scheduled","2","1","planned","Use calculator","","1"])
+    schedule_assert(schedule_due(db and "scheduled") == "" and "checkpoint change cancels old schedule")
+    schedule_assert(result_cache_scalar(db and "SELECT count(*) FROM task_schedules WHERE status='armed'" and []) == "0" and "stale schedule persistently cancelled")
+    schedule_assert(application_wait(core and ["schedule-set","scheduled","2","2","0","1"]) == 0 and "current revision can be armed")
+    # Missing embedding runtime fails preparation without consuming the schedule.
+    schedule_assert(application_wait(core and ["chat-due","scheduled"]) != 0 and "missing recall runtime rejects preparation")
+    schedule_assert(schedule_due(db and "scheduled") != "" and "preparation failure leaves schedule armed")
+    # Exercise the exact transactional claim used after recall, without inference.
+    set identifier to schedule_due(db and "scheduled")
+    sql_execute(db and "BEGIN IMMEDIATE")
+    sql_execute(db and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','scheduled','user-message','Synthetic scheduler event')")
+    set event to result_cache_scalar(db and "SELECT last_insert_rowid()" and [])
+    sql_execute_params(db and "INSERT INTO turns(project,user_memory,me_version,status) VALUES('scheduled',?,1,'pending')" and [event])
+    set dispatched_turn to result_cache_scalar(db and "SELECT last_insert_rowid()" and [])
+    schedule_assert(schedule_claim(db and identifier and "other" and dispatched_turn and event) == 0 and "foreign project cannot claim")
+    schedule_assert(schedule_claim(db and identifier and "scheduled" and dispatched_turn and "1") == 0 and "claim must match the recorded turn event")
+    schedule_assert(schedule_claim(db and identifier and "scheduled" and dispatched_turn and event) == 1 and "atomic claim succeeds")
+    sql_execute(db and "ROLLBACK")
+    schedule_assert(schedule_due(db and "scheduled") != "" and "pre-commit crash rolls back claim and event together")
+    sql_execute(db and "BEGIN IMMEDIATE")
+    sql_execute(db and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','scheduled','user-message','Synthetic scheduler event')")
+    set event to result_cache_scalar(db and "SELECT last_insert_rowid()" and [])
+    sql_execute_params(db and "INSERT INTO turns(project,user_memory,me_version,status) VALUES('scheduled',?,1,'pending')" and [event])
+    set dispatched_turn to result_cache_scalar(db and "SELECT last_insert_rowid()" and [])
+    schedule_assert(schedule_claim(db and identifier and "scheduled" and dispatched_turn and event) == 1 and "dispatch claimed again after rollback")
+    sql_execute(db and "COMMIT")
+    sql_close(db)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(db and "PRAGMA foreign_keys=ON")
+    sql_execute(db and "BEGIN IMMEDIATE")
+    schedule_assert(schedule_claim(db and identifier and "scheduled" and dispatched_turn and event) == 0 and "committed dispatch cannot be claimed twice")
+    sql_execute(db and "ROLLBACK")
+    sql_execute_params(db and "UPDATE turns SET status='failed' WHERE id=?" and [dispatched_turn])
+    schedule_assert(result_cache_scalar(db and "SELECT count(*) FROM task_schedules WHERE status='dispatched' AND turn_id IS NOT NULL" and []) == "1" and "one durable dispatch receipt")
+    schedule_assert(schedule_needs_work(db and dispatched_turn) and "planned scheduled task cannot end as future confirmation")
+    sql_execute(db and "UPDATE tasks SET status='waiting'")
+    schedule_assert(schedule_needs_work(db and dispatched_turn) == 0 and "recorded waiting checkpoint can finish scheduled turn")
+    sql_execute(db and "UPDATE tasks SET status='planned'")
+
+    schedule_assert(result_cache_scalar(db and "SELECT count(*) FROM memories WHERE source='scheduled-event'" and []) == "1" and "scheduled event is not mislabeled as user speech")
+    schedule_assert(application_wait(core and ["chat-due","scheduled"]) == 0 and "repeated poll is a no-op")
+    schedule_assert(result_cache_scalar(db and "SELECT count(*) FROM memories WHERE source='scheduled-event'" and []) == "1" and "failed dispatch never silently re-executed")
+    schedule_assert(result_cache_scalar(db and "SELECT count(*) FROM derivations d JOIN task_schedules s ON s.memory=d.parent JOIN turns t ON t.id=s.turn_id WHERE d.child=t.user_memory" and []) == "1" and "scheduled turn linked to schedule provenance")
+    sql_execute(db and "DELETE FROM memories WHERE id=2")
+    schedule_assert(result_cache_scalar(db and "SELECT count(*) FROM task_schedules" and []) == "0" and "forgetting task removes executable schedule")
+    schedule_assert(result_cache_scalar(db and "PRAGMA integrity_check" and []) == "ok" and "database integrity")
+    schedule_assert(result_cache_scalar(db and "SELECT count(*) FROM pragma_foreign_key_check" and []) == "0" and "foreign keys valid")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " persistent scheduled dispatch checks"))
+    return 0

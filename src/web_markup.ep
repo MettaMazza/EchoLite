@@ -1,0 +1,112 @@
+# HTTPS URL resolution and bounded source/link extraction through native libraries.
+import "markup"
+import "dictionary"
+set WEB_URL_LIBRARY to 0
+
+define web_url_library:
+    if WEB_URL_LIBRARY == 0:
+        set WEB_URL_LIBRARY to ep_dlopen("/usr/lib/libcurl.4.dylib")
+    return WEB_URL_LIBRARY
+
+define web_url_part with handle and part returning Str:
+    set output to alloc_bytes(8)
+    set result to ""
+    if ep_dlcall4(ep_dlsym(web_url_library() and "curl_url_get") and handle and part and output and 0) == 0:
+        set pointer to lease_integer(output and 0 and 8)
+        if pointer != 0:
+            set result to ptr_to_str(pointer)
+            ep_dlcall1(ep_dlsym(web_url_library() and "curl_free") and pointer)
+    free_bytes(output)
+    return result
+
+define web_url with input and base returning Str:
+    if string_length(input) == 0 || string_length(input) > 2048:
+        return ""
+    set i to 0
+    repeat while i < string_length(input):
+        set byte to get_character(input and i)
+        if byte < 33 || byte == 127 || byte == 92:
+            return ""
+        set i to i + 1
+    set library to web_url_library()
+    set handle to ep_dlcall0(ep_dlsym(library and "curl_url"))
+    if handle == 0:
+        return ""
+    set code to 0
+    if base != "":
+        set code to ep_dlcall4(ep_dlsym(library and "curl_url_set") and handle and 0 and base and 0)
+    if code == 0:
+        set code to ep_dlcall4(ep_dlsym(library and "curl_url_set") and handle and 0 and input and 0)
+    set result to ""
+    if code == 0 && web_url_part(handle and 1) == "https" && web_url_part(handle and 5) != "":
+        set output to alloc_bytes(8)
+        set user to ep_dlcall4(ep_dlsym(library and "curl_url_get") and handle and 2 and output and 0)
+        if user == 0:
+            ep_dlcall1(ep_dlsym(library and "curl_free") and lease_integer(output and 0 and 8))
+        set password to ep_dlcall4(ep_dlsym(library and "curl_url_get") and handle and 3 and output and 0)
+        if password == 0:
+            ep_dlcall1(ep_dlsym(library and "curl_free") and lease_integer(output and 0 and 8))
+        free_bytes(output)
+        set port to web_url_part(handle and 6)
+        if user != 0 && password != 0 && (port == "" || port == "443"):
+            ep_dlcall4(ep_dlsym(library and "curl_url_set") and handle and 9 and 0 and 0)
+            set result to web_url_part(handle and 0)
+    ep_dlcall1(ep_dlsym(library and "curl_url_cleanup") and handle)
+    if string_length(result) > 2048:
+        return ""
+    return result
+
+define web_markup_error with db and text returning Str:
+    set params to [text]
+    return result_cache_scalar(db and "SELECT json_object('status','error','text',?)" and params)
+
+define web_html with db and source and final_url returning Str:
+    if string_length(source) > 524288 || web_url(final_url and "") == "":
+        return web_markup_error(db and "Web HTML requires a valid HTTPS source and at most 512 KiB")
+    set document to markup_parse(source and 1)
+    if document == 0:
+        return web_markup_error(db and "Cannot parse web HTML")
+    set base to final_url
+    set base_href to markup_xpath(document and "string((//base[@href])[1]/@href)")
+    if base_href != "":
+        set base to web_url(base_href and final_url)
+        if base == "":
+            markup_close(document)
+            return web_markup_error(db and "Unsupported HTML base URL; cannot resolve links faithfully")
+    set state to create_list()
+    append_list(state and create_builder())
+    append_list(state and 0)
+    append_list(state and 0)
+    append_list(state and 0)
+    set root to ep_dlcall1(ep_dlsym(markup_library() and "xmlDocGetRootElement") and document)
+    markup_walk(root and state and 0)
+    if get_list(state and 3) != 0:
+        markup_close(document)
+        return web_markup_error(db and "Web HTML exceeds structural extraction budget")
+    set text to markup_normalize(builder_to_string(get_list(state and 0)))
+    set captured to dictionary_excerpt(text and 20000)
+    set truncated to string_length(captured) < string_length(text)
+    set title to dictionary_excerpt(markup_xpath(document and "string(//title)") and 300)
+    set selector to "//a[@href and not(ancestor::script or ancestor::style or ancestor::noscript or ancestor::head)]"
+    set count to string_to_int(markup_xpath(document and concat("count(" and concat(selector and ")"))))
+    set links to "[]"
+    set links_truncated to 0
+    set i to 1
+    repeat while i <= count && i <= 1000 && links_truncated == 0:
+        set prefix to concat("(" and concat(selector and concat(")[" and concat(int_to_string(i) and "]"))))
+        set href to markup_xpath(document and concat("string(" and concat(prefix and "/@href)")))
+        set url to web_url(href and base)
+        if url != "":
+            if result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM json_each(?) WHERE json_extract(value,'$.url')=?)" and [links,url]) == "0":
+                set label to dictionary_excerpt(markup_normalize(markup_xpath(document and concat("string(" and concat(prefix and ")")))) and 160)
+                set expanded to result_cache_scalar(db and "SELECT json_insert(?,'$[#]',json_object('url',?,'text',?))" and [links,url,label])
+                if string_length(url) > 1024 || string_length(expanded) > 4096 || result_cache_scalar(db and "SELECT json_array_length(?)>8" and [expanded]) == "1":
+                    set links_truncated to 1
+                else:
+                    set links to expanded
+        set i to i + 1
+    if count > 1000:
+        set links_truncated to 1
+    markup_close(document)
+    set params to [captured,title,links,int_to_string(truncated),int_to_string(links_truncated)]
+    return result_cache_scalar(db and "SELECT json_object('status','ok','text',?,'title',?,'links',json(?),'capture_truncated',json(CASE WHEN CAST(? AS INTEGER)=1 THEN 'true' ELSE 'false' END),'links_truncated',json(CASE WHEN CAST(? AS INTEGER)=1 THEN 'true' ELSE 'false' END))" and params)

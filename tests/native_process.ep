@@ -1,0 +1,62 @@
+import "../src/native_process"
+import "string"
+import "../src/state_lock"
+import "os"
+
+define main:
+    set args to get_args()
+    if length_list(args) > 1:
+        if get_list(args and 1) == "detached-check":
+            ep_dlcall1(ep_dlsym(native_system() and "usleep") and 500000)
+            return 17
+        if string_equals(get_list(args and 1) and "spaces ; $(no-shell) 🌱"):
+            display "EP child output"
+            return 23
+        return 42
+    set pid to process_start(get_list(args and 0) and ["spaces ; $(no-shell) 🌱"])
+    if pid == 0:
+        return 1
+    set result to process_poll(pid)
+    repeat while result == 0 - 1:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 1000)
+        set result to process_poll(pid)
+    if result != 23:
+        display concat("FAIL: child exit " and int_to_string(result))
+        return 1
+    if process_start("/no/such/echolite-program" and []) != 0:
+        return 1
+    set filename to concat("echolite-process-" and concat(int_to_string(ep_dlcall0(ep_dlsym(native_system() and "getpid"))) and ".log"))
+    set path to concat("/private/tmp/" and filename)
+    set fd to private_lock("/private/tmp" and filename)
+    if fd < 0:
+        return 1
+    set pid to process_launch(get_list(args and 0) and ["spaces ; $(no-shell) 🌱"] and fd)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    if pid == 0:
+        return 1
+    set result to process_poll(pid)
+    repeat while result == 0 - 1:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 1000)
+        set result to process_poll(pid)
+    set output to read_file(path)
+    ep_dlcall1(ep_dlsym(native_system() and "unlink") and path)
+    if result != 23 || string_contains(output and "EP child output") == 0:
+        display "FAIL: redirected child output"
+        return 1
+    set pid to process_detached(get_list(args and 0) and ["detached-check"] and 0 - 1)
+    if pid == 0:
+        return 1
+    if ep_dlcall1(ep_dlsym(native_system() and "getsid") and pid) != pid || ep_dlcall1(ep_dlsym(native_system() and "getpgid") and pid) != pid:
+        display "FAIL: detached child did not receive its own session/group"
+        return 1
+    set result to process_poll(pid)
+    repeat while result == 0 - 1:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 1000)
+        set result to process_poll(pid)
+    if result != 17:
+        return 1
+    display "PASS: detached child has independent session/process group"
+    display "PASS: native stdout/stderr file redirection"
+
+    display "PASS: direct argv, Unicode, literal shell characters, exit status, failed launch"
+    return 0

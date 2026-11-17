@@ -1,0 +1,32 @@
+import "../src/web_snapshot"
+import "os"
+set checks to 0
+
+define cache_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    set path to get_list(args and 1)
+    set db to sql_open(path)
+    cache_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "isolated cache")
+    set url to "https://example.org/source"
+    set snapshot to "{\"status\":\"ok\",\"text\":\"Café MAPLE-173\",\"store\":true,\"url\":\"https://example.org/source\"}"
+    set saved to web_snapshot_store(db and "web-ep-test" and url and "0" and snapshot)
+    cache_assert(string_equals(saved and snapshot) and "storable source persisted")
+    sql_close(db)
+    set db to sql_open(path)
+    cache_assert(string_equals(result_cache_get(db and "web-ep-test" and url and "0") and snapshot) and "exact source survives database reopen")
+    set removed to result_cache_scalar(db and "SELECT json_set(?,'$.store',json('false'),'$.text','fresh non-storable source')" and [snapshot])
+    web_snapshot_store(db and "web-ep-test" and url and "0" and removed)
+    cache_assert(result_cache_get(db and "web-ep-test" and url and "0") == "" and "no-store erases prior saved representation")
+    sql_execute(db and "UPDATE metadata SET value='1'")
+    cache_assert(string_contains(web_snapshot_store(db and "web-ep-test" and url and "0" and snapshot) and "error") and "forgotten epoch rejects persistence")
+    cache_assert(string_contains(web_snapshot_store(db and "web-ep-test" and url and "0" and removed) and "error") and "non-storable response also observes forgetting")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " persistent web cache checks"))
+    return 0

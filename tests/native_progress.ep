@@ -1,0 +1,40 @@
+import "../src/native_progress"
+import "os"
+set checks to 0
+
+define progress_assert with condition and label:
+    if condition == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    sql_execute(db and "PRAGMA foreign_keys=ON; CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE turns(id INTEGER PRIMARY KEY,status TEXT); INSERT INTO turns VALUES(1,'pending');")
+    progress_assert(progress_initialize(db) == 0 and "progress schema")
+    progress_scope("1" and "0" and "0")
+    progress_assert(progress_publish(db and "{\"status\":\"streaming\",\"reasoning\":\"Live thought\"}" and 1000 and 0) and "live snapshot saved")
+    progress_publish(db and "{}" and 1050 and 0)
+    progress_assert(result_cache_scalar(db and "SELECT updates FROM model_progress" and []) == "1" and "write throttle")
+    progress_publish(db and "{\"reasoning\":\"Next thought\"}" and 1200 and 0)
+    progress_assert(result_cache_scalar(db and "SELECT updates FROM model_progress" and []) == "2" and "snapshot replaced")
+    progress_assert(result_cache_scalar(db and "SELECT count(*) FROM model_progress" and []) == "1" and "bounded latest snapshot")
+    sql_execute(db and "UPDATE metadata SET value='1'; DELETE FROM model_progress;")
+    progress_publish(db and "{\"reasoning\":\"Forgotten\"}" and 1400 and 1)
+    progress_assert(result_cache_scalar(db and "SELECT count(*) FROM model_progress" and []) == "0" and "forgotten output not resurrected")
+    progress_scope("1" and "0" and "1")
+    progress_publish(db and "{}" and 1450 and 1)
+    sql_execute(db and "UPDATE turns SET status='abandoned'")
+    progress_assert(result_cache_scalar(db and "SELECT count(*) FROM model_progress" and []) == "0" and "cancellation clears the previous snapshot")
+    progress_publish(db and "{}" and 1500 and 1)
+    progress_assert(result_cache_scalar(db and "SELECT count(*) FROM model_progress" and []) == "0" and "abandoned output not resurrected")
+    progress_assert(string_equals(progress_answer(db and "{\"type\":\"answer\",\"text\":\"Hello 🌱") and "Hello 🌱") and "partial UTF-8 answer decoded")
+    progress_assert(string_equals(progress_answer(db and "{\"type\":\"answer\",\"text\":\"hello\\nworld\"}") and "hello\nworld") and "JSON escapes decoded")
+    progress_assert(progress_answer(db and "{\"type\":\"tool\",\"name\":\"me_update\",\"text\":\"Not an answer\"}") == "" and "tool text not exposed as answer")
+    progress_assert(progress_answer(db and "{\"type\":\"answer\",\"text\":\"\\u12") == "" and "incomplete Unicode escape withheld")
+    progress_assert(string_equals(progress_answer(db and "{\"type\":\"answer\",\"text\":\"hello\u12") and "hello") and "valid prefix survives incomplete escape")
+    progress_scope("" and "" and "")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " live progress checks"))
+    return 0

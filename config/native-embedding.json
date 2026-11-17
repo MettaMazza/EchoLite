@@ -1,0 +1,15 @@
+{
+  "model": "sentence-transformers/all-MiniLM-L6-v2",
+  "native_repository": "LLukas22/all-MiniLM-L6-v2-GGUF",
+  "revision": "ae6369f25f3393dcca54ff7b41157ffd2e43e2e6",
+  "file": "models/native/all-minilm-l6-v2_f16.gguf",
+  "sha256": "7266519c8c9b860e99d561d2cb849cf546b248eb23bcb23787be5b11180daec3",
+  "bytes": 46220288,
+  "dimensions": 384,
+  "pooling": "mean",
+  "normalization": "L2",
+  "runtime_release": "b12359",
+  "device": "CPU",
+  "threads": 2,
+  "maximum_window_tokens_including_special": 256
+}

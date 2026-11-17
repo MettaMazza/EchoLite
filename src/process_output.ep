@@ -1,0 +1,93 @@
+# Saved-output reads cannot launch a process. Authorization comes from the tool journal.
+import "process_bytes"
+import "process_journal"
+import "transport"
+
+define process_output_error with db and text returning Str:
+    sql_execute(db and "ROLLBACK")
+    return process_journal_error(text)
+
+define process_output with db and expression and epoch and reader returning Str:
+    set parts to string_split(expression and ":")
+    if length_list(parts) != 3:
+        return process_journal_error("Use OPERATION_ID:stdout:BYTE_OFFSET or OPERATION_ID:stderr:BYTE_OFFSET")
+    set selected to get_list(parts and 0)
+    set stream to get_list(parts and 1)
+    set offset to transport_number(get_list(parts and 2) and 10 and 1048576)
+    if transport_number(selected and 10 and 999999999999999999) < 1 || offset < 0 || (stream != "stdout" && stream != "stderr"):
+        return process_journal_error("Invalid saved process output reference")
+    set selected to int_to_string(transport_number(selected and 10 and 999999999999999999))
+    if sql_execute(db and "BEGIN") != 0:
+        return process_journal_error("Cannot read process output snapshot")
+    if result_cache_epoch(db and epoch) == 0:
+        return process_output_error(db and "Memory epoch changed")
+    set project to result_cache_scalar(db and "SELECT t.project FROM tool_runs r JOIN turns t ON t.id=r.turn_id WHERE r.id=? AND r.name='process_output' AND r.arguments=? AND r.status='running' AND t.status='pending'" and [reader,expression])
+    if project == "":
+        return process_output_error(db and "Output read requires its matching pending journal entry")
+    set source to selected
+    set operations to "[]"
+    set receipt to ""
+    set depth to 0
+    set resolved to 0
+    repeat while depth < 8 && resolved == 0:
+        if result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM json_each(?) WHERE value=CAST(? AS INTEGER))" and [operations,source]) == "1":
+            return process_output_error(db and "Cyclic process output reference")
+        set receipt to result_cache_scalar(db and "SELECT o.result FROM process_operations o JOIN tool_runs r ON r.id=o.operation_id JOIN turns t ON t.id=r.turn_id WHERE r.id=? AND r.id<? AND r.name IN ('process_run','process_retry') AND t.project=? AND o.epoch=? AND o.status='completed'" and [source,reader,project,epoch])
+        if receipt == "" || result_cache_scalar(db and "SELECT json_valid(?)" and [receipt]) != "1":
+            return process_output_error(db and "No completed output in this project for that operation")
+        # The supervisor commits bytes and receipt atomically before the chat records
+        # its observation. A crash in that gap must not make saved output unreadable.
+        if string_length(receipt) > 14000 || result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.tool')='process_run' AND json_extract(?,'$.outcome') IN ('completed','failed')" and [receipt,receipt,receipt]) != "1":
+            return process_output_error(db and "Invalid completed process receipt")
+        set operations to result_cache_scalar(db and "SELECT json_insert(?,'$[#]',CAST(? AS INTEGER))" and [operations,source])
+        set next to result_cache_scalar(db and "SELECT CAST(json_extract(?,'$.output_ref') AS TEXT)" and [receipt])
+        if transport_number(next and 10 and 999999999999999999) < 1:
+            return process_output_error(db and "Invalid process output provenance")
+        set next to int_to_string(transport_number(next and 10 and 999999999999999999))
+        if string_equals(next and source):
+            set resolved to 1
+        else:
+            set source to next
+        set depth to depth + 1
+    if resolved == 0:
+        return process_output_error(db and "Process output reference chain exceeds eight operations")
+    set query to concat("SELECT length(" and concat(stream and concat("),hex(substr(" and concat(stream and ",CAST(? AS INTEGER)+1,1024)) FROM process_operations WHERE operation_id=?"))))
+    set rows to sql_query_params(db and query and [int_to_string(offset),source])
+    if length_list(rows) != 1:
+        return process_output_error(db and "Saved output bytes are unavailable")
+    set row to get_list(rows and 0)
+    set total to string_to_int(get_list(row and 0))
+    if total < 0 || total > 1048576:
+        return process_output_error(db and "Saved output exceeds the capture budget")
+    if offset > total:
+        return process_output_error(db and "Offset is beyond retained process output")
+    set hex to get_list(row and 1)
+    set count to string_length(hex) / 2
+    set data to alloc_bytes(count + 1)
+    set i to 0
+    repeat while i < count:
+        poke_byte(data and i and transport_number(substring(hex and i * 2 and 2) and 16 and 255))
+        set i to i + 1
+    set display to process_display(data and count and offset + count >= total)
+    set consumed to get_list(display and 1)
+    set encoded to process_base64(data and consumed)
+    set digest to process_digest(data and consumed)
+    free_bytes(data)
+    set params to [get_list(display and 0),encoded,selected,operations,source,stream,int_to_string(offset),int_to_string(offset + consumed),int_to_string(total),int_to_string(offset + consumed),int_to_string(total),receipt,receipt,digest]
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','tool','process_output','outcome','completed','text',?,'encoding','UTF-8 display with replacement; base64 preserves exact bytes','base64',?,'operation',CAST(? AS INTEGER),'source_operations',json(?),'output_ref',?,'stream',?,'offset',CAST(? AS INTEGER),'next_offset',CAST(? AS INTEGER),'total_bytes',CAST(? AS INTEGER),'more',json(CASE WHEN CAST(? AS INTEGER)<CAST(? AS INTEGER) THEN 'true' ELSE 'false' END),'capture_truncated',coalesce(json_extract(?,'$.output_truncated'),0),'original_exit_code',json_extract(?,'$.exit_code'),'page_sha256',?,'cache_hit',json('false'))" and params)
+    # Supply bounded original argv/cwd for deliberate retries; never ask the
+    # model to reconstruct them from a prose excerpt or invent compiler flags.
+    set original to result_cache_scalar(db and "SELECT arguments FROM tool_runs WHERE id=?" and [source])
+    if string_length(original) <= 4096 && process_arguments(db and original):
+        set result to result_cache_scalar(db and "SELECT json_set(?,'$.original_command',json_remove(?,'$.retry_of','$.retry_reason'))" and [result,original])
+    else:
+        set result to result_cache_scalar(db and "SELECT json_set(?,'$.original_command',NULL,'$.command_metadata_omitted',json('true'))" and [result])
+    if sql_execute(db and "COMMIT") != 0:
+        return process_output_error(db and "Cannot finish saved-output read")
+    set key to result_cache_scalar(db and "SELECT json_array(?,json(?))" and [project,result])
+    set cached to result_cache_get(db and "process-output-ep-v1" and key and epoch)
+    if cached != "":
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [cached]) != "ok":
+            return cached
+        return result_cache_scalar(db and "SELECT json_set(?,'$.cache_hit',json('true'))" and [cached])
+    return result_cache_put(db and "process-output-ep-v1" and key and epoch and result)

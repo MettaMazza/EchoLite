@@ -1,0 +1,29 @@
+# Verify the actual chat/model/process/browser chain, using its durable receipts.
+import "../src/result_cache"
+import "os"
+set checks to 0
+
+define browser_model_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: browser_model_journey STATE EXPECTED_URL"
+        return 1
+    set db to sql_open(concat(get_list(args and 1) and "/memory.sqlite3"))
+    set session to result_cache_scalar(db and "SELECT json_extract(CAST(o.stdout AS TEXT),'$.value.sessionId') FROM process_operations o JOIN tool_runs r ON r.id=o.operation_id WHERE r.name='process_run' AND json_extract(r.arguments,'$.argv[1]')='new' AND json_extract(o.result,'$.exit_code')=0 ORDER BY r.id DESC LIMIT 1" and [])
+    browser_model_assert(string_length(session)>0 and "model created a real Safari session")
+    browser_model_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN process_operations o ON o.operation_id=r.id WHERE r.name='process_run' AND json_extract(r.arguments,'$.argv[1]')='navigate' AND json_extract(r.arguments,'$.argv[2]')=? AND json_extract(r.arguments,'$.argv[3]')=? AND json_extract(o.result,'$.exit_code')=0" and [session,get_list(args and 2)]) == "1" and "model navigated exact returned session to requested page")
+    browser_model_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN process_operations o ON o.operation_id=r.id WHERE r.name='process_run' AND json_extract(r.arguments,'$.argv[1]') IN ('read','read-current') AND coalesce(json_extract(r.arguments,'$.argv[2]'),json_extract(CAST(o.stdout AS TEXT),'$.session_id'))=? AND json_extract(o.result,'$.exit_code')=0 AND json_extract(CAST(o.stdout AS TEXT),'$.value.title')='EchoLite Browser Fixture' AND json_extract(CAST(o.stdout AS TEXT),'$.value.paragraphs[0].id')='result' AND json_extract(CAST(o.stdout AS TEXT),'$.value.paragraphs[0].text')='Not submitted'" and [session]) == "1" and "live page observation contains actual title and result text")
+    browser_model_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN process_operations o ON o.operation_id=r.id WHERE r.name='process_run' AND json_extract(r.arguments,'$.argv[1]') IN ('close','close-current') AND coalesce(json_extract(r.arguments,'$.argv[2]'),json_extract(CAST(o.stdout AS TEXT),'$.session_id'))=? AND json_extract(o.result,'$.exit_code')=0 AND json_extract(CAST(o.stdout AS TEXT),'$.outcome')='completed'" and [session]) == "1" and "model closed its actual automation session")
+    browser_model_assert(result_cache_scalar(db and "SELECT count(*) FROM turns t JOIN memories m ON m.id=t.reply_memory WHERE t.status='completed' AND t.answer_basis='execution' AND instr(m.body,'EchoLite Browser Fixture')>0 AND instr(m.body,'Not submitted')>0" and []) == "1" and "final answer reports observed browser facts with execution basis")
+    browser_model_assert(result_cache_scalar(db and "SELECT count(*) FROM turns WHERE status='pending'" and []) == "0" and "conversation has no pending work")
+    browser_model_assert(result_cache_scalar(db and "PRAGMA integrity_check" and []) == "ok" and "persisted browser conversation is intact")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " actual model/browser journey checks"))
+    return 0

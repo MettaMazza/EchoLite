@@ -1,0 +1,59 @@
+import "../src/memory_correction"
+import "os"
+set checks to 0
+
+define correct_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define correct_request with db and prior and text returning Str:
+    set params to [prior,text]
+    return result_cache_scalar(db and "SELECT json_object('note_id',?,'text',?,'reason','User corrected this preference')" and params)
+
+define main:
+    set args to get_args()
+    set path to concat(get_list(args and 1) and "/memory.sqlite3")
+    set db to sql_open(path)
+    correct_assert(sql_execute(db and "PRAGMA foreign_keys=ON; CREATE TABLE memories(id INTEGER PRIMARY KEY AUTOINCREMENT,layer TEXT,project TEXT,source TEXT,body TEXT,status TEXT DEFAULT 'active'); CREATE TABLE derivations(parent INTEGER REFERENCES memories(id) ON DELETE CASCADE,child INTEGER REFERENCES memories(id) ON DELETE CASCADE,PRIMARY KEY(parent,child)); INSERT INTO memories(layer,project,source,body) VALUES('semantic','a','user','I prefer long paragraphs'),('episodic','a','tool-request','Correction requested'),('semantic','b','user','Other project'),('episodic','a','user-message','Historical message'),('procedural','a','user','Old procedure');") == 0 and "isolated historical records")
+    correct_assert(correction_schema(db) == 0 and "correction schema initialized")
+    set unchanged to memory_correct(db and "a" and correct_request(db and "1" and "I prefer long paragraphs") and "2")
+    correct_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [unchanged]) == "failed" && string_contains(unchanged and "memory_assess") and "unchanged wording directs assessment without creating a replacement")
+    set result to memory_correct(db and "a" and correct_request(db and "1" and "I prefer concise bullets") and "2")
+    correct_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "completed" and "correction completed atomically")
+    set replacement to result_cache_scalar(db and "SELECT json_extract(?,'$.note_memory_id')" and [result])
+    correct_assert(result_cache_scalar(db and "SELECT body='I prefer long paragraphs' AND status='superseded' FROM memories WHERE id=1" and []) == "1" and "old note retained unchanged as historical")
+    correct_assert(result_cache_scalar(db and "SELECT count(*) FROM memories WHERE id=? AND status='active' AND layer='semantic' AND instr(body,'concise bullets')>0" and [replacement]) == "1" and "replacement is active in the same layer")
+    correct_assert(result_cache_scalar(db and "SELECT count(*) FROM derivations WHERE parent=2 AND child=?" and [replacement]) == "1" and "replacement linked to recorded correction request")
+    correct_assert(result_cache_scalar(db and "SELECT count(*) FROM memory_corrections WHERE prior=1 AND replacement=? AND source=2" and [replacement]) == "1" and "history points to replacement and evidence")
+    set count to result_cache_scalar(db and "SELECT count(*) FROM memories" and [])
+    set stale to memory_correct(db and "a" and correct_request(db and "1" and "Stale correction") and "2")
+    correct_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [stale]) == "failed" && string_equals(count and result_cache_scalar(db and "SELECT count(*) FROM memories" and [])) and "stale edit does not create another note")
+    set foreign to memory_correct(db and "a" and correct_request(db and "3" and "Cross-project correction") and "2")
+    correct_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [foreign]) == "failed" and "another project's note cannot be corrected")
+    set history to memory_correct(db and "a" and correct_request(db and "4" and "Rewritten message") and "2")
+    correct_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [history]) == "failed" and "original conversation events cannot be rewritten")
+    set unsupported to memory_correct(db and "a" and correct_request(db and "5" and "New procedure") and "3")
+    correct_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [unsupported]) == "failed" and "correction requires a recorded request in this project")
+    set procedure to memory_correct(db and "a" and correct_request(db and "5" and "New procedure") and "2")
+    correct_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.layer')" and [procedure]) == "procedural" and "procedural layer preserved")
+    set count to result_cache_scalar(db and "SELECT count(*) FROM memories" and [])
+    sql_execute(db and "CREATE TRIGGER reject_correction BEFORE UPDATE OF status ON memories WHEN new.status='superseded' BEGIN SELECT RAISE(ABORT,'injected write failure'); END;")
+    set failed to memory_correct(db and "a" and correct_request(db and replacement and "Newest correction") and "2")
+    correct_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [failed]) == "failed" && string_equals(count and result_cache_scalar(db and "SELECT count(*) FROM memories" and [])) and "late failure rolls back replacement and links")
+    correct_assert(result_cache_scalar(db and "SELECT status FROM memories WHERE id=?" and [replacement]) == "active" && result_cache_scalar(db and "SELECT count(*) FROM memory_corrections" and []) == "2" and "failed edit preserves the current version and history")
+    sql_execute(db and "DROP TRIGGER reject_correction")
+    set newest to memory_correct(db and "a" and correct_request(db and replacement and "Newest correction") and "2")
+    set latest to result_cache_scalar(db and "SELECT json_extract(?,'$.note_memory_id')" and [newest])
+    correct_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [newest]) == "completed" and "a subsequent correction extends history")
+    sql_close(db)
+    set db to sql_open(path)
+    sql_execute(db and "PRAGMA foreign_keys=ON")
+    correct_assert(result_cache_scalar(db and "SELECT count(*) FROM memory_corrections" and []) == "3" and "correction history survives database reopen")
+    sql_execute_params(db and "DELETE FROM memories WHERE id=?" and [latest])
+    correct_assert(result_cache_scalar(db and "SELECT status FROM memories WHERE id=?" and [replacement]) == "superseded" && result_cache_scalar(db and "SELECT count(*) FROM memory_corrections WHERE replacement=?" and [latest]) == "0" and "deleting replacement never reactivates old facts")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " memory correction checks"))
+    return 0

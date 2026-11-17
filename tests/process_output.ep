@@ -1,0 +1,70 @@
+import "../src/process_output"
+import "os"
+set checks to 0
+
+define output_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    set database to get_list(args and 1)
+    set db to sql_open(database)
+    output_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE turns(id INTEGER PRIMARY KEY,project TEXT,status TEXT); INSERT INTO turns VALUES(1,'project-a','pending'),(2,'project-b','pending'); CREATE TABLE tool_runs(id INTEGER PRIMARY KEY,turn_id INTEGER,name TEXT,arguments TEXT,status TEXT,observation INTEGER); CREATE TABLE process_operations(operation_id INTEGER PRIMARY KEY,epoch TEXT,status TEXT,result TEXT,stdout BLOB,stderr BLOB); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER); INSERT INTO tool_runs VALUES(1,1,'process_run','{}','completed',1),(2,1,'process_run','{}','completed',2),(3,1,'process_output','1:stdout:0','running',NULL),(4,1,'process_output','1:stdout:1023','running',NULL),(5,1,'process_output','1:stderr:0','running',NULL),(6,1,'process_output','2:stderr:0','running',NULL),(7,2,'process_output','1:stderr:0','running',NULL);") == 0 and "isolated journal and cache")
+    set builder to create_builder()
+    set i to 0
+    repeat while i < 1023:
+        builder_append(builder and "x")
+        set i to i + 1
+    builder_append(builder and "🌱end")
+    set body to builder_to_string(builder)
+    set receipt to "{\"status\":\"ok\",\"tool\":\"process_run\",\"outcome\":\"failed\",\"output_ref\":\"1\",\"exit_code\":7,\"output_truncated\":false}"
+    sql_execute_params(db and "INSERT INTO process_operations VALUES(1,'0','completed',?,CAST(? AS BLOB),X'00FF41')" and [receipt,body])
+    sql_execute_params(db and "INSERT INTO process_operations VALUES(2,'0','completed',?,X'',X'')" and [receipt])
+    set result to process_output(db and "1:stdout:0" and "0" and "3")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.next_offset')" and [result]) == "1023" and concat("split Unicode deferred: " and result))
+    output_assert(result_cache_scalar(db and "SELECT length(json_extract(?,'$.text'))" and [result]) == "1023" and "first page exact display")
+    set result to process_output(db and "1:stdout:1023" and "0" and "4")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result]) == "🌱end" and "whole codepoint on next page")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.more')" and [result]) == "0" and "last page disclosed")
+    set result to process_output(db and "1:stderr:0" and "0" and "5")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.base64')" and [result]) == "AP9B" and "exact NUL and invalid UTF-8 bytes")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result]) == "��A" and "binary display replacement")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.original_exit_code')" and [result]) == "7" and "original command outcome retained")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.page_sha256')" and [result]) == "a90a10503fbfc95789ff38a1bb5039cb71869ab9c0eb1cb51c4a9099f2933c6b" and "independent SHA-256 byte fixture")
+    sql_execute(db and "INSERT INTO tool_runs VALUES(8,1,'process_output','01:stderr:0','running',NULL)")
+    set alias_result to process_output(db and "01:stderr:0" and "0" and "8")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.base64')" and [alias_result]) == "AP9B" and "numeric operation alias resolves without a false cycle")
+    sql_close(db)
+    set db to sql_open(database)
+    set result to process_output(db and "1:stderr:0" and "0" and "5")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "output-page cache survives reopen")
+    set result to process_output(db and "2:stderr:0" and "0" and "6")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.source_operations')" and [result]) == "[2,1]" and "replayed operation provenance")
+    output_assert(string_contains(process_output(db and "1:stderr:0" and "0" and "7") and "error") and "cross-project read rejected")
+    output_assert(string_contains(process_output(db and "1:stdout:100" and "0" and "3") and "matching pending journal") and "exact output-read arguments required")
+    # Simulate the durable supervisor completion / missing chat observation gap.
+    sql_execute(db and "INSERT INTO turns VALUES(3,'project-a','abandoned'); UPDATE tool_runs SET turn_id=3,status='running',observation=NULL WHERE id IN (1,2); DELETE FROM response_cache;")
+    sql_close(db)
+    set db to sql_open(database)
+    set recovered to process_output(db and "2:stderr:0" and "0" and "6")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.base64')" and [recovered]) == "AP9B" and "completed output survives restart without chat observation")
+    output_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.source_operations')" and [recovered]) == "[2,1]" and "interrupted chat keeps replay provenance")
+    output_assert(result_cache_scalar(db and "SELECT count(*) FROM process_operations" and []) == "2" and "recovery does not create or rerun commands")
+    sql_execute(db and "UPDATE process_operations SET status='claimed' WHERE operation_id=1")
+    output_assert(string_contains(process_output(db and "1:stderr:0" and "0" and "5") and "No completed output") and "unfinished command rejected even with saved page cache")
+    sql_execute(db and "UPDATE process_operations SET status='completed',result=json_set(result,'$.tool','other') WHERE operation_id=1")
+    output_assert(string_contains(process_output(db and "1:stderr:0" and "0" and "5") and "Invalid completed process receipt") and "wrong receipt kind rejected before cached replay")
+    sql_execute(db and "UPDATE process_operations SET result=json_set(result,'$.tool','process_run','$.outcome','unknown') WHERE operation_id=1")
+    output_assert(string_contains(process_output(db and "1:stderr:0" and "0" and "5") and "Invalid completed process receipt") and "uncertain receipt cannot authorize completed output")
+    sql_execute(db and "UPDATE process_operations SET result=json_set(result,'$.outcome','failed') WHERE operation_id=1")
+    sql_execute(db and "UPDATE process_operations SET result=json_set(result,'$.output_ref','2') WHERE operation_id=1")
+    output_assert(string_contains(process_output(db and "1:stderr:0" and "0" and "5") and "Cyclic") and "reference cycle rejected before cached replay")
+    sql_execute(db and "UPDATE metadata SET value='1'")
+    output_assert(string_contains(process_output(db and "1:stderr:0" and "0" and "5") and "epoch") and "forgetting boundary enforced")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " persistent native process output checks"))
+    return 0

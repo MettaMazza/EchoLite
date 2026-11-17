@@ -1,0 +1,56 @@
+import "../src/process_journal"
+import "../src/process_capture"
+import "os"
+set checks to 0
+
+define journal_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    set path to get_list(args and 1)
+    set db to sql_open(path)
+    sql_execute(db and "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")
+    journal_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE turns(id INTEGER PRIMARY KEY,status TEXT); INSERT INTO turns VALUES(1,'pending'); CREATE TABLE tool_runs(id INTEGER PRIMARY KEY,turn_id INTEGER REFERENCES turns(id),name TEXT,arguments TEXT,status TEXT); CREATE TABLE process_operations(operation_id INTEGER PRIMARY KEY REFERENCES tool_runs(id) ON DELETE CASCADE,epoch TEXT,status TEXT,result TEXT,stdout BLOB,stderr BLOB);") == 0 and "isolated journal")
+    set expression to "{\"argv\":[\"/usr/bin/true\"],\"cwd\":\"/private/tmp\",\"timeout_seconds\":1}"
+    journal_assert(process_arguments(db and expression) and "valid command arguments")
+    journal_assert(process_arguments(db and "{\"argv\":[\"relative\"],\"cwd\":\"/tmp\",\"timeout_seconds\":1}") == 0 and "relative executable rejected")
+    sql_execute_params(db and "INSERT INTO tool_runs VALUES(1,1,'process_run',?,'running')" and [expression])
+    journal_assert(string_contains(process_claim(db and expression and "0" and "1") and "claimed") and "durable claim")
+    sql_close(db)
+    set db to sql_open(path)
+    journal_assert(string_contains(process_claim(db and expression and "0" and "1") and "uncertain_effects") and "reopened incomplete claim never authorizes another launch")
+    set capture to create_list()
+    append_list(capture and 0)
+    append_list(capture and "exited")
+    append_list(capture and alloc_bytes(3))
+    append_list(capture and 3)
+    append_list(capture and alloc_bytes(1))
+    append_list(capture and 0)
+    poke_byte(get_list(capture and 2) and 0 and 0)
+    poke_byte(get_list(capture and 2) and 1 and 255)
+    poke_byte(get_list(capture and 2) and 2 and 65)
+    set receipt to "{\"status\":\"ok\",\"tool\":\"process_run\",\"outcome\":\"completed\",\"output_ref\":\"1\",\"text\":\"finished\"}"
+    journal_assert(string_equals(process_finish(db and "0" and "1" and receipt and capture) and receipt) and "atomic completion")
+    capture_release(capture)
+    sql_close(db)
+    set db to sql_open(path)
+    journal_assert(result_cache_scalar(db and "SELECT hex(stdout) FROM process_operations WHERE operation_id=1" and []) == "00FF41" and "binary output survives reopen")
+    journal_assert(string_contains(process_claim(db and expression and "0" and "1") and "replayed_receipt") and "completed operation replays receipt")
+    sql_execute_params(db and "INSERT INTO tool_runs VALUES(2,1,'process_run',?,'running')" and [expression])
+    set replay to process_claim(db and expression and "0" and "2")
+    journal_assert(string_contains(replay and "replayed_receipt") and "identical command in same turn does not launch")
+    journal_assert(result_cache_scalar(db and "SELECT json_extract(result,'$.output_ref') FROM process_operations WHERE operation_id=2" and []) == "1" and "duplicate points to original captured output")
+    sql_execute(db and "UPDATE metadata SET value='1'")
+    journal_assert(string_contains(process_claim(db and expression and "0" and "2") and "error") and "forgotten epoch rejects replay")
+    journal_assert(string_contains(process_claim(db and expression and "1" and "2") and "different memory epoch") and "old receipt cannot replay under a newer epoch")
+    sql_execute_params(db and "INSERT INTO tool_runs VALUES(3,1,'process_run',?,'running')" and [expression])
+    journal_assert(string_contains(process_claim(db and expression and "1" and "3") and "different memory epoch") and "cross-operation deduplication respects forgetting")
+    journal_assert(result_cache_scalar(db and "SELECT count(*) FROM process_operations WHERE operation_id=3" and []) == "0" and "rejected claim leaves no runnable operation")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " persistent process journal checks"))
+    return 0

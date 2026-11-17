@@ -1,0 +1,65 @@
+# Compact capability discovery; enabled families are reconstructed from receipts.
+import "result_cache"
+import "string"
+
+define tool_family with name returning Str:
+    if name == "process_run" || name == "process_retry" || name == "process_output":
+        return "system"
+    if name == "docx_read" || name == "pdf_read" || name == "file_list":
+        return "documents"
+    if name == "task_create" || name == "task_update" || name == "task_schedule" || name == "schedule_cancel" || name == "schedule_list":
+        return "tasks"
+    if name == "memory_lineage" || name == "memory_search_archived" || name == "memory_timeline" || name == "memory_sessions" || name == "memory_session" || name == "memory_note" || name == "memory_correct" || name == "memory_assess" || name == "memory_compact":
+        return "memory"
+    return "core"
+
+define tool_family_enabled with db and request and family:
+    if family == "core":
+        return 1
+    if result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.tool_discovery'),'0')" and [request]) != "1":
+        return 1
+    if family == "system" && result_cache_scalar(db and "SELECT coalesce(json_array_length(?,'$.temporary_browser_sessions'),0)>0" and [request]) == "1":
+        return 1
+    if family == "tasks" && result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.scheduled_task_id'),'')!=''" and [request]) == "1":
+        return 1
+    if family == "tasks" && result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.active_working_records'),0)>0 OR EXISTS(SELECT 1 FROM json_each(?,'$.tool_trace') WHERE json_extract(value,'$[0]')='task_open' AND json_extract(CASE WHEN json_valid(json_extract(value,'$[2]')) THEN json_extract(value,'$[2]') ELSE '{}' END,'$.outcome')='completed')" and [request,request]) == "1":
+        return 1
+    if family == "memory" && result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM json_each(?,'$.tool_trace') WHERE json_extract(value,'$[0]') IN ('memory_search','memory_open') AND json_extract(CASE WHEN json_valid(json_extract(value,'$[2]')) THEN json_extract(value,'$[2]') ELSE '{}' END,'$.outcome')='completed')" and [request]) == "1":
+        return 1
+    set input to result_cache_scalar(db and "SELECT lower(coalesce(json_extract(?,'$.input'),''))" and [request])
+    if tool_family_hint(input and family):
+        return 1
+    set selected to result_cache_scalar(db and "SELECT count(*) FROM json_each(?,'$.tool_trace') WHERE json_extract(value,'$[0]')='tool_select' AND json_extract(CASE WHEN json_valid(json_extract(value,'$[1]')) THEN json_extract(value,'$[1]') ELSE '{}' END,'$.group')=? AND json_extract(CASE WHEN json_valid(json_extract(value,'$[2]')) THEN json_extract(value,'$[2]') ELSE '{}' END,'$.outcome')='completed'" and [request,family])
+    if selected != "0" && selected != "":
+        return 1
+    return 0
+
+define tool_catalog_text returning Str:
+    return "CAPABILITY CATALOG: Core tools are ready now: calculator, dictionary, wikipedia, web_read, file_read, memory_search, memory_open, task_open and me_update. Other capabilities are available on demand: call tool_select with group system for process execution, retries and saved output (coding/builds, Git, file writes, Safari, application and OS commands within granted permissions); documents for directory listings, PDF and DOCX extraction; memory for prior sessions, timelines, provenance, notes, belief assessments, corrections and consolidation; tasks for tracked work, checkpoints and scheduling. Select a family before requesting its tools. Selection persists for this turn through recorded receipts and only exposes schemas: it does not execute work, change permissions, consult a source or satisfy a task. Enable only families needed for the current work."
+
+define tool_selection with db and expression returning Str:
+    if db == 0:
+        return ""
+    set group to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.group') ELSE '' END" and [expression,expression])
+    if group != "system" && group != "documents" && group != "memory" && group != "tasks":
+        return "{\"status\":\"ok\",\"tool\":\"tool_select\",\"outcome\":\"failed\",\"text\":\"Select system, documents, memory or tasks\"}"
+    return result_cache_scalar(db and "SELECT json_object('status','ok','tool','tool_select','outcome','completed','group',?,'text','Tool family enabled for this turn. Use its newly exposed action schema for the actual work. This receipt is configuration only, not source evidence or completed work.')" and [group])
+
+# Hints only expose capabilities; they never execute a command or authorize it.
+# Unmatched requests can still select any family through the compact catalog.
+define tool_family_hint with input and family:
+    set cues to create_list()
+    if family == "system":
+        set cues to ["process_run","process_retry","process_output","open ","launch ","execute ","run ","command","terminal","compile","build ","coding","git ","repository","browser","safari","textedit","application","write file","save file"]
+    else if family == "documents":
+        set cues to ["pdf","docx","directory","folder","list files","file_list","document"]
+    else if family == "memory":
+        set cues to ["remember","memory","memories","previous session","prior session","earlier session","timeline","archive","correction","correct ","note ","consolidat","actually","instead","prefer","from now","no longer","belief","disputed","expiry","expired"]
+    else if family == "tasks":
+        set cues to ["task","schedule","remind","commitment","to-do","todo","later","goal","tomorrow","next week","tonight","minutes"]
+    set i to 0
+    repeat while i < length_list(cues):
+        if string_contains(input and get_list(cues and i)):
+            return 1
+        set i to i + 1
+    return 0

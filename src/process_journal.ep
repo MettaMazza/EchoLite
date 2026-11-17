@@ -1,0 +1,131 @@
+# Durable command claims and exact binary output; external effects are never rolled back.
+import "result_cache"
+import "native_calls"
+
+define process_journal_error with text returning Str:
+    set result to result_cache_error(text)
+    return result
+
+define process_uncertain returning Str:
+    return "{\"status\":\"ok\",\"tool\":\"process_run\",\"outcome\":\"failed\",\"cache_hit\":false,\"uncertain_effects\":true,\"text\":\"Command already claimed; no new process started. Inspect its effects before retrying.\"}"
+
+define process_arguments with db and expression:
+    if string_contains(expression and "\u0000") || result_cache_scalar(db and "SELECT json_valid(?)" and [expression]) != "1":
+        return 0
+    set shape to result_cache_scalar(db and "SELECT (SELECT count(*) FROM json_each(?)) IN (3,5) AND (SELECT count(*) FROM json_each(?))=(SELECT count(DISTINCT key) FROM json_each(?)) AND (json_type(?,'$.retry_of') IS NULL AND json_type(?,'$.retry_reason') IS NULL OR json_type(?,'$.retry_of')='text' AND json_type(?,'$.retry_reason')='text' AND length(CAST(json_extract(?,'$.retry_reason') AS BLOB))<=400 AND (json_extract(?,'$.retry_of')='' AND json_extract(?,'$.retry_reason')='' OR length(json_extract(?,'$.retry_of')) BETWEEN 1 AND 18 AND json_extract(?,'$.retry_of') NOT GLOB '*[^0-9]*' AND substr(json_extract(?,'$.retry_of'),1,1)!='0' AND length(trim(json_extract(?,'$.retry_reason')))>0))" and [expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression])
+    if shape != "1":
+        return 0
+    set expression to result_cache_scalar(db and "SELECT json_remove(?,'$.retry_of','$.retry_reason')" and [expression])
+    set params to [expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression]
+    set valid to result_cache_scalar(db and "SELECT json_type(?)='object' AND (SELECT count(*) FROM json_each(?))=3 AND (SELECT count(DISTINCT key) FROM json_each(?))=3 AND json_type(?,'$.argv')='array' AND json_array_length(?,'$.argv') BETWEEN 1 AND 32 AND NOT EXISTS(SELECT 1 FROM json_each(?,'$.argv') WHERE type!='text' OR length(CAST(value AS BLOB))>4096) AND (SELECT sum(length(CAST(value AS BLOB))) FROM json_each(?,'$.argv'))<=12000 AND substr(json_extract(?,'$.argv[0]'),1,1)='/' AND json_type(?,'$.cwd')='text' AND substr(json_extract(?,'$.cwd'),1,1)='/' AND length(CAST(json_extract(?,'$.cwd') AS BLOB))<=1024 AND json_type(?,'$.timeout_seconds')='integer' AND json_extract(?,'$.timeout_seconds') BETWEEN 1 AND 60" and params)
+    return valid == "1"
+
+define process_arguments_problem with db and expression returning Str:
+    if process_arguments(db and expression):
+        return ""
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [expression]) != "1":
+        return "Process arguments must be valid JSON"
+    return result_cache_scalar(db and "SELECT CASE WHEN coalesce(json_extract(?,'$.retry_of'),'')='' AND coalesce(json_extract(?,'$.retry_reason'),'')!='' THEN 'retry_reason was supplied but retry_of is empty. For an explicit retry set retry_of to the original output_ref; for a new command leave both fields empty.' WHEN coalesce(json_extract(?,'$.retry_of'),'')!='' AND length(trim(coalesce(json_extract(?,'$.retry_reason'),'')))=0 THEN 'An explicit retry needs retry_reason explaining what changed.' WHEN coalesce(substr(json_extract(?,'$.argv[0]'),1,1),'')!='/' THEN 'argv[0] must be the absolute executable path from the host facts or original command receipt.' WHEN coalesce(substr(json_extract(?,'$.cwd'),1,1),'')!='/' THEN 'cwd must be an existing absolute directory path.' ELSE 'Invalid command or retry fields: use bounded literal argv, absolute cwd, timeout_seconds 1-60, and either both retry fields empty or a canonical positive output_ref plus a reason.' END" and [expression,expression,expression,expression,expression,expression])
+
+define process_retry_request_valid with db and request:
+    if string_contains(request and "\u0000") || result_cache_scalar(db and "SELECT json_valid(?)" and [request]) != "1":
+        return 0
+    return result_cache_scalar(db and "SELECT (SELECT count(*) FROM json_each(?))=2 AND (SELECT count(DISTINCT key) FROM json_each(?))=2 AND json_type(?,'$.operation_id')='text' AND length(json_extract(?,'$.operation_id')) BETWEEN 1 AND 18 AND json_extract(?,'$.operation_id') NOT GLOB '*[^0-9]*' AND substr(json_extract(?,'$.operation_id'),1,1)!='0' AND json_type(?,'$.reason')='text' AND length(trim(json_extract(?,'$.reason')))>0 AND length(CAST(json_extract(?,'$.reason') AS BLOB))<=400" and [request,request,request,request,request,request,request,request,request]) == "1"
+
+define process_retry_expression with db and project and request returning Str:
+    if process_retry_request_valid(db and request) == 0:
+        return ""
+    set original to result_cache_scalar(db and "SELECT r.arguments FROM tool_runs r JOIN turns t ON t.id=r.turn_id WHERE r.id=json_extract(?,'$.operation_id') AND t.project=? AND r.name IN ('process_run','process_retry')" and [request,project])
+    if original == "" || process_arguments(db and original) == 0:
+        return ""
+    return result_cache_scalar(db and "SELECT json_set(?,'$.retry_of',json_extract(?,'$.operation_id'),'$.retry_reason',json_extract(?,'$.reason'))" and [original,request,request])
+
+define process_claim with db and expression and epoch and operation returning Str:
+    if process_arguments(db and expression) == 0:
+        return process_journal_error("Command requires absolute argv[0], absolute cwd and timeout_seconds 1-60")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return process_journal_error("Cannot claim command journal")
+    set match to result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN turns t ON t.id=r.turn_id WHERE r.id=? AND r.name IN ('process_run','process_retry') AND r.arguments=? AND r.status='running' AND t.status='pending'" and [operation,expression])
+    if match != "1" || result_cache_epoch(db and epoch) == 0:
+        sql_execute(db and "ROLLBACK")
+        return process_journal_error("Command requires a matching pending journal entry and current memory epoch")
+    set rows to sql_query_params(db and "SELECT status,result,epoch FROM process_operations WHERE operation_id=?" and [operation])
+    if length_list(rows) > 0:
+        set prior to get_list(rows and 0)
+        if string_equals(get_list(prior and 2) and epoch) == 0:
+            sql_execute(db and "ROLLBACK")
+            return process_journal_error("Saved command belongs to a different memory epoch")
+        set result to process_uncertain()
+        if string_equals(get_list(prior and 0) and "completed"):
+            set saved to get_list(prior and 1)
+            if result_cache_scalar(db and "SELECT json_valid(?)" and [saved]) == "1":
+                set result to result_cache_scalar(db and "SELECT json_set(?,'$.replayed_receipt',json('true'))" and [saved])
+        sql_execute(db and "ROLLBACK")
+        return result
+    # Repeated identical commands in one turn replay even if timeout changes.
+    set previous to sql_query_params(db and "SELECT o.status,o.result,o.epoch FROM process_operations o JOIN tool_runs r ON r.id=o.operation_id WHERE r.turn_id=(SELECT turn_id FROM tool_runs WHERE id=?) AND r.id<? AND json_extract(r.arguments,'$.argv')=json_extract(?,'$.argv') AND json_extract(r.arguments,'$.cwd')=json_extract(?,'$.cwd') ORDER BY r.id DESC LIMIT 1" and [operation,operation,expression,expression])
+    # Explicit re-execution is a separate, one-use intent referring to an actual
+    # finished operation. Repeating that intent replays its child receipt.
+    set retry to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.retry_of'),'')" and [expression])
+    if retry != "":
+        set authorized to result_cache_scalar(db and "SELECT count(*) FROM process_operations o JOIN tool_runs r ON r.id=o.operation_id JOIN turns source_turn ON source_turn.id=r.turn_id JOIN tool_runs current_run ON current_run.id=? JOIN turns current_turn ON current_turn.id=current_run.turn_id WHERE r.id=? AND r.id<current_run.id AND source_turn.project=current_turn.project AND r.name IN ('process_run','process_retry') AND o.epoch=? AND o.status='completed' AND json_valid(o.result) AND json_extract(o.result,'$.status')='ok' AND json_extract(o.result,'$.tool')='process_run' AND json_extract(o.result,'$.termination')='exited' AND json_type(o.result,'$.exit_code')='integer' AND json_extract(o.result,'$.exit_code')>=0 AND CAST(json_extract(o.result,'$.output_ref') AS TEXT)=CAST(r.id AS TEXT) AND json_extract(r.arguments,'$.argv')=json_extract(?,'$.argv') AND json_extract(r.arguments,'$.cwd')=json_extract(?,'$.cwd')" and [operation,retry,epoch,expression,expression])
+        if authorized != "1":
+            sql_execute(db and "ROLLBACK")
+            return process_journal_error("Retry requires a finished, known-exit operation in this project and epoch with identical argv/cwd. Use its actual output_ref; uncertain, cancelled and timed-out commands cannot be retried this way.")
+        set previous to sql_query_params(db and "SELECT o.status,o.result,o.epoch FROM process_operations o JOIN tool_runs r ON r.id=o.operation_id JOIN turns t ON t.id=r.turn_id WHERE r.id<? AND json_extract(r.arguments,'$.retry_of')=? AND t.project=(SELECT t2.project FROM turns t2 JOIN tool_runs r2 ON r2.turn_id=t2.id WHERE r2.id=?) ORDER BY r.id DESC LIMIT 1" and [operation,retry,operation])
+    if length_list(previous) > 0:
+        set prior to get_list(previous and 0)
+        if string_equals(get_list(prior and 2) and epoch) == 0:
+            sql_execute(db and "ROLLBACK")
+            return process_journal_error("Previous command belongs to a different memory epoch")
+        if string_equals(get_list(prior and 0) and "completed") == 0:
+            sql_execute(db and "ROLLBACK")
+            return process_uncertain()
+        set saved to get_list(prior and 1)
+        if result_cache_scalar(db and "SELECT json_valid(?)" and [saved]) != "1":
+            sql_execute(db and "ROLLBACK")
+            return process_uncertain()
+        set replay to result_cache_scalar(db and "SELECT json_set(?,'$.replayed_receipt',json('true'))" and [saved])
+        set code to sql_execute_params(db and "INSERT INTO process_operations(operation_id,epoch,status,result,stdout,stderr) VALUES(?,?,'completed',?,X'',X'')" and [operation,epoch,replay])
+        if code != 101 || sql_execute(db and "COMMIT") != 0:
+            sql_execute(db and "ROLLBACK")
+            return process_journal_error("Cannot persist repeated command receipt")
+        return replay
+    set code to sql_execute_params(db and "INSERT INTO process_operations(operation_id,epoch,status) VALUES(?,?,'claimed')" and [operation,epoch])
+    if code != 101 || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return process_journal_error("Cannot durably claim command")
+    return "{\"status\":\"claimed\"}"
+
+# SQLite copies blobs during step; capture buffers remain alive until finalize.
+define process_finish with db and epoch and operation and receipt and capture returning Str:
+    set total to get_list(capture and 3) + get_list(capture and 5)
+    if get_list(capture and 3) < 0 || get_list(capture and 5) < 0 || get_list(capture and 2) == 0 || get_list(capture and 4) == 0 || total < 0 || total > 1048576 || string_length(receipt) > 14000 || result_cache_scalar(db and "SELECT json_valid(?)" and [receipt]) != "1":
+        return process_journal_error("Invalid process completion receipt or output size")
+    set valid to result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.tool')='process_run' AND json_extract(?,'$.outcome') IN ('completed','failed') AND CAST(json_extract(?,'$.output_ref') AS TEXT)=?" and [receipt,receipt,receipt,receipt,operation])
+    if valid != "1":
+        return process_journal_error("Process receipt does not match its journal operation")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return process_journal_error("Cannot acquire process completion journal")
+    set active to result_cache_scalar(db and "SELECT count(*) FROM process_operations o JOIN tool_runs r ON r.id=o.operation_id JOIN turns t ON t.id=r.turn_id WHERE o.operation_id=? AND o.epoch=? AND o.status IN ('claimed','running') AND t.status IN ('pending','abandoned','failed')" and [operation,epoch])
+    if active != "1" || result_cache_epoch(db and epoch) == 0:
+        sql_execute(db and "ROLLBACK")
+        return process_journal_error("Journal or memory changed; receipt discarded, external effects are not undone")
+    set statement to ep_sqlite3_prepare_v2(db and str_to_ptr("UPDATE process_operations SET status='completed',result=?,stdout=?,stderr=? WHERE operation_id=?"))
+    set code to 0 - 1
+    if statement != 0:
+        set code to ep_sqlite3_bind_text(statement and 1 and str_to_ptr(receipt))
+        set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+        if code == 0:
+            set code to ep_dlcall5(ep_dlsym(sqlite and "sqlite3_bind_blob") and statement and 2 and get_list(capture and 2) and get_list(capture and 3) and 0)
+        if code == 0:
+            set code to ep_dlcall5(ep_dlsym(sqlite and "sqlite3_bind_blob") and statement and 3 and get_list(capture and 4) and get_list(capture and 5) and 0)
+        if code == 0:
+            set code to ep_sqlite3_bind_text(statement and 4 and str_to_ptr(operation))
+        if code == 0:
+            set code to ep_sqlite3_step(statement)
+        ep_sqlite3_finalize(statement)
+    if code != 101 || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return process_journal_error("Cannot persist process completion and exact output")
+    return receipt

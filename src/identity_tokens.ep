@@ -1,0 +1,34 @@
+# Validate Me against the installed generation model's actual tokenizer.
+import "native_conversation"
+
+define identity_budget_error with db and message returning Str:
+    set params to [message]
+    return result_cache_scalar(db and "SELECT json_object('status','ok','outcome','failed','text',?)" and params)
+
+define identity_budget with db and token and body and epoch returning Str:
+    if string_length(body) == 0 || string_length(body) > 16000 || string_length(string_trim(body)) == 0:
+        return identity_budget_error(db and "Me must be nonblank and no larger than the 16000-byte storage bound")
+    set namespace to "qwen35-8d43d974-b12359-me-token-budget-v1"
+    set protected to conversation_protect(body)
+    set cached to result_cache_get(db and namespace and protected and epoch)
+    if cached != "":
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [cached]) != "ok":
+            return identity_budget_error(db and "Cannot validate Me against the current memory epoch")
+        return result_cache_scalar(db and "SELECT json_set(?,'$.cache_hit',json('true'))" and [cached])
+    set payload to result_cache_scalar(db and "SELECT json_object('content',?,'add_special',json('false'),'parse_special',json('false'))" and [protected])
+    set response to transport_post(8400 and "/tokenize" and token and payload and 0 and 0)
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [response]) != "1":
+        return identity_budget_error(db and "Local Me tokenizer is unavailable; revision was not applied")
+    if result_cache_scalar(db and "SELECT json_type(?,'$.tokens')='array' AND NOT EXISTS(SELECT 1 FROM json_each(?,'$.tokens') WHERE type!='integer' OR value<0)" and [response,response]) != "1":
+        return identity_budget_error(db and "Local Me tokenizer did not return token IDs; revision was not applied")
+    set count to result_cache_scalar(db and "SELECT json_array_length(?,'$.tokens')" and [response])
+    set outcome to "completed"
+    set message to "Me fits the 1200-token budget measured with the local Qwen tokenizer"
+    if string_to_int(count) > 1200 || string_to_int(count) == 0:
+        set outcome to "failed"
+        set message to "Me exceeds the 1200-token budget; shorten the revision before saving"
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','outcome',?,'text',?,'tokens',CAST(? AS INTEGER),'token_limit',1200,'tokenizer',?,'cache_hit',json('false'))" and [outcome,message,count,namespace])
+    set saved to result_cache_put(db and namespace and protected and epoch and result)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [saved]) != "ok":
+        return identity_budget_error(db and "Memory changed while validating Me; retry with current state")
+    return saved

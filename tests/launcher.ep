@@ -1,0 +1,61 @@
+import "../src/application_paths"
+import "../src/state_lock"
+import "../src/result_cache"
+import "../src/transport"
+set checks to 0
+
+define launch_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define launch_command with executable and root and arguments:
+    set fd to private_lock(root and "launcher.log")
+    if fd < 0:
+        return 127
+    native_fcntl_int(fd and 4 and 8)
+    set pid to process_launch(executable and arguments and fd)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    if pid == 0:
+        return 127
+    set code to process_poll(pid)
+    set deadline to transport_now(native_system()) + 60000
+    repeat while code == 0 - 1 && transport_now(native_system()) < deadline:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 20000)
+        set code to process_poll(pid)
+    return code
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: launcher LAUNCHER EMPTY_FIXTURE_DIRECTORY"
+        return 1
+    set executable to get_list(args and 1)
+    set root to get_list(args and 2)
+    set home to concat(root and "/nested state/session")
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and "")
+    launch_assert(launch_command(executable and root and ["init"]) == 0 and "native CLI initialization")
+    launch_assert(is_directory(home) and "nested state directory created")
+    set info to alloc_bytes(144)
+    ep_dlcall2(ep_dlsym(native_system() and "stat") and home and info)
+    launch_assert(lease_integer(info and 4 and 2) % 64 == 0 and "private state permissions")
+    free_bytes(info)
+    set body to "Quoted \"text\" $HOME ; café"
+    launch_assert(launch_command(executable and root and ["remember","semantic","project with spaces","user",body]) == 0 and "literal argv forwarded")
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    launch_assert(result_cache_scalar(db and "SELECT count(*) FROM memories WHERE project=? AND body=?" and ["project with spaces",body]) == "1" and "Unicode, quotes and shell characters unchanged")
+    sql_close(db)
+    launch_assert(launch_command(executable and root and ["doctor"]) == 0 and "doctor available without storage dylib")
+    launch_assert(launch_command(executable and root and ["--help"]) == 0 and "help alias")
+    launch_assert(launch_command(executable and root and ["invalid-command"]) == 1 and "core error status propagated")
+    set_env("ERNOS_COMPILER" and "/usr/bin/false")
+    launch_assert(launch_command(executable and root and ["build"]) == 1 and "compiler failure status propagated")
+    set_env("ERNOS_COMPILER" and "")
+    set image to concat(root and "/launch.png")
+    launch_assert(launch_command(executable and root and ["ui",image]) == 0 and "native chat UI launch and clean exit")
+    launch_assert(file_exists(image) && file_size(image) > 1000 and "UI rendered capture")
+    display concat("PASS: " and concat(int_to_string(checks) and " EP launcher checks"))
+    return 0

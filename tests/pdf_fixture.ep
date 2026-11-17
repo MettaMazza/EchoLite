@@ -1,0 +1,35 @@
+import "fs"
+import "string"
+
+define pdf_fixture with path:
+    set first to concat("BT /F1 12 Tf 20 760 Td (EchoLite PDF receipt ALDER-527. Caf" and concat(char_from_code(233) and " au lait.) Tj ET"))
+    set page_content to "BT /F1 6 Tf 20 760 Td "
+    set i to 0
+    repeat while i < 90:
+        set page_content to concat(page_content and "(Persistent PDF page continuation preserves source evidence and local citations.) Tj 0 -8 Td ")
+        set i to i + 1
+    set page_content to concat(page_content and "ET")
+    set objects to create_list()
+    append_list(objects and "<< /Type /Catalog /Pages 2 0 R >>")
+    append_list(objects and "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>")
+    append_list(objects and "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 7 0 R >>")
+    append_list(objects and "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 8 0 R >>")
+    append_list(objects and "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 9 0 R >>")
+    append_list(objects and "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+    append_list(objects and concat("<< /Length " and concat(int_to_string(string_length(first)) and concat(" >>\nstream\n" and concat(first and "\nendstream")))))
+    append_list(objects and concat("<< /Length " and concat(int_to_string(string_length(page_content)) and concat(" >>\nstream\n" and concat(page_content and "\nendstream")))))
+    append_list(objects and "<< /Length 0 >>\nstream\n\nendstream")
+    set document to "%PDF-1.4\n"
+    set xref to "0000000000 65535 f \n"
+    set i to 0
+    repeat while i < length_list(objects):
+        set position to int_to_string(string_length(document))
+        repeat while string_length(position) < 10:
+            set position to concat("0" and position)
+        set xref to concat(xref and concat(position and " 00000 n \n"))
+        set document to concat(document and concat(int_to_string(i + 1) and concat(" 0 obj\n" and concat(get_list(objects and i) and "\nendobj\n"))))
+        set i to i + 1
+    set start to int_to_string(string_length(document))
+    set document to concat(document and concat("xref\n0 10\n" and concat(xref and concat("trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n" and concat(start and "\n%%EOF\n")))))
+    write_file(path and document)
+    return 0

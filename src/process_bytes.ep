@@ -1,0 +1,73 @@
+# Bounded display decoding and lossless encoding for command-output pages.
+import "filesystem"
+
+define process_base64 with data and count returning Str:
+    set alphabet to "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    set builder to create_builder()
+    set i to 0
+    repeat while i < count:
+        set first to peek_byte(data and i)
+        set second to 0
+        set third to 0
+        if i + 1 < count:
+            set second to peek_byte(data and i + 1)
+        if i + 2 < count:
+            set third to peek_byte(data and i + 2)
+        builder_append(builder and substring(alphabet and first / 4 and 1))
+        builder_append(builder and substring(alphabet and first % 4 * 16 + second / 16 and 1))
+        if i + 1 < count:
+            builder_append(builder and substring(alphabet and second % 16 * 4 + third / 64 and 1))
+        else:
+            builder_append(builder and "=")
+        if i + 2 < count:
+            builder_append(builder and substring(alphabet and third % 64 and 1))
+        else:
+            builder_append(builder and "=")
+        set i to i + 3
+    return builder_to_string(builder)
+
+define process_digest with data and count returning Str:
+    set digest to alloc_bytes(32)
+    set crypto to ep_dlopen("/usr/lib/system/libcommonCrypto.dylib")
+    ep_dlcall3(ep_dlsym(crypto and "CC_SHA256") and data and count and digest)
+    set digits to "0123456789abcdef"
+    set builder to create_builder()
+    set i to 0
+    repeat while i < 32:
+        set byte to peek_byte(digest and i)
+        builder_append(builder and substring(digits and byte / 16 and 1))
+        builder_append(builder and substring(digits and byte % 16 and 1))
+        set i to i + 1
+    free_bytes(digest)
+    return builder_to_string(builder)
+
+# Returns [display text, consumed bytes]. A split final codepoint waits for next page.
+define process_display with data and count and final:
+    set builder to create_builder()
+    set temporary to alloc_bytes(5)
+    set i to 0
+    set stopped to 0
+    repeat while i < count && stopped == 0:
+        set byte to peek_byte(data and i)
+        set width to 1
+        if byte >= 194 && byte <= 223:
+            set width to 2
+        else if byte >= 224 && byte <= 239:
+            set width to 3
+        else if byte >= 240 && byte <= 244:
+            set width to 4
+        if i + width > count && final == 0 && filesystem_partial_utf8(data and i and count - i):
+            set stopped to 1
+        else if i + width <= count && document_utf8(data + i and width) && (byte >= 32 || byte == 9 || byte == 10 || byte == 13):
+            ep_dlcall3(ep_dlsym(native_system() and "memcpy") and temporary and data + i and width)
+            poke_byte(temporary and width and 0)
+            builder_append(builder and ptr_to_str(temporary))
+            set i to i + width
+        else:
+            builder_append(builder and "�")
+            set i to i + 1
+    free_bytes(temporary)
+    set result to create_list()
+    append_list(result and builder_to_string(builder))
+    append_list(result and i)
+    return result

@@ -1,0 +1,48 @@
+import "../src/backup_check"
+set checks to 0
+
+define backup_assert with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: backup_check ISOLATED_STATE BACKUP_ID"
+        return 1
+    set home to get_list(args and 1)
+    set identifier to get_list(args and 2)
+    set result to backup_check(home and identifier)
+    backup_assert(string_contains(result and "\"status\":\"ok\"") and concat("existing C-produced snapshot accepted: " and result))
+    backup_assert(string_contains(backup_check(home and "../invalid") and "Backup ID") and "invalid identifier rejected")
+    set libc to native_system()
+    set guard_path to concat(home and "/recovery.guard")
+    set original_guard to read_file(guard_path)
+    write_file(guard_path and "0000000000000000000000000000000000000000000000000000000000000000\n")
+    backup_assert(string_contains(backup_check(home and identifier) and "recovery generation") and "rotated authority rejects previous snapshot")
+    write_file(guard_path and original_guard)
+    backup_assert(string_contains(backup_check(home and identifier) and "\"status\":\"ok\"") and "matching authority restored")
+    set directory to concat(home and "/backups")
+    set dir to native_open(directory and 17826048 and 0)
+    set source to concat(directory and concat("/backup-" and concat(identifier and ".sqlite3")))
+    set other_id to "11111111111111111111111111111111"
+    set other_name to concat("backup-" and concat(other_id and ".sqlite3"))
+    set other to concat(directory and concat("/" and other_name))
+    copy_file(source and other)
+    ep_dlcall2(ep_dlsym(libc and "chmod") and other and 384)
+    backup_assert(snapshot_seal_create(dir and other_name) == 1 and "EP seal created for copied snapshot")
+    backup_assert(string_contains(backup_check(home and other_id) and "recovery generation or identity") and "renamed snapshot identity rejected")
+    write_file(other and "tampered")
+    backup_assert(string_contains(backup_check(home and other_id) and "checksum") and "tamper detected before database inspection")
+    ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and concat(other_name and ".sha256") and 0)
+    backup_assert(snapshot_seal_create(dir and other_name) == 1 and "seal for deliberately corrupt fixture")
+    backup_assert(string_contains(backup_check(home and other_id) and "structural integrity") and "valid hash does not excuse corrupt SQLite")
+    ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and other_name and 0)
+    ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and concat(other_name and ".sha256") and 0)
+    ep_dlcall1(ep_dlsym(libc and "close") and dir)
+    backup_assert(string_contains(backup_check(home and identifier) and "\"status\":\"ok\"") and "original snapshot remains authorized")
+    display concat("PASS: " and concat(int_to_string(checks) and " EP backup authorization checks"))
+    return 0

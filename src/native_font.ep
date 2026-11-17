@@ -1,0 +1,137 @@
+# Typed native calls using macOS libffi; implemented entirely in Ernos Plain.
+external define get_list_data_ptr with list returning Int
+set FONT_FFI to 0
+set FONT_CALL to 0
+set FONT_DRAW_CIF to 0
+set FONT_MEASURE_CIF to 0
+set FONT_VALUE to 0
+set FONT_TEXT to 0
+set FONT_POSITION to 0
+set FONT_SIZE to 0
+set FONT_SPACE to 0
+set FONT_COLOR to 0
+set FONT_DRAW_ARGS to 0
+set FONT_MEASURE_ARGS to 0
+set FONT_DRAW to 0
+set FONT_MEASURE to 0
+set FONT_RESULT to 0
+
+define native_write with ptr and offset and value and count:
+    set i to 0
+    set n to value
+    repeat while i < count:
+        poke_byte(ptr and offset + i and n % 256)
+        set n to n / 256
+        set i to i + 1
+    return 0
+
+define native_f32 with value:
+    if value < 0:
+        return 2147483648 + native_f32(0 - value)
+    if value == 0:
+        return 0
+    set exponent to 0
+    set power to 1
+    repeat while power * 2 <= value:
+        set power to power * 2
+        set exponent to exponent + 1
+    return (exponent + 127) * 8388608 + (value - power) * 8388608 / power
+
+define native_struct with members:
+    append_list(members and 0)
+    set elements to alloc_bytes(length_list(members) * 8)
+    set i to 0
+    repeat while i < length_list(members):
+        native_write(elements and i * 8 and get_list(members and i) and 8)
+        set i to i + 1
+    set descriptor to alloc_bytes(24)
+    native_write(descriptor and 10 and 13 and 2)
+    native_write(descriptor and 16 and elements and 8)
+    return descriptor
+
+define native_cif with result_type and types:
+    set descriptor to alloc_bytes(256)
+    set prep to ep_dlsym(FONT_FFI and "ffi_prep_cif")
+    set type_storage to alloc_bytes(length_list(types) * 8)
+    set index to 0
+    repeat while index < length_list(types):
+        native_write(type_storage and index * 8 and get_list(types and index) and 8)
+        set index to index + 1
+    set code to ep_dlcall5(prep and descriptor and 1 and length_list(types) and result_type and type_storage)
+    if code != 0:
+        display "Native font signature rejected"
+        ep_exit(1)
+    return descriptor
+
+define font_init with raylib:
+    set FONT_FFI to ep_dlopen("/usr/lib/libffi.dylib")
+    set FONT_CALL to ep_dlsym(FONT_FFI and "ffi_call")
+    set int_type to ep_dlsym(FONT_FFI and "ffi_type_sint32")
+    set pointer_type to ep_dlsym(FONT_FFI and "ffi_type_pointer")
+    set float_type to ep_dlsym(FONT_FFI and "ffi_type_float")
+    set byte_type to ep_dlsym(FONT_FFI and "ffi_type_uint8")
+    set texture_type to native_struct([int_type,int_type,int_type,int_type,int_type])
+    set font_type to native_struct([int_type,int_type,int_type,texture_type,pointer_type,pointer_type])
+    set vector_type to native_struct([float_type,float_type])
+    set color_type to native_struct([byte_type,byte_type,byte_type,byte_type])
+    set load_cif to native_cif(font_type and [pointer_type,int_type,pointer_type,int_type])
+    set FONT_VALUE to alloc_bytes(64)
+    set path to "/System/Library/Fonts/SFNS.ttf"
+    set path_cell to [str_to_ptr(path)]
+    set size_cell to [48]
+    set codepoints to alloc_bytes(1254 * 4)
+    set glyph to 0
+    repeat while glyph < 1248:
+        native_write(codepoints and glyph * 4 and glyph + 32 and 4)
+        set glyph to glyph + 1
+    set extra to [8211,8212,8216,8217,8220,8221]
+    set glyph to 0
+    repeat while glyph < 6:
+        native_write(codepoints and (1248 + glyph) * 4 and get_list(extra and glyph) and 4)
+        set glyph to glyph + 1
+    set codepoints_cell to [codepoints]
+    set count_cell to [1254]
+    set load_args to [get_list_data_ptr(path_cell),get_list_data_ptr(size_cell),get_list_data_ptr(codepoints_cell),get_list_data_ptr(count_cell)]
+    ep_dlcall4(FONT_CALL and load_cif and ep_dlsym(raylib and "LoadFontEx") and FONT_VALUE and get_list_data_ptr(load_args))
+    free_bytes(codepoints)
+    set filter_cif to native_cif(ep_dlsym(FONT_FFI and "ffi_type_void") and [texture_type,int_type])
+    set filter_cell to [1]
+    set filter_args to [FONT_VALUE + 12,get_list_data_ptr(filter_cell)]
+    ep_dlcall4(FONT_CALL and filter_cif and ep_dlsym(raylib and "SetTextureFilter") and 0 and get_list_data_ptr(filter_args))
+    set FONT_TEXT to alloc_bytes(8)
+    set FONT_POSITION to alloc_bytes(8)
+    set FONT_SIZE to alloc_bytes(4)
+    set FONT_SPACE to alloc_bytes(4)
+    set FONT_COLOR to alloc_bytes(4)
+    set FONT_RESULT to alloc_bytes(8)
+    native_write(FONT_SPACE and 0 and native_f32(1) and 4)
+    set FONT_DRAW_CIF to native_cif(ep_dlsym(FONT_FFI and "ffi_type_void") and [font_type,pointer_type,vector_type,float_type,float_type,color_type])
+    set FONT_MEASURE_CIF to native_cif(vector_type and [font_type,pointer_type,float_type,float_type])
+    set FONT_DRAW_ARGS to [FONT_VALUE,FONT_TEXT,FONT_POSITION,FONT_SIZE,FONT_SPACE,FONT_COLOR]
+    set FONT_MEASURE_ARGS to [FONT_VALUE,FONT_TEXT,FONT_SIZE,FONT_SPACE]
+    set FONT_DRAW to ep_dlsym(raylib and "DrawTextEx")
+    set FONT_MEASURE to ep_dlsym(raylib and "MeasureTextEx")
+    return 0
+
+define font_draw with text and x and y and size and tint:
+    native_write(FONT_TEXT and 0 and str_to_ptr(text) and 8)
+    native_write(FONT_POSITION and 0 and native_f32(x) and 4)
+    native_write(FONT_POSITION and 4 and native_f32(y) and 4)
+    native_write(FONT_SIZE and 0 and native_f32(size) and 4)
+    native_write(FONT_COLOR and 0 and tint and 4)
+    ep_dlcall4(FONT_CALL and FONT_DRAW_CIF and FONT_DRAW and 0 and get_list_data_ptr(FONT_DRAW_ARGS))
+    return 0
+
+define font_measure with text and size:
+    native_write(FONT_TEXT and 0 and str_to_ptr(text) and 8)
+    native_write(FONT_SIZE and 0 and native_f32(size) and 4)
+    ep_dlcall4(FONT_CALL and FONT_MEASURE_CIF and FONT_MEASURE and FONT_RESULT and get_list_data_ptr(FONT_MEASURE_ARGS))
+    set bits to peek_byte(FONT_RESULT and 0) + peek_byte(FONT_RESULT and 1) * 256 + peek_byte(FONT_RESULT and 2) * 65536 + peek_byte(FONT_RESULT and 3) * 16777216
+    if bits == 0:
+        return 0
+    set exponent to bits / 8388608 - 127
+    set mantissa to bits % 8388608 + 8388608
+    repeat while exponent < 23:
+        set mantissa to mantissa / 2
+        set exponent to exponent + 1
+    return mantissa

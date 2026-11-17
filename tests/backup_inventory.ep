@@ -1,0 +1,63 @@
+import "../src/backup_inventory"
+set checks to 0
+
+define inventory_assert with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define inventory_path with root and identifier returning Str:
+    return concat(root and concat("/backups/backup-" and concat(identifier and ".sqlite3")))
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set root to get_list(args and 1)
+    set libc to native_system()
+    set db to sql_open(":memory:")
+    inventory_assert(backup_inventory(root and "list" and "") == "{\"status\":\"ok\",\"backups\":[]}" and "absent directory lists empty")
+    set directory to concat(root and "/backups")
+    inventory_assert(is_directory(directory) == 0 and "listing did not create directory")
+    ep_dlcall2(ep_dlsym(libc and "mkdir") and directory and 448)
+    set ids to ["11111111111111111111111111111111","22222222222222222222222222222222","33333333333333333333333333333333","44444444444444444444444444444444"]
+    set first to inventory_path(root and get_list(ids and 0))
+    write_file(first and "snapshot fixture")
+    set ignored to concat(directory and "/keep-me.txt")
+    write_file(ignored and "unmanaged file")
+    write_file(concat(directory and "/pending-55555555555555555555555555555555.sqlite3") and "pending")
+    set result to backup_inventory(root and "list" and "")
+    inventory_assert(result_cache_scalar(db and "SELECT json_array_length(?,'$.backups')" and [result]) == "1" and "only completed managed snapshot listed")
+    inventory_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.backups[0].bytes')" and [result]) == "16" and "actual byte count")
+    inventory_assert(string_contains(backup_inventory(root and "delete" and "../keep-me.txt") and "Backup ID") and "traversal identifier rejected")
+    inventory_assert(file_exists(ignored) and "unmanaged file retained")
+    set i to 1
+    repeat while i < 4:
+        write_file(inventory_path(root and get_list(ids and i)) and "snapshot")
+        set i to i + 1
+    inventory_assert(string_contains(backup_inventory(root and "list" and "") and "invalid") and "existing three-snapshot inventory limit enforced")
+    inventory_assert(string_contains(backup_inventory(root and "delete" and get_list(ids and 3)) and "\"deleted\":1") and "requested snapshot removed")
+    set result to backup_inventory(root and "list" and "")
+    inventory_assert(result_cache_scalar(db and "SELECT json_array_length(?,'$.backups')" and [result]) == "3" and "remaining inventory retained")
+    set suffixes to ["-journal","-wal","-shm",".sha256"]
+    set i to 0
+    repeat while i < 4:
+        write_file(concat(first and get_list(suffixes and i)) and "sidecar")
+        set i to i + 1
+    inventory_assert(string_contains(backup_inventory(root and "delete" and get_list(ids and 0)) and "\"deleted\":1") and "snapshot and sidecars removed")
+    inventory_assert(file_exists(first) == 0 and "snapshot absent")
+    set i to 0
+    repeat while i < 4:
+        inventory_assert(file_exists(concat(first and get_list(suffixes and i))) == 0 and "sidecar absent")
+        set i to i + 1
+    inventory_assert(string_contains(backup_inventory(root and "delete" and get_list(ids and 0)) and "error") and "missing deletion reported")
+    inventory_assert(ep_dlcall2(ep_dlsym(libc and "symlink") and ignored and first) == 0 and "symlink fixture")
+    inventory_assert(string_contains(backup_inventory(root and "list" and "") and "invalid") and "symlink snapshot inventory rejected")
+    inventory_assert(string_contains(backup_inventory(root and "delete" and get_list(ids and 0)) and "\"deleted\":1") and "managed link itself removed")
+    inventory_assert(read_file(ignored) == "unmanaged file" and "symlink target untouched")
+    inventory_assert(string_contains(backup_inventory(root and "unknown" and "") and "Unknown") and "unsupported operation rejected")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " EP backup inventory checks"))
+    return 0

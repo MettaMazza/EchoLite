@@ -1,0 +1,166 @@
+import "native_process"
+import "wikipedia_runtime"
+import "state_lock"
+import "transport"
+import "result_cache"
+import "fs"
+import "os"
+
+# Read or provision a private persistent credential without exposing it in argv.
+define runtime_credential with path returning Str:
+    set fd to private_lock(path_dirname(path) and path_basename(path))
+    if fd < 0:
+        return ""
+    set libc to native_system()
+    if ep_dlcall2(ep_dlsym(libc and "flock") and fd and 2) != 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and fd)
+        return ""
+    set buffer to alloc_bytes(130)
+    set used to ep_dlcall3(ep_dlsym(libc and "read") and fd and buffer and 129)
+    set token to ""
+    if used == 0:
+        set random to alloc_bytes(32)
+        ep_dlcall2(ep_dlsym(libc and "arc4random_buf") and random and 32)
+        set alphabet to "0123456789abcdef"
+        set i to 0
+        repeat while i < 32:
+            set byte to peek_byte(random and i)
+            set token to concat(token and substring(alphabet and byte / 16 and 1))
+            set token to concat(token and substring(alphabet and byte % 16 and 1))
+            set i to i + 1
+        free_bytes(random)
+        if ep_dlcall3(ep_dlsym(libc and "write") and fd and token and 64) != 64 || ep_dlcall1(ep_dlsym(libc and "fsync") and fd) != 0:
+            set token to ""
+    else if used > 0 && used < 129:
+        poke_byte(buffer and used and 0)
+        set token to string_trim(ptr_to_str(buffer))
+    free_bytes(buffer)
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    if string_length(token) != 64:
+        return ""
+    set i to 0
+    repeat while i < 64:
+        set ch to get_character(token and i)
+        if (ch < 48 || ch > 57) && (ch < 97 || ch > 102):
+            return ""
+        set i to i + 1
+    return token
+
+# ready / absent / occupied: a reachable unverified service is never replaced.
+define runtime_probe with db and port and token and model and context returning Str:
+    set props to transport_get(port and "/props" and token)
+    if string_contains(props and "Local connection failed"):
+        return "absent"
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.model_path')=? AND json_extract(?,'$.default_generation_settings.n_ctx')=CAST(? AS INTEGER) AND json_extract(?,'$.build_info') LIKE 'b12359-%' ELSE 0 END" and [props,props,model,props,context,props]) == "1":
+        return "ready"
+    return "occupied"
+
+define runtime_arguments with root and token_path and embedding:
+    set model to concat(root and "/models/native/Qwen3.5-4B-Q4_K_M.gguf")
+    set port to "8400"
+    set context to "262144"
+    if embedding == 1:
+        set model to concat(root and "/models/native/all-minilm-l6-v2_f16.gguf")
+        set port to "8401"
+        set context to "512"
+    set arguments to ["--model",model,"--host","127.0.0.1","--port",port,"--api-key-file",token_path,"--ctx-size",context,"--parallel","1","--cache-ram","0","--log-colors","off"]
+    set extra to create_list()
+    if embedding == 1:
+        set extra to ["--embedding","--pooling","mean","--batch-size","512","--ubatch-size","512","--gpu-layers","0","--threads","2","--no-warmup"]
+    else:
+        set projector to concat(root and "/models/native/mmproj-Qwen3.5-4B-Q8_0.gguf")
+        set slots to concat(path_dirname(token_path) and "/native-slots")
+        if is_directory(slots) == 0:
+            ep_dlcall2(ep_dlsym(native_system() and "mkdir") and slots and 448)
+        set extra to ["--mmproj",projector,"--cache-type-k","q4_0","--cache-type-v","q4_0","--flash-attn","on","--batch-size","256","--ubatch-size","64","--ctx-checkpoints","1","--no-kv-offload","--no-mmproj-offload","--slot-save-path",slots,"--reasoning","on","--reasoning-format","deepseek","--reasoning-budget","-1","--timeout","86400"]
+    set i to 0
+    repeat while i < length_list(extra):
+        append_list(arguments and get_list(extra and i))
+        set i to i + 1
+    return arguments
+
+define runtime_ensure with root and home and token_path returning Str:
+    set lock to private_lock(concat(root and "/models/runtime") and "native-start.lock")
+    if lock < 0:
+        return "Cannot open the private runtime startup lock"
+    set libc to native_system()
+    if ep_dlcall2(ep_dlsym(libc and "flock") and lock and 2) != 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and lock)
+        return "Cannot acquire the runtime startup lock"
+    set token to runtime_credential(token_path)
+    set problem to ""
+    if token == "":
+        set problem to "Cannot read or create the private runtime credential"
+    set db to sql_open(":memory:")
+    set executable to concat(root and "/models/runtime/llama-b12359/llama-server")
+    if file_exists(executable) == 0:
+        set problem to "The pinned native model runtime is missing"
+    ep_dlcall3(ep_dlsym(libc and "setenv") and "ECHOLITE_REQUEST_TIMEOUT_MS" and "1500" and 1)
+    set index to 0
+    repeat while index < 2 && problem == "":
+        set port to 8400 + index
+        set context to "262144"
+        set model to concat(root and "/models/native/Qwen3.5-4B-Q4_K_M.gguf")
+        if index == 1:
+            set context to "512"
+            set model to concat(root and "/models/native/all-minilm-l6-v2_f16.gguf")
+        if file_exists(model) == 0:
+            set problem to "A required local model file is missing"
+        else:
+            set status to runtime_probe(db and port and token and model and context)
+            if status == "occupied":
+                set problem to concat("Port " and concat(int_to_string(port) and " is occupied by a service whose model, context, build or credential does not match"))
+            else if status == "absent":
+                set arguments to runtime_arguments(root and token_path and index)
+                set output_fd to private_lock(home and "native-runtime.log")
+                set pid to 0
+                if output_fd >= 0:
+                    native_fcntl_int(output_fd and 4 and 8)
+                    set pid to process_detached(executable and arguments and output_fd)
+                    ep_dlcall1(ep_dlsym(libc and "close") and output_fd)
+                if pid == 0:
+                    set problem to "The native model process could not start"
+                else:
+                    set deadline to transport_now(libc) + 180000
+                    set ready to 0
+                    repeat while ready == 0 && problem == "":
+                        set exited to process_poll(pid)
+                        if exited != 0 - 1:
+                            set problem to concat("Native runtime exited during startup: " and int_to_string(exited))
+                        else:
+                            set status to runtime_probe(db and port and token and model and context)
+                            if status == "ready":
+                                set ready to 1
+                            else if transport_now(libc) >= deadline:
+                                set problem to "Native runtime is still loading; reopen to check readiness without restarting it"
+                            else:
+                                ep_dlcall1(ep_dlsym(libc and "usleep") and 250000)
+            else:
+                display concat("Reused verified native service on port " and int_to_string(port))
+        set index to index + 1
+    if problem == "":
+        set library to get_env("ECHOLITE_LIBRARY")
+        if library == "":
+            set library to concat(root and "/library")
+        set problem to wikipedia_start(root and home and library)
+    sql_close(db)
+    ep_dlcall1(ep_dlsym(libc and "close") and lock)
+    return problem
+
+define main:
+    set args to get_args()
+    if length_list(args) != 4:
+        display "Usage: echolite-runtime ROOT STATE_DIRECTORY TOKEN_FILE"
+        return 1
+    set problem to runtime_ensure(get_list(args and 1) and get_list(args and 2) and get_list(args and 3))
+    if problem != "":
+        set log_fd to private_lock(get_list(args and 2) and "native-runtime.log")
+        if log_fd >= 0:
+            native_fcntl_int(log_fd and 4 and 8)
+            set message to concat("Runtime startup: " and concat(problem and "\n"))
+            ep_dlcall3(ep_dlsym(native_system() and "write") and log_fd and message and string_length(message))
+            ep_dlcall1(ep_dlsym(native_system() and "close") and log_fd)
+        display concat("Runtime startup: " and problem)
+        return 1
+    display "Native generation, embedding and Wikipedia services are ready"
+    return 0

@@ -1,0 +1,78 @@
+import "../src/calculator"
+set checks to 0
+
+define assert_calculator with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define exact_case with db and expression and expected:
+    set result to run_calculator(db and expression and "0")
+    set exact to result_cache_scalar(db and "SELECT json_extract(?,'$.exact')" and [result])
+    assert_calculator(string_equals(exact and expected) and concat(expression and concat(" -> " and result)))
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: calculator <new database>"
+        return 1
+    set db to sql_open(get_list(args and 1))
+    assert_calculator(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "fixture initialized")
+    set receipt to run_calculator(db and "11*37.25" and "0")
+    assert_calculator(result_cache_scalar(db and "SELECT json_extract(?,'$.decimal_exact')" and [receipt]) == "409.75" and "exact money decimal without model conversion")
+    set receipt to run_calculator(db and "-1/8" and "0")
+    assert_calculator(result_cache_scalar(db and "SELECT json_extract(?,'$.decimal_exact')" and [receipt]) == "-0.125" and "negative exact decimal")
+    set receipt to run_calculator(db and "1/3" and "0")
+    assert_calculator(result_cache_scalar(db and "SELECT json_type(?,'$.decimal_exact')" and [receipt]) == "null" and "repeating fraction not labelled exact decimal")
+    exact_case(db and "17*23" and "391")
+    exact_case(db and "0.1+0.2" and "3/10")
+    exact_case(db and "1/3 + 1/6" and "1/2")
+    exact_case(db and ".5+1.25" and "7/4")
+    exact_case(db and "1e3/4" and "250")
+    exact_case(db and "1e-3" and "1/1000")
+    exact_case(db and "1_000+2" and "1002")
+    exact_case(db and "2^3^2" and "512")
+    exact_case(db and "2**3**2" and "512")
+    exact_case(db and "-2^2" and "-4")
+    exact_case(db and "(-2)^2" and "4")
+    exact_case(db and "2^-3" and "1/8")
+    exact_case(db and "-2^-3" and "-1/8")
+    exact_case(db and "(-2)^-3" and "-1/8")
+    exact_case(db and "abs(-1/3)" and "1/3")
+    exact_case(db and "-7//3" and "-3")
+    exact_case(db and "-7%3" and "2")
+    exact_case(db and "7%-3" and "-2")
+    exact_case(db and "1//-2" and "-1")
+    exact_case(db and "1%-2" and "-1")
+    exact_case(db and "(2^1000)/(2^999)" and "2")
+    exact_case(db and "1e1000/1e999" and "10")
+    exact_case(db and "999999999999999999999999+1" and "1000000000000000000000000")
+    exact_case(db and "0^0" and "1")
+    exact_case(db and "(2+3)*(4-1)" and "15")
+    set invalid to [""," ","1/0","1//0","1%0","0^-1","2^0.5","2^1001","(2^1000)^1000","1e1001","1e","1..2","1__2","1_","abs(1,2)","abs 1","(1+2","1+2)","[1]","__import__('os')","1;DROP TABLE memories","1 # comment"]
+    set i to 0
+    repeat while i < length_list(invalid):
+        set expression to get_list(invalid and i)
+        set result to run_calculator(db and expression and "0")
+        assert_calculator(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and concat("reject: " and expression))
+        set i to i + 1
+    set deep to "1"
+    set i to 0
+    repeat while i < 40:
+        set deep to concat("(" and concat(deep and ")"))
+        set i to i + 1
+    assert_calculator(string_contains(run_calculator(db and deep and "0") and "deeply nested") and "depth limit")
+    set original to run_calculator(db and "17*23" and "0")
+    sql_close(db)
+    set db to sql_open(get_list(args and 1))
+    set CALCULATOR_GMP to 0
+    set_env("ECHOLITE_GMP_LIBRARY" and "/private/tmp/nonexistent-echolite-gmp.dylib")
+    assert_calculator(string_equals(run_calculator(db and "17*23" and "0") and original) and "persistent cache replay without arithmetic runtime")
+    sql_execute(db and "UPDATE metadata SET value='1'")
+    assert_calculator(string_contains(run_calculator(db and "17*23" and "0") and "forgetting") and "stale result refused")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " exact calculator checks in Ernos Plain"))
+    return 0

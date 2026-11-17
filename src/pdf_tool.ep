@@ -1,0 +1,121 @@
+# Bounded isolated document parsing with persistent, content-addressed page caching.
+import "pdf_native"
+import "native_process"
+import "dictionary"
+
+define document_child with db and executable and path and page and output_budget returning Str:
+    if output_budget < 1 || output_budget > 1048576:
+        return pdf_error(db and "Invalid isolated reader output budget")
+    set libc to native_system()
+    set file to ep_dlcall0(ep_dlsym(libc and "tmpfile"))
+    if file == 0:
+        return pdf_error(db and "Cannot allocate private document result storage")
+    set fd to ep_dlcall1(ep_dlsym(libc and "fileno") and file)
+    native_fcntl_int(fd and 2 and 1)
+    set pid to process_launch(executable and [path,int_to_string(page)] and fd)
+    set problem to ""
+    if pid == 0:
+        set problem to "Cannot start the native document reader"
+    set proc to ep_dlopen("/usr/lib/libproc.dylib")
+    set task to alloc_bytes(96)
+    set info to alloc_bytes(144)
+    set peak to 0
+    set code to 0 - 1
+    set deadline to transport_now(libc) + 20000
+    repeat while pid > 0 && code == 0 - 1 && problem == "":
+        set code to process_poll(pid)
+        if code == 0 - 1:
+            set observed to ep_dlcall5(ep_dlsym(proc and "proc_pidinfo") and pid and 4 and 0 and task and 96)
+            if observed == 96:
+                set rss to lease_integer(task and 8 and 8)
+                if rss > peak:
+                    set peak to rss
+                if rss > 268435456:
+                    set problem to "document extraction exceeded sampled 256 MiB resident memory budget"
+            if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0 || lease_integer(info and 96 and 8) > output_budget:
+                set problem to "document extraction exceeded its output budget"
+            if transport_now(libc) >= deadline:
+                set problem to "document extraction exceeded 20-second deadline"
+            if problem == "":
+                ep_dlcall1(ep_dlsym(libc and "usleep") and 10000)
+    if pid > 0 && code == 0 - 1 && problem != "":
+        ep_dlcall2(ep_dlsym(libc and "kill") and pid and 9)
+        set code to process_poll(pid)
+        repeat while code == 0 - 1:
+            ep_dlcall1(ep_dlsym(libc and "usleep") and 10000)
+            set code to process_poll(pid)
+    if problem == "" && code != 0:
+        set problem to "Native document reader failed"
+    set result to ""
+    if problem == "":
+        set data to alloc_bytes(output_budget + 2)
+        set used to ep_dlcall4(ep_dlsym(libc and "pread") and fd and data and output_budget + 1 and 0)
+        if used < 1 || used > output_budget:
+            set problem to "Native document result is empty or exceeds its byte budget"
+        else:
+            set result to string_trim(ptr_to_str(data))
+            if result_cache_scalar(db and "SELECT json_valid(?)" and [result]) != "1":
+                set problem to "Native document reader returned an invalid receipt"
+        free_bytes(data)
+    ep_dlcall1(ep_dlsym(libc and "fclose") and file)
+    free_bytes(task)
+    free_bytes(info)
+    if problem != "":
+        return pdf_error(db and problem)
+    return result_cache_scalar(db and "SELECT json_set(?,'$.sampled_peak_rss_bytes',CAST(? AS INTEGER))" and [result,int_to_string(peak)])
+
+define pdf_child with db and executable and path and page returning Str:
+    set result to document_child(db and executable and path and page and 131072)
+    return result
+
+define pdf_lookup with db and executable and expression and epoch returning Str:
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [expression]) != "1":
+        return pdf_error(db and "Invalid PDF arguments")
+    set valid to result_cache_scalar(db and "SELECT json_type(?)='object' AND (SELECT count(*) FROM json_each(?))=3 AND (SELECT count(DISTINCT key) FROM json_each(?))=3 AND json_type(?,'$.path')='text' AND json_type(?,'$.page')='integer' AND json_type(?,'$.offset')='integer' AND json_extract(?,'$.page') BETWEEN 1 AND 1000 AND json_extract(?,'$.offset') BETWEEN 0 AND 20000" and [expression,expression,expression,expression,expression,expression,expression,expression])
+    if valid != "1":
+        return pdf_error(db and "PDF arguments require path, page 1-1000 and character offset 0-20000")
+    set path to result_cache_scalar(db and "SELECT json_extract(?,'$.path')" and [expression])
+    if starts_with(path and "/") == 0 || string_length(path) > 1024 || result_cache_scalar(db and "SELECT instr(?,char(0))=0" and [path]) != "1":
+        return pdf_error(db and "PDF path must be absolute and at most 1024 UTF-8 bytes")
+    set page to string_to_int(result_cache_scalar(db and "SELECT json_extract(?,'$.page')" and [expression]))
+    set offset to result_cache_scalar(db and "SELECT json_extract(?,'$.offset')" and [expression])
+    set snapshot to pdf_snapshot(db and path)
+    if get_list(snapshot and 0) == 0:
+        return pdf_error(db and get_list(snapshot and 3))
+    free_bytes(get_list(snapshot and 0))
+    set digest to get_list(snapshot and 2)
+    set namespace to pdf_cache_namespace()
+    set key to concat(digest and concat(":" and int_to_string(page)))
+    set captured to result_cache_get(db and namespace and key and epoch)
+    set hit to "true"
+    if captured == "":
+        set hit to "false"
+        set captured to pdf_child(db and executable and path and page)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [captured]) != "ok":
+            return captured
+        if string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.source_sha256')" and [captured]) and digest) == 0:
+            return pdf_error(db and "PDF changed during extraction; result discarded")
+        set captured to result_cache_put(db and namespace and key and epoch and captured)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [captured]) != "ok":
+        return captured
+    set text to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [captured])
+    if result_cache_scalar(db and "SELECT CAST(? AS INTEGER)<=length(?)" and [offset,text]) != "1":
+        return pdf_error(db and "PDF offset is beyond captured page text")
+    set remaining to result_cache_scalar(db and "SELECT substr(?,CAST(? AS INTEGER)+1)" and [text,offset])
+    set excerpt to dictionary_excerpt(remaining and 4096)
+    set next to result_cache_scalar(db and "SELECT CAST(? AS INTEGER)+length(?)" and [offset,excerpt])
+    set uri to concat(filesystem_uri(path) and concat("#page=" and int_to_string(page)))
+    return result_cache_scalar(db and "SELECT json_object('status','ok','tool','pdf_read','outcome','completed','path',?,'page',CAST(? AS INTEGER),'pages',json_extract(?,'$.pages'),'text',?,'offset',CAST(? AS INTEGER),'next_offset',CASE WHEN CAST(? AS INTEGER)<length(?) THEN CAST(? AS INTEGER) ELSE NULL END,'more',json(CASE WHEN CAST(? AS INTEGER)<length(?) THEN 'true' ELSE 'false' END),'capture_truncated',json_extract(?,'$.capture_truncated'),'text_status',json_extract(?,'$.text_status'),'source_sha256',?,'entries',json_array(json_object('url',?)),'cache_hit',json(?),'parser_version','macOS PDFKit via EP','child_peak_rss_bytes',json_extract(?,'$.child_peak_rss_bytes'),'sampled_peak_rss_bytes',json_extract(?,'$.sampled_peak_rss_bytes'))" and [path,int_to_string(page),captured,excerpt,offset,next,text,next,next,text,captured,captured,digest,uri,hit,captured,captured])
+
+# System PDFKit can change with an OS update; do not mix its cached parses.
+define pdf_cache_namespace returning Str:
+    set libc to native_system()
+    set bytes to alloc_bytes(128)
+    set size to alloc_bytes(8)
+    native_bytes_write(size and 0 and 127 and 8)
+    set version to "unknown"
+    if ep_dlcall5(ep_dlsym(libc and "sysctlbyname") and "kern.osversion" and bytes and size and 0 and 0) == 0:
+        set version to ptr_to_str(bytes)
+    free_bytes(size)
+    free_bytes(bytes)
+    return concat("pdfkit-page-ep-v1:" and version)

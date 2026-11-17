@@ -1,0 +1,62 @@
+import "../src/docx_tool"
+import "docx_fixture"
+set checks to 0
+
+define docx_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define docx_request with db and path and offset returning Str:
+    set params to [path,int_to_string(offset)]
+    return result_cache_scalar(db and "SELECT json_object('path',?,'offset',CAST(? AS INTEGER))" and params)
+
+define main:
+    set args to get_args()
+    set root to get_list(args and 1)
+    set helper to get_list(args and 2)
+    set path to concat(root and "/reference café.docx")
+    docx_assert(docx_fixture(path and "Café receipt BIRCH-862." and 0) and "EP ZIP fixture")
+    set database to concat(root and "/cache.sqlite3")
+    set db to sql_open(database)
+    docx_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "isolated cache")
+    set request to docx_request(db and path and 0)
+    set result to docx_lookup(db and helper and request and "0")
+    docx_assert(string_contains(result and "Café receipt BIRCH-862.") and concat("actual native extraction: " and result))
+    docx_assert(string_contains(result and "#character=0") and "source citation")
+    docx_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.child_peak_rss_bytes') BETWEEN 1 AND 268435456" and [result]) == "1" and "measured helper memory")
+    docx_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "0" and "first extraction")
+    sql_close(db)
+    set db to sql_open(database)
+    set result to docx_lookup(db and "/missing-helper" and request and "0")
+    docx_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "persistent cache after reopen")
+    set builder to create_builder()
+    set i to 0
+    repeat while i < 3000:
+        builder_append(builder and "Café 🌱 ")
+        set i to i + 1
+    docx_fixture(path and builder_to_string(builder) and 0)
+    set result to docx_lookup(db and helper and request and "0")
+    set next to result_cache_scalar(db and "SELECT json_extract(?,'$.next_offset')" and [result])
+    docx_assert(string_to_int(next) > 0 and "long document continuation")
+    docx_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.capture_truncated')" and [result]) == "1" and "retained text cap disclosed")
+    set result to docx_lookup(db and "/missing-helper" and docx_request(db and path and string_to_int(next)) and "0")
+    docx_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "continuation reuses persisted extraction")
+    set i to 1
+    repeat while i <= 3:
+        docx_fixture(path and "test" and i)
+        set result to docx_lookup(db and helper and request and "0")
+        docx_assert(string_contains(result and "\"status\":\"error\"") and concat("unsafe archive rejected: " and result))
+        set i to i + 1
+    write_file(path and "not a DOCX archive")
+    docx_assert(string_contains(docx_lookup(db and helper and request and "0") and "error") and "corrupt ZIP rejected")
+    docx_fixture(path and "Café receipt BIRCH-862." and 0)
+    docx_assert(string_contains(docx_lookup(db and helper and docx_request(db and path and 20000) and "0") and "beyond") and "invalid continuation rejected")
+    docx_assert(string_contains(docx_lookup(db and helper and "{\"path\":\"relative.docx\",\"offset\":0}" and "0") and "absolute") and "relative path rejected")
+    sql_execute(db and "UPDATE metadata SET value='1'")
+    docx_assert(string_contains(docx_lookup(db and helper and request and "0") and "error") and "forgotten epoch rejected")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native EP DOCX tool checks"))
+    return 0

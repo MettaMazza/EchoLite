@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440" role="img" aria-labelledby="title desc">
+<title id="title">EchoLite — a small model, a growing memory</title>
+<desc id="desc">Pastel mint concentric arcs on a dark background, with the EchoLite name and Local cognitive agent. Built in Ernos Plain. Active development.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101815"/><stop offset="1" stop-color="#1b2b23"/></linearGradient><radialGradient id="glow"><stop stop-color="#bde5c9" stop-opacity=".12"/><stop offset="1" stop-color="#bde5c9" stop-opacity="0"/></radialGradient></defs>
+<rect width="1280" height="440" rx="24" fill="url(#bg)"/>
+<circle cx="1030" cy="220" r="300" fill="url(#glow)"/>
+<g fill="none" stroke="#bde5c9"><circle cx="1024" cy="220" r="132" opacity=".16"/><circle cx="1024" cy="220" r="96" opacity=".26"/><path d="M1060 167a64 64 0 1 0 0 106" stroke-width="12" stroke-linecap="round"/><path d="M1046 194a32 32 0 1 0 0 52" stroke-width="8" stroke-linecap="round"/><circle cx="1024" cy="220" r="7" fill="#bde5c9" stroke="none"/></g>
+<circle cx="1120" cy="220" r="5" fill="#bde5c9"/><circle cx="1024" cy="88" r="4" fill="#6a9a79"/>
+<text x="72" y="91" fill="#a9bdb0" font-family="Arial,Helvetica,sans-serif" font-size="13" letter-spacing="3">LOCAL BY DESIGN · ACTIVE DEVELOPMENT</text>
+<text x="66" y="208" fill="#e8eee9" font-family="Arial,Helvetica,sans-serif" font-size="100" font-weight="700" letter-spacing="-5">Echo<tspan fill="#bde5c9">Lite</tspan></text>
+<text x="72" y="269" fill="#e8eee9" font-family="Arial,Helvetica,sans-serif" font-size="28">A small model. A growing memory.</text>
+<path d="M72 313h608" stroke="#3a5143"/>
+<text x="72" y="355" fill="#9fb5a6" font-family="Arial,Helvetica,sans-serif" font-size="17">Persistent memory. Grounded tools. An editable sense of self.</text>
+<text x="72" y="387" fill="#728d7b" font-family="Arial,Helvetica,sans-serif" font-size="14">Built in Ernos Plain · Developed on an 8 GB Apple Silicon Mac</text>
+</svg>

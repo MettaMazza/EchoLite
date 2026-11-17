@@ -1,0 +1,20 @@
+# Isolated image decoder; parent enforces deadline, output and resident memory.
+import "image_native"
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set db to sql_open(":memory:")
+    set result to image_normalize(db and get_list(args and 1))
+    set usage to alloc_bytes(144)
+    set peak to 0
+    if ep_dlcall2(ep_dlsym(native_system() and "getrusage") and 0 and usage) == 0:
+        set peak to lease_integer(usage and 32 and 8)
+    free_bytes(usage)
+    if peak <= 0 || peak > 268435456:
+        set result to pdf_error(db and "Image decoding exceeded its 256 MiB resident memory budget")
+    else:
+        set result to result_cache_scalar(db and "SELECT json_set(?,'$.child_peak_rss_bytes',CAST(? AS INTEGER))" and [result,int_to_string(peak)])
+    display result
+    sql_close(db)
+    return 0

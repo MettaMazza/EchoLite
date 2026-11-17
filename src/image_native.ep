@@ -1,0 +1,136 @@
+# Local still-image normalization through macOS ImageIO and CoreGraphics.
+import "pdf_native"
+import "process_bytes"
+set IMAGE_CF to 0
+set IMAGE_IO to 0
+set IMAGE_CG to 0
+
+define image_init:
+    set IMAGE_CF to ep_dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    set IMAGE_IO to ep_dlopen("/System/Library/Frameworks/ImageIO.framework/ImageIO")
+    set IMAGE_CG to ep_dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    return IMAGE_CF != 0 && IMAGE_IO != 0 && IMAGE_CG != 0
+
+define image_release with value:
+    if value != 0:
+        ep_dlcall1(ep_dlsym(IMAGE_CF and "CFRelease") and value)
+    return 0
+
+define image_string with text:
+    return ep_dlcall3(ep_dlsym(IMAGE_CF and "CFStringCreateWithCString") and 0 and text and 134217984)
+
+define image_constant with library and name:
+    set address to ep_dlsym(library and name)
+    if address == 0:
+        return 0
+    return lease_integer(address and 0 and 8)
+
+define image_options:
+    return ep_dlcall4(ep_dlsym(IMAGE_CF and "CFDictionaryCreateMutable") and 0 and 0 and ep_dlsym(IMAGE_CF and "kCFTypeDictionaryKeyCallBacks") and ep_dlsym(IMAGE_CF and "kCFTypeDictionaryValueCallBacks"))
+
+define image_option with options and key and value:
+    ep_dlcall3(ep_dlsym(IMAGE_CF and "CFDictionarySetValue") and options and image_constant(IMAGE_IO and key) and value)
+    return 0
+
+define image_number with number:
+    set bytes to alloc_bytes(8)
+    native_bytes_write(bytes and 0 and number and 8)
+    set result to ep_dlcall3(ep_dlsym(IMAGE_CF and "CFNumberCreate") and 0 and 4 and bytes)
+    free_bytes(bytes)
+    return result
+
+define image_property with properties and key:
+    set value to ep_dlcall2(ep_dlsym(IMAGE_CF and "CFDictionaryGetValue") and properties and image_constant(IMAGE_IO and key))
+    if value == 0:
+        return 0
+    set bytes to alloc_bytes(8)
+    set result to 0
+    if ep_dlcall3(ep_dlsym(IMAGE_CF and "CFNumberGetValue") and value and 4 and bytes):
+        set result to lease_integer(bytes and 0 and 8)
+    free_bytes(bytes)
+    return result
+
+define image_normalize with db and path returning Str:
+    if image_init() == 0:
+        return pdf_error(db and "Native image frameworks are unavailable")
+    set snapshot to pdf_snapshot(db and path)
+    if get_list(snapshot and 0) == 0:
+        return pdf_error(db and string_replace(get_list(snapshot and 3) and "PDF" and "Image"))
+    set data to ep_dlcall3(ep_dlsym(IMAGE_CF and "CFDataCreate") and 0 and get_list(snapshot and 0) and get_list(snapshot and 1))
+    free_bytes(get_list(snapshot and 0))
+    set options to image_options()
+    image_option(options and "kCGImageSourceShouldCache" and image_constant(IMAGE_CF and "kCFBooleanFalse"))
+    set source to ep_dlcall2(ep_dlsym(IMAGE_IO and "CGImageSourceCreateWithData") and data and options)
+    image_release(options)
+    image_release(data)
+    if source == 0:
+        return pdf_error(db and "File is not a readable image")
+    set count to ep_dlcall1(ep_dlsym(IMAGE_IO and "CGImageSourceGetCount") and source)
+    set kind to ep_dlcall1(ep_dlsym(IMAGE_IO and "CGImageSourceGetType") and source)
+    set formats to ["public.png","public.jpeg","public.heic","public.heif"]
+    set accepted to 0
+    set i to 0
+    repeat while i < length_list(formats):
+        set format to image_string(get_list(formats and i))
+        if kind != 0 && ep_dlcall3(ep_dlsym(IMAGE_CF and "CFStringCompare") and kind and format and 0) == 0:
+            set accepted to 1
+        image_release(format)
+        set i to i + 1
+    if accepted == 0 || count != 1:
+        image_release(source)
+        return pdf_error(db and "Attach one still PNG, JPEG or HEIC image")
+    set properties to ep_dlcall3(ep_dlsym(IMAGE_IO and "CGImageSourceCopyPropertiesAtIndex") and source and 0 and 0)
+    if properties == 0:
+        image_release(source)
+        return pdf_error(db and "Cannot read image dimensions")
+    set width to image_property(properties and "kCGImagePropertyPixelWidth")
+    set height to image_property(properties and "kCGImagePropertyPixelHeight")
+    image_release(properties)
+    if width < 1 || height < 1 || width > 8192 || height > 8192 || width * height > 33554432:
+        image_release(source)
+        return pdf_error(db and "Image exceeds the 32-megapixel decoding budget")
+    set result to ""
+    set sizes to [1024,768,512]
+    set step to 0
+    repeat while step < 3 && result == "":
+        set options to image_options()
+        image_option(options and "kCGImageSourceCreateThumbnailFromImageAlways" and image_constant(IMAGE_CF and "kCFBooleanTrue"))
+        image_option(options and "kCGImageSourceCreateThumbnailWithTransform" and image_constant(IMAGE_CF and "kCFBooleanTrue"))
+        set maximum to image_number(get_list(sizes and step))
+        image_option(options and "kCGImageSourceThumbnailMaxPixelSize" and maximum)
+        image_release(maximum)
+        set image to ep_dlcall3(ep_dlsym(IMAGE_IO and "CGImageSourceCreateThumbnailAtIndex") and source and 0 and options)
+        image_release(options)
+        if image != 0:
+            set output to ep_dlcall2(ep_dlsym(IMAGE_CF and "CFDataCreateMutable") and 0 and 0)
+            set jpeg to image_string("public.jpeg")
+            set destination to ep_dlcall4(ep_dlsym(IMAGE_IO and "CGImageDestinationCreateWithData") and output and jpeg and 1 and 0)
+            image_release(jpeg)
+            if destination != 0:
+                set options to image_options()
+                set numeric to alloc_bytes(8)
+                native_bytes_write(numeric and 0 and 4604930618986332160 and 8)
+                set quality to ep_dlcall3(ep_dlsym(IMAGE_CF and "CFNumberCreate") and 0 and 6 and numeric)
+                free_bytes(numeric)
+                image_option(options and "kCGImageDestinationLossyCompressionQuality" and quality)
+                image_release(quality)
+                ep_dlcall3(ep_dlsym(IMAGE_IO and "CGImageDestinationAddImage") and destination and image and options)
+                image_release(options)
+                set finished to ep_dlcall1(ep_dlsym(IMAGE_IO and "CGImageDestinationFinalize") and destination)
+                set bytes to ep_dlcall1(ep_dlsym(IMAGE_CF and "CFDataGetLength") and output)
+                if finished && bytes > 0 && bytes <= 524288:
+                    set pointer to ep_dlcall1(ep_dlsym(IMAGE_CF and "CFDataGetBytePtr") and output)
+                    set encoded to process_base64(pointer and bytes)
+                    set digest to process_digest(pointer and bytes)
+                    set out_width to ep_dlcall1(ep_dlsym(IMAGE_CG and "CGImageGetWidth") and image)
+                    set out_height to ep_dlcall1(ep_dlsym(IMAGE_CG and "CGImageGetHeight") and image)
+                    set params to [get_list(snapshot and 2),digest,int_to_string(width),int_to_string(height),int_to_string(out_width),int_to_string(out_height),int_to_string(bytes),concat("data:image/jpeg;base64," and encoded)]
+                    set result to result_cache_scalar(db and "SELECT json_object('status','ok','source_sha256',?,'image_sha256',?,'source_width',CAST(? AS INTEGER),'source_height',CAST(? AS INTEGER),'width',CAST(? AS INTEGER),'height',CAST(? AS INTEGER),'bytes',CAST(? AS INTEGER),'data_url',?,'normalization','EXIF-oriented JPEG, longest edge at most 1024 pixels; metadata stripped')" and params)
+                image_release(destination)
+            image_release(output)
+            image_release(image)
+        set step to step + 1
+    image_release(source)
+    if result == "":
+        return pdf_error(db and "Cannot normalize image within the 512 KiB attachment budget")
+    return result

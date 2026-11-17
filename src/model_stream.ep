@@ -1,0 +1,88 @@
+# Decode native-runtime server-sent events in Ernos Plain.
+import "string"
+import "sql"
+
+# State: pending SSE, answer, thinking, finish reason, input count,
+# output count, DONE flag, error, reported reasoning count.
+define model_stream:
+    set state to ["","","","","","","0","",""]
+    return state
+
+define model_stream_event with db and state and event:
+    set lines to string_split(event and "\n")
+    set data to ""
+    set i to 0
+    repeat while i < length_list(lines):
+        set line to get_list(lines and i)
+        if starts_with(line and "data:"):
+            set value to substring(line and 5 and string_length(line) - 5)
+            if starts_with(value and " "):
+                set value to substring(value and 1 and string_length(value) - 1)
+            if data != "":
+                set data to concat(data and "\n")
+            set data to concat(data and value)
+        set i to i + 1
+    if data == "":
+        return 0
+    if get_list(state and 6) == "1":
+        set_list(state and 7 and "Unexpected model data after DONE")
+        return 0
+    if data == "[DONE]":
+        set_list(state and 6 and "1")
+        return 1
+    set valid to sql_query_params(db and "SELECT json_valid(?)" and [data])
+    if length_list(valid) != 1 || get_list(get_list(valid and 0) and 0) != "1":
+        set_list(state and 7 and "Malformed model stream JSON")
+        return 0
+    set rows to sql_query_params(db and "SELECT coalesce(json_extract(?,'$.choices[0].delta.content'),''),coalesce(json_extract(?,'$.choices[0].delta.reasoning_content'),''),coalesce(json_extract(?,'$.choices[0].finish_reason'),''),coalesce(json_extract(?,'$.usage.prompt_tokens'),''),coalesce(json_extract(?,'$.usage.completion_tokens'),''),coalesce(json_extract(?,'$.usage.completion_tokens_details.reasoning_tokens'),''),coalesce(json_type(?,'$.choices[0].delta.content'),'null'),coalesce(json_type(?,'$.choices[0].delta.reasoning_content'),'null'),coalesce(json_type(?,'$.error'),'null')" and [data,data,data,data,data,data,data,data,data])
+    if length_list(rows) != 1:
+        set_list(state and 7 and "Cannot decode model stream event")
+        return 0
+    set row to get_list(rows and 0)
+    if (get_list(row and 6) != "text" && get_list(row and 6) != "null") || (get_list(row and 7) != "text" && get_list(row and 7) != "null") || get_list(row and 8) != "null":
+        set_list(state and 7 and "Model stream returned an error or invalid text")
+        return 0
+    set_list(state and 1 and concat(get_list(state and 1) and get_list(row and 0)))
+    set_list(state and 2 and concat(get_list(state and 2) and get_list(row and 1)))
+    if get_list(row and 2) != "":
+        set_list(state and 3 and get_list(row and 2))
+    if get_list(row and 3) != "":
+        set_list(state and 4 and get_list(row and 3))
+    if get_list(row and 4) != "":
+        set_list(state and 5 and get_list(row and 4))
+    if get_list(row and 5) != "":
+        set_list(state and 8 and get_list(row and 5))
+    if string_length(get_list(state and 1)) + string_length(get_list(state and 2)) > 1048576:
+        set_list(state and 7 and "Model output exceeded 1 MiB")
+    return 0
+
+define model_stream_feed with db and state and fragment and eof:
+    set pending to concat(get_list(state and 0) and fragment)
+    set pending to string_replace(pending and "\r\n" and "\n")
+    set end to string_index_of(pending and "\n\n")
+    repeat while end >= 0 && get_list(state and 7) == "":
+        model_stream_event(db and state and substring(pending and 0 and end))
+        set pending to substring(pending and end + 2 and string_length(pending) - end - 2)
+        set end to string_index_of(pending and "\n\n")
+    set_list(state and 0 and pending)
+    if string_length(pending) > 1048576:
+        set_list(state and 7 and "Oversized model stream event")
+    if eof == 1 && get_list(state and 7) == "":
+        if string_trim(pending) != "" || get_list(state and 6) != "1" || get_list(state and 3) == "":
+            set_list(state and 7 and "Model stream ended before completion")
+    return get_list(state and 7) == ""
+
+define model_stream_result with db and state returning Str:
+    set status to "ok"
+    set text to get_list(state and 1)
+    if get_list(state and 7) != "":
+        set status to "error"
+        set text to get_list(state and 7)
+    else if get_list(state and 6) != "1" || get_list(state and 3) == "":
+        set status to "streaming"
+    else if get_list(state and 3) != "stop":
+        set status to "truncated"
+    set rows to sql_query_params(db and "SELECT json_object('status',?,'text',?,'reasoning',?,'finish_reason',?,'prompt_tokens',CAST(nullif(?,'') AS INTEGER),'completion_tokens',CAST(nullif(?,'') AS INTEGER),'reasoning_tokens',CAST(nullif(?,'') AS INTEGER))" and [status,text,get_list(state and 2),get_list(state and 3),get_list(state and 4),get_list(state and 5),get_list(state and 8)])
+    if length_list(rows) != 1:
+        return "{\"status\":\"error\",\"text\":\"Cannot serialize model output\"}"
+    return get_list(get_list(rows and 0) and 0)

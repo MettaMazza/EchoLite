@@ -1,0 +1,66 @@
+# Native font-measured wrapping, including URLs and unbroken Unicode text.
+import "native_font"
+import "string"
+
+define layout_boundary with text and position:
+    repeat while position > 0 && get_character(text and position) >= 128 && get_character(text and position) < 192:
+        set position to position - 1
+    return position
+
+define layout_prefix with text and width and size:
+    set low to 1
+    set high to string_length(text)
+    set best to 0
+    repeat while low <= high:
+        set middle to (low + high) / 2
+        set boundary to layout_boundary(text and middle)
+        if font_measure(substring(text and 0 and boundary) and size) <= width:
+            set best to boundary
+            set low to middle + 1
+        else:
+            set high to middle - 1
+    # A viewport narrower than one glyph must still advance a whole codepoint.
+    if best == 0 && string_length(text) > 0:
+        set best to 1
+        repeat while best < string_length(text) && get_character(text and best) >= 128 && get_character(text and best) < 192:
+            set best to best + 1
+    return best
+
+# Source byte ranges keep mouse selection and copied whitespace exact.
+define layout_ranges with text and width and size:
+    set rows to create_list()
+    set start to 0
+    set total to string_length(text)
+    repeat while start < total:
+        set finish to start
+        repeat while finish < total && get_character(text and finish) != 10:
+            set finish to finish + 1
+        if finish == start:
+            append_list(rows and [start,start])
+            set start to start + 1
+        else:
+            set count to layout_prefix(substring(text and start and finish - start) and width and size)
+            set stop to start + count
+            if stop < finish:
+                set space to stop
+                repeat while space > start && get_character(text and space - 1) != 32:
+                    set space to space - 1
+                if space > start:
+                    set stop to space
+            append_list(rows and [start,stop])
+            set start to stop
+            if start == finish && start < total:
+                set start to start + 1
+    if total == 0 || get_character(text and total - 1) == 10:
+        append_list(rows and [total,total])
+    return rows
+
+define layout_lines with text and width and size:
+    set rows to layout_ranges(text and width and size)
+    set lines to create_list()
+    set i to 0
+    repeat while i < length_list(rows):
+        set row to get_list(rows and i)
+        append_list(lines and substring(text and get_list(row and 0) and get_list(row and 1) - get_list(row and 0)))
+        set i to i + 1
+    return lines

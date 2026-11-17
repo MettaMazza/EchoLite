@@ -1,0 +1,42 @@
+# Actual model tool selection, then a fresh-process replay with invalid credentials.
+import "../src/native_conversation"
+import "fs"
+import "os"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 4:
+        display "Usage: native_conversation <token file> <new database> <prime|replay|changed>"
+        return 1
+    set_env("ECHOLITE_HOME" and path_dirname(get_list(args and 2)))
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and get_list(args and 1))
+    set db to sql_open(get_list(args and 2))
+    sql_execute(db and "PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;")
+    set token to "invalid-credential-proves-no-model-call"
+    set mode to get_list(args and 3)
+    if mode == "prime":
+        if sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") != 0:
+            return 1
+        set token to string_trim(read_file(get_list(args and 1)))
+    if mode == "changed":
+        set_env("ECHOLITE_REASONING_BUDGET" and "512")
+    set request to "{\"identity\":\"I am EchoLite. I use evidence and tools carefully.\",\"context\":\"No previous memories.\",\"input\":\"Use the calculator to calculate 43*17.\",\"mode\":\"chat\",\"cache_epoch\":\"0\",\"tool_trace\":[],\"tool_budget\":8,\"tool_required\":\"1\",\"allowed_bases\":[],\"validation_feedback\":\"\"}"
+    set started to transport_now(ep_dlopen("/usr/lib/libSystem.B.dylib"))
+    set response to native_conversation_generate(db and token and request and 0)
+    set elapsed to transport_now(ep_dlopen("/usr/lib/libSystem.B.dylib")) - started
+    if mode == "changed":
+        if string_contains(response and "non-success HTTP status") == 0:
+            display response
+            return 1
+        display "PASS: changed thinking settings bypass prior cache and reach the HTTP endpoint (invalid credentials)"
+        sql_close(db)
+        return 0
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.tool')='calculator' AND length(json_extract(?,'$.reasoning'))>0 AND json_extract(?,'$.completion_tokens')>0" and [response,response,response,response]) != "1":
+        display response
+        return 1
+    display concat("Mode: " and mode)
+    display concat("Elapsed milliseconds: " and int_to_string(elapsed))
+    display concat("Exact response SHA-256: " and sha256(response))
+    display "PASS: native model selected calculator; thinking and usage retained"
+    sql_close(db)
+    return 0

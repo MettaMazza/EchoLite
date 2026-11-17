@@ -1,0 +1,47 @@
+import "../src/slot_cache"
+import "os"
+set checks to 0
+
+define slot_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    set db to sql_open(":memory:")
+    set filename to concat("echolite-" and concat(sha256("slot fixture") and ".bin"))
+    slot_assert(slot_filename(filename) and "opaque deterministic filename")
+    set invalid to ["../outside.bin","echolite-short.bin",concat(filename and "/"),string_replace(filename and "echolite-" and "otherxxx-")]
+    set i to 0
+    repeat while i < length_list(invalid):
+        slot_assert(slot_filename(get_list(invalid and i)) == 0 and "unmanaged filename rejected")
+        set i to i + 1
+    set saved to result_cache_scalar(db and "SELECT json_object('id_slot',0,'filename',?,'n_saved',100,'n_written',123456)" and [filename])
+    slot_assert(string_contains(slot_receipt(db and "save" and filename and saved) and "\"status\":\"ok\"") and "save receipt validated")
+    set restored to result_cache_scalar(db and "SELECT json_object('id_slot',0,'filename',?,'n_restored',100,'n_read',123456)" and [filename])
+    slot_assert(string_contains(slot_receipt(db and "restore" and filename and restored) and "\"status\":\"ok\"") and "restore receipt validated")
+    slot_assert(string_contains(slot_receipt(db and "erase" and "" and "{\"id_slot\":0,\"n_erased\":100}") and "\"status\":\"ok\"") and "erase receipt validated")
+    set bad to ["{}","not json","{\"id_slot\":1,\"n_saved\":2}","{\"id_slot\":0,\"n_saved\":262145}","{\"id_slot\":0,\"n_saved\":-1}","{\"id_slot\":0,\"n_saved\":\"100\"}"]
+    set i to 0
+    repeat while i < length_list(bad):
+        slot_assert(string_contains(slot_receipt(db and "save" and filename and get_list(bad and i)) and "\"status\":\"error\"") and "malformed receipt rejected")
+        set i to i + 1
+    set over to result_cache_scalar(db and "SELECT json_set(?,'$.n_written',8589934593)" and [saved])
+    slot_assert(string_contains(slot_receipt(db and "save" and filename and over) and "error") and "oversized snapshot rejected")
+    slot_assert(string_contains(slot_control(db and "unused" and "unknown" and filename) and "Invalid slot") and "invalid operation rejected before network")
+    set first to slot_lock(home)
+    slot_assert(first >= 0 and "runtime lease acquired")
+    slot_assert(slot_lock(home) < 0 and "competing lease rejected")
+    slot_unlock(first)
+    set second to slot_lock(home)
+    slot_assert(second >= 0 and "lease reacquired after release")
+    slot_unlock(second)
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native slot protocol checks"))
+    return 0

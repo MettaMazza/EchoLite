@@ -1,0 +1,149 @@
+import "../src/transport"
+import "net"
+set assertions to 0
+
+define assert_transport with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set assertions to assertions + 1
+    return 0
+
+define parse_response with response and expected:
+    set state to transport_parser()
+    set i to 0
+    repeat while i < string_length(response):
+        set count to 3
+        if i + count > string_length(response):
+            set count to string_length(response) - i
+        transport_parse(state and substring(response and i and count) and 0)
+        set i to i + count
+    transport_parse(state and "" and 1)
+    assert_transport(get_list(state and 4) == "" and "fragmented response accepted")
+    assert_transport(get_list(state and 0) == 6 and "response complete")
+    assert_transport(string_equals(get_list(state and 2) and expected) and concat("exact body preserved: " and concat(get_list(state and 2) and concat(" expected " and expected))))
+    return 0
+
+define reject_response with response:
+    set state to transport_parser()
+    transport_parse(state and response and 1)
+    assert_transport(get_list(state and 4) != "" and "malformed response rejected")
+    return 0
+
+define serve_once with listener and response and delay and completion:
+    set client to net_accept(listener)
+    set request to ""
+    repeat while string_index_of(request and "\r\n\r\n") < 0:
+        set part to net_recv(client and 4096)
+        if part == "":
+            net_close(client)
+            send request to completion
+            return 0
+        set request to concat(request and part)
+    set body_start to string_index_of(request and "\r\n\r\n") + 4
+    set expected_body to 2
+    if string_contains(request and "Content-Length: 0\r\n"):
+        set expected_body to 0
+    repeat while string_length(request) - body_start < expected_body:
+        set part to net_recv(client and 4096)
+        if part == "":
+            net_close(client)
+            send request to completion
+            return 0
+        set request to concat(request and part)
+    if delay > 0:
+        sleep_ms(delay)
+    net_send(client and response)
+    net_close(client)
+    send request to completion
+    return 0
+
+define main:
+    parse_response("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" and "hello")
+    parse_response("HTTP/1.0 200 OK\r\n\r\nhello" and "hello")
+    parse_response("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" and "")
+    parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2;name=value\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n" and "hello")
+    parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Note: done\r\n\r\n" and "hello")
+    reject_response("HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n")
+    reject_response("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhi")
+    reject_response("HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nhi")
+    reject_response("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n")
+    reject_response("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+    reject_response("HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\n\r\n")
+    reject_response("HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\n")
+    reject_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n")
+    reject_response("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n")
+    reject_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\naXX0\r\n\r\n")
+    reject_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n:\r\n")
+    reject_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n100001\r\n")
+    assert_transport(transport_number("fF" and 16 and 256) == 255 and "hex parser")
+    assert_transport(transport_number("99999999999999999999" and 10 and 86400000) == -1 and "integer overflow rejected")
+    set invalid to local_post("/bad\r\nInjected" and "token" and "{}")
+    assert_transport(string_contains(invalid and "Invalid local request") and "request injection rejected")
+    set invalid to local_post("/recall" and "bad\r\nInjected" and "{}")
+    assert_transport(string_contains(invalid and "Invalid local authorization") and "authorization injection rejected")
+    set_env("ECHOLITE_REQUEST_TIMEOUT_MS" and "wrong")
+    assert_transport(string_contains(local_post("/recall" and "token" and "{}") and "Invalid request timeout") and "invalid deadline rejected")
+    set_env("ECHOLITE_REQUEST_TIMEOUT_MS" and "2000")
+    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set listener to ep_dlcall3(ep_dlsym(libc and "socket") and 2 and 1 and 0)
+    assert_transport(listener >= 0 && listener < 2147483647 and "listener created")
+    set address to alloc_bytes(16)
+    poke_byte(address and 0 and 16)
+    poke_byte(address and 1 and 2)
+    poke_byte(address and 2 and 32)
+    poke_byte(address and 3 and 207)
+    poke_byte(address and 4 and 127)
+    poke_byte(address and 7 and 1)
+    set option to alloc_bytes(4)
+    transport_u32(option and 0 and 1)
+    ep_dlcall5(ep_dlsym(libc and "setsockopt") and listener and 65535 and 4 and option and 4)
+    assert_transport(ep_dlcall3(ep_dlsym(libc and "bind") and listener and address and 16) == 0 and "exclusive loopback listener")
+    assert_transport(ep_dlcall2(ep_dlsym(libc and "listen") and listener and 4) == 0 and "listener ready")
+    set completion to channel
+    spawn serve_once(listener and "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}" and 0 and completion)
+    set result to local_post("/recall" and "test-secret" and "{}")
+    assert_transport(result == "{\"ok\":true}" and concat("real socket exchange: " and result))
+    set received to receive from completion
+    set request to ptr_to_str(received)
+    assert_transport(starts_with(request and "POST /recall HTTP/1.1\r\n") and "request route")
+    assert_transport(string_contains(request and "Authorization: Bearer test-secret\r\n") and "authorization transmitted")
+    assert_transport(ends_with(request and "\r\n\r\n{}") and "exact payload transmitted")
+    spawn serve_once(listener and "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n" and 0 and completion)
+    assert_transport(local_post("/generate" and "token" and "{}") == "{}" and "actual chunked generation exchange")
+    set received to receive from completion
+    set progress to channel
+    spawn serve_once(listener and "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n" and 0 and completion)
+    assert_transport(transport_post(8399 and "/slots/0?action=save" and "token" and "{}" and 0 and progress) == "{}" and "native endpoint query accepted")
+    set received to receive from progress
+    assert_transport(ptr_to_str(received) == "data\n{}" and "streamed body event emitted")
+    set received to receive from completion
+    assert_transport(string_contains(local_post("/tool?query" and "token" and "{}") and "Invalid local request") and "tool query route remains restricted")
+    spawn serve_once(listener and "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}" and 0 and completion)
+    set long_path to "/props?query="
+    repeat while string_length(long_path) < 220:
+        set long_path to concat(long_path and "x")
+    assert_transport(transport_get(8399 and long_path and "token") == "{}" and "native GET response")
+    set received to receive from completion
+    set request to ptr_to_str(received)
+    assert_transport(starts_with(request and "GET /props?query=") and "GET method transmitted")
+    assert_transport(string_contains(request and "Content-Length: 0") and "empty GET body")
+    repeat while string_length(long_path) <= 8192:
+        set long_path to concat(long_path and long_path)
+    assert_transport(string_contains(transport_get(8399 and long_path and "token") and "Invalid local request") and "oversized GET path rejected before connecting")
+    assert_transport(string_contains(transport_request("DELETE" and 8399 and "/props" and "token" and "" and 0 and 0) and "Unsupported local request method") and "unintended method rejected")
+    set_env("ECHOLITE_REQUEST_TIMEOUT_MS" and "100")
+    spawn serve_once(listener and "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" and 250 and completion)
+    set started to transport_now(libc)
+    set result to local_post("/recall" and "token" and "{}")
+    assert_transport(string_contains(result and "deadline exceeded") and "socket deadline enforced")
+    assert_transport(transport_now(libc) - started < 1000 and "deadline bounded")
+    set received to receive from completion
+    set request to ptr_to_str(received)
+    net_close(listener)
+    free_bytes(address)
+    free_bytes(option)
+    set result to local_post("/recall" and "token" and "{}")
+    assert_transport(string_contains(result and "Local connection failed") and "connection refusal reported")
+    display concat("PASS: " and concat(int_to_string(assertions) and " transport checks in Ernos Plain"))
+    return 0

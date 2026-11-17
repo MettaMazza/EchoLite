@@ -1,0 +1,39 @@
+# Real native generation followed by a separate EP-process cache replay.
+import "../src/native_model"
+import "fs"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 4:
+        display "Usage: native_cache <token file> <database> <prime|replay>"
+        return 1
+    set_env("ECHOLITE_HOME" and path_dirname(get_list(args and 2)))
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and get_list(args and 1))
+    set db to sql_open(get_list(args and 2))
+    if db == 0:
+        return 1
+    sql_execute(db and "PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")
+    set mode to get_list(args and 3)
+    set token to "deliberately-invalid-replay-credential"
+    if mode == "prime":
+        if sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") != 0:
+            display "Use a new database for priming"
+            return 1
+        set token to string_trim(read_file(get_list(args and 1)))
+    set payload to "{\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word ready.\"}],\"max_tokens\":256,\"temperature\":0,\"stream\":true,\"stream_options\":{\"include_usage\":true},\"cache_prompt\":true}"
+    set namespace to "native-b12359-qwen-8d43d974-q4km-kvq4cpu-reason32-stream-v1"
+    set started to transport_now(ep_dlopen("/usr/lib/libSystem.B.dylib"))
+    set result to native_model_cached(db and token and payload and namespace and "0" and 0)
+    set elapsed to transport_now(ep_dlopen("/usr/lib/libSystem.B.dylib")) - started
+    set valid to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.status')='ok' AND lower(json_extract(?,'$.text')) LIKE '%ready%' AND length(json_extract(?,'$.reasoning'))>0 ELSE 0 END" and [result,result,result,result])
+    if valid != "1":
+        display result
+        sql_close(db)
+        return 1
+    display concat("Mode: " and mode)
+    display concat("Elapsed milliseconds: " and int_to_string(elapsed))
+    display concat("Exact payload SHA-256: " and sha256(result_cache_scalar(db and "SELECT json_remove(?,'$.cache_hit')" and [result])))
+    display concat("Stored results: " and result_cache_scalar(db and "SELECT count(*) FROM response_cache" and []))
+    sql_close(db)
+    display "PASS: actual answer and thinking persisted/replayed"
+    return 0

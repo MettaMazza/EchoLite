@@ -1,0 +1,173 @@
+# Read-only state diagnostics. No schema migration or identity projection repair.
+import "state_lock"
+import "transport"
+import "result_cache"
+
+define health_error with reason returning Str:
+    set values to [create_json_string("error"),json_parse("true"),create_json_string(reason)]
+    return json_stringify(create_json_object(["status","read_only","text"] and values))
+
+# SQLite interrupt is thread-safe. The mutex prevents interrupt-after-close;
+# completion is joined before freeing either the connection or watchdog state.
+define health_watch with db and sqlite and mutex and flag and deadline and done:
+    set libc to native_system()
+    set finished to 0
+    repeat while finished == 0:
+        ep_dlcall1(ep_dlsym(libc and "pthread_mutex_lock") and mutex)
+        if peek_byte(flag and 0) == 1:
+            set finished to 1
+        else if transport_now(libc) >= deadline:
+            ep_dlcall1(ep_dlsym(sqlite and "sqlite3_interrupt") and db)
+            poke_byte(flag and 1 and 1)
+            set finished to 1
+        ep_dlcall1(ep_dlsym(libc and "pthread_mutex_unlock") and mutex)
+        if finished == 0:
+            ep_dlcall1(ep_dlsym(libc and "usleep") and 10000)
+    send 1 to done
+    return 0
+
+define health_scalar with db and query and limit returning Str:
+    set stmt to ep_sqlite3_prepare_v2(db and str_to_ptr(query))
+    if stmt == 0:
+        return ""
+    set result to ""
+    if ep_sqlite3_step(stmt) == 100:
+        set value to ep_sqlite3_column_text(stmt and 0)
+        set bytes to ep_dlcall2(ep_dlsym(ep_dlopen("/usr/lib/libsqlite3.dylib") and "sqlite3_column_bytes") and stmt and 0)
+        if bytes < limit && bytes == string_length(value):
+            if ep_sqlite3_step(stmt) == 101:
+                set result to value
+    ep_sqlite3_finalize(stmt)
+    return result
+
+define health_validate with db returning Str:
+    if sql_execute(db and "BEGIN") != 0:
+        return health_error("Cannot open consistent diagnostic snapshot")
+    if health_scalar(db and "PRAGMA integrity_check" and 64) != "ok":
+        return health_error("Database integrity check failed or could not complete within its I/O and time limits")
+    set stmt to ep_sqlite3_prepare_v2(db and str_to_ptr("PRAGMA foreign_key_check"))
+    if stmt == 0:
+        return health_error("Cannot check foreign keys")
+    set code to ep_sqlite3_step(stmt)
+    ep_sqlite3_finalize(stmt)
+    if code != 101:
+        return health_error("Broken foreign-key references or incomplete reference check")
+    if health_scalar(db and "SELECT value FROM metadata WHERE key='schema'" and 32) != "1":
+        return health_error("Missing or unsupported schema version")
+    set epoch to health_scalar(db and "SELECT value FROM metadata WHERE key='cache_epoch'" and 32)
+    if epoch == "":
+        return health_error("Missing or invalid forgetting epoch")
+    set i to 0
+    repeat while i < string_length(epoch):
+        set byte to get_character(epoch and i)
+        if byte < 48 || byte > 57:
+            return health_error("Missing or invalid forgetting epoch")
+        set i to i + 1
+    set required to health_required()
+    set i to 0
+    repeat while i < length_list(required):
+        if sql_execute(db and get_list(required and i)) != 0:
+            return health_error("Required state tables or columns are missing or unreadable")
+        set i to i + 1
+    set counts to health_scalar(db and "SELECT json_object('memories',(SELECT count(*) FROM memories),'pending_turns',(SELECT count(*) FROM turns WHERE status='pending'),'identity_versions',(SELECT count(*) FROM me_versions))" and 256)
+    if counts == "":
+        return health_error("Cannot read state counts")
+    return concat("{\"status\":\"ok\",\"read_only\":true,\"integrity\":\"ok\",\"foreign_keys\":\"ok\",\"schema\":\"1\",\"cache_epoch\":\"" and concat(epoch and concat("\",\"counts\":" and concat(counts and "}"))))
+
+define health_check with path returning Str:
+    set libc to native_system()
+    set info to alloc_bytes(144)
+    set code to ep_dlcall2(ep_dlsym(libc and "lstat") and path and info)
+    set regular to lease_integer(info and 4 and 2) / 4096
+    set device to lease_integer(info and 0 and 4)
+    set inode to lease_integer(info and 8 and 8)
+    free_bytes(info)
+    if code != 0 || regular != 8:
+        return health_error("State database must be an existing regular file, not a symlink")
+    set resolved to alloc_bytes(1024)
+    set found to ep_dlcall2(ep_dlsym(libc and "realpath") and path and resolved)
+    set canonical to ptr_to_str(resolved)
+    free_bytes(resolved)
+    if found == 0 || string_length(canonical) > 1000:
+        return health_error("State path changed during inspection")
+    set fd to native_open(canonical and 16777472 and 0)
+    if fd < 0 || fd > 2147483647:
+        return health_error("State path changed during inspection")
+    set info to alloc_bytes(144)
+    set code to ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info)
+    set same to lease_integer(info and 0 and 4) == device && lease_integer(info and 8 and 8) == inode
+    free_bytes(info)
+    set header to alloc_bytes(21)
+    set bytes to ep_dlcall4(ep_dlsym(libc and "pread") and fd and header and 20 and 0)
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    if code != 0 || same == 0:
+        free_bytes(header)
+        return health_error("State path changed during inspection")
+    set wal to bytes == 20 && peek_byte(header and 18) == 2 && peek_byte(header and 19) == 2
+    if wal == 1:
+        set wal to string_equals(ptr_to_str(header) and "SQLite format 3")
+    free_bytes(header)
+    if wal == 1:
+        # Bootstrap absent empty WAL bookkeeping without opening the DB writable.
+        set wal_fd to native_open(concat(canonical and "-wal") and 16780033 and 384)
+        if wal_fd >= 0 && wal_fd <= 2147483647:
+            ep_dlcall1(ep_dlsym(libc and "close") and wal_fd)
+        else if transport_errno(libc) != 17:
+            return health_error("Cannot create empty WAL bookkeeping for read-only inspection")
+    set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+    set handle to alloc_bytes(8)
+    set code to ep_dlcall4(ep_dlsym(sqlite and "sqlite3_open_v2") and canonical and handle and 16777217 and 0)
+    set db to lease_integer(handle and 0 and 8)
+    free_bytes(handle)
+    if code != 0:
+        if db != 0:
+            sql_close(db)
+        return health_error("Cannot open state database read-only")
+    ep_dlcall2(ep_dlsym(sqlite and "sqlite3_busy_timeout") and db and 1000)
+    set mutex to alloc_bytes(64)
+    if ep_dlcall2(ep_dlsym(libc and "pthread_mutex_init") and mutex and 0) != 0:
+        free_bytes(mutex)
+        sql_close(db)
+        return health_error("Cannot establish diagnostic deadline")
+    set flag to alloc_bytes(2)
+    set done to channel
+    spawn health_watch(db and sqlite and mutex and flag and transport_now(libc) + 120000 and done)
+    set result to health_validate(db)
+    ep_dlcall1(ep_dlsym(libc and "pthread_mutex_lock") and mutex)
+    poke_byte(flag and 0 and 1)
+    ep_dlcall1(ep_dlsym(libc and "pthread_mutex_unlock") and mutex)
+    set joined to receive from done
+    if peek_byte(flag and 1) == 1:
+        set result to health_error("Diagnostic time limit exceeded")
+    ep_dlcall1(ep_dlsym(libc and "pthread_mutex_destroy") and mutex)
+    free_bytes(mutex)
+    free_bytes(flag)
+    sql_close(db)
+    return result
+
+define health_required:
+    set queries to create_list()
+    append_list(queries and "SELECT id,body,status FROM memories LIMIT 0")
+    append_list(queries and "SELECT id,kind,detail,created FROM events LIMIT 0")
+    append_list(queries and "SELECT id,body FROM me_versions LIMIT 0")
+    append_list(queries and "SELECT version,memory FROM me_sources LIMIT 0")
+    append_list(queries and "SELECT parent,child FROM derivations LIMIT 0")
+    append_list(queries and "SELECT id,user_memory,reply_memory,status,answer_basis FROM turns LIMIT 0")
+    append_list(queries and "SELECT id,turn_id,request_memory,observation FROM tool_runs LIMIT 0")
+    append_list(queries and "SELECT operation_id,epoch,result,stdout,stderr FROM process_operations LIMIT 0")
+    append_list(queries and "SELECT memory,project,closed FROM sessions LIMIT 0")
+    append_list(queries and "SELECT turn_id,session FROM session_turns LIMIT 0")
+    append_list(queries and "SELECT turn_id,tool_limit,model_limit,rounds_used FROM turn_limits LIMIT 0")
+    append_list(queries and "SELECT turn_id,nonce FROM turn_signals LIMIT 0")
+    append_list(queries and "SELECT memory,project,current_memory,revision,status FROM tasks LIMIT 0")
+    append_list(queries and "SELECT memory,project,path,sha256,bytes FROM documents LIMIT 0")
+    append_list(queries and "SELECT document,ordinal,memory FROM document_chunks LIMIT 0")
+    append_list(queries and "SELECT turn_id,document,sha256 FROM turn_documents LIMIT 0")
+    append_list(queries and "SELECT memory,reason FROM memory_protection LIMIT 0")
+    append_list(queries and "SELECT key,epoch,payload,digest,bytes,used FROM response_cache LIMIT 0")
+    append_list(queries and "SELECT namespace,epoch,name,payload,digest,bytes,used FROM prompt_cache LIMIT 0")
+    append_list(queries and "SELECT turn_id,round,response FROM generation_rounds LIMIT 0")
+    append_list(queries and "SELECT turn_id,round,epoch,response,updates FROM model_progress LIMIT 0")
+    append_list(queries and "SELECT memory,model,part,start,end,snippet,vector,digest FROM ep_memory_vectors LIMIT 0")
+    append_list(queries and "SELECT memory,model,body_hash FROM ep_vector_documents LIMIT 0")
+    return queries

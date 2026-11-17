@@ -1,0 +1,81 @@
+# Offline EP regression entry point. Never launches a model or context benchmark.
+import "../src/application_paths"
+import "../src/process_capture"
+import "../src/process_bytes"
+
+define acceptance_run with executable and arguments and root and log and require_pass:
+    set captured to process_capture(executable and arguments and root and 60000 and 0 - 1)
+    set stdout to get_list(process_display(get_list(captured and 2) and get_list(captured and 3) and 1) and 0)
+    set stderr to get_list(process_display(get_list(captured and 4) and get_list(captured and 5) and 1) and 0)
+    set body to concat(stdout and concat("\nSTDERR:\n" and stderr))
+    set success to get_list(captured and 0) == 0 && string_equals(get_list(captured and 1) and "exited")
+    if require_pass:
+        set success to success && string_contains(stdout and "PASS:") && string_contains(body and "FAIL:") == 0
+    write_file(log and body)
+    if string_equals(read_file(log) and body) == 0:
+        set success to 0
+    capture_release(captured)
+    return success
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: acceptance /absolute/new-output-directory"
+        return 1
+    set root to application_root(get_list(args and 0))
+    set output to get_list(args and 1)
+    if root == "" || starts_with(output and "/") == 0:
+        return 1
+    # Exclusive mkdir rejects existing fixture/state paths; never reuse user data.
+    if ep_dlcall2(ep_dlsym(native_system() and "mkdir") and output and 448) != 0:
+        display "Output must be a new directory with an existing parent."
+        return 1
+    set compiler to get_env("ERNOS_COMPILER")
+    if compiler == "":
+        set compiler to concat(get_env("HOME") and "/.local/bin/ernos")
+    set names to ["native_actions","generation_settings","markup","web_markup","web_headers","web_snapshot","docx_markup","result_cache","web_cache","web_tool","calculator","process_journal","process_output","filesystem","document","snapshot_seal","slot_cache","slot_manifest","slot_lifecycle","image_native","image_store","image_messages","transport_cancel","network_policy","slot_stopped","memory_correction","task_state","host_context","process_retry","task_schedule","schedule_ui","browser_wire","browser_history","tool_catalog","memory_beliefs"]
+    set modes to [0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,3,3,0,2,2,2,2,4,0,5,4,0,0,2,0,0]
+    set report to "EchoLite EP offline regression\nScope: deterministic component checks; no model calls or full-context benchmark.\n"
+    set failures to 0
+    set i to 0
+    repeat while i < length_list(names):
+        set name to get_list(names and i)
+        display concat("Checking " and name)
+        set prefix to concat(output and concat("/" and name))
+        set source to concat(root and concat("/tests/" and name))
+        set passed to acceptance_run(compiler and [concat(source and ".ep")] and root and concat(prefix and "-build.txt") and 0)
+        set executable to concat(root and concat("/bin/test-" and name))
+        if passed:
+            set passed to ep_dlcall2(ep_dlsym(native_system() and "rename") and source and executable) == 0
+        set forwarded to create_list()
+        set mode to get_list(modes and i)
+        if mode == 1:
+            append_list(forwarded and concat(prefix and ".sqlite3"))
+        if mode == 2 || mode == 3:
+            set fixture to concat(prefix and "-state")
+            if ep_dlcall2(ep_dlsym(native_system() and "mkdir") and fixture and 448) != 0:
+                set passed to 0
+            append_list(forwarded and fixture)
+        if mode == 4:
+            append_list(forwarded and concat(prefix and "-state"))
+            append_list(forwarded and concat(root and "/bin/echolite-core"))
+        if mode == 5:
+            append_list(forwarded and concat(prefix and "-state"))
+            append_list(forwarded and concat(root and "/bin/echolite-process"))
+        if mode == 3:
+            append_list(forwarded and concat(root and "/bin/echolite-image"))
+        if passed:
+            set passed to acceptance_run(executable and forwarded and root and concat(prefix and ".txt") and 1)
+        set verdict to "PASS: "
+        if passed == 0:
+            set failures to failures + 1
+            set verdict to "FAIL: "
+        set report to concat(report and concat(verdict and concat(name and "\n")))
+        write_file(concat(output and "/report.txt") and report)
+        if string_equals(read_file(concat(output and "/report.txt")) and report) == 0:
+            return 1
+        set i to i + 1
+    display report
+    if failures > 0:
+        return 1
+    return 0

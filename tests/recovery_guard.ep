@@ -1,0 +1,74 @@
+import "../src/recovery_guard"
+import "../src/native_process"
+set checks to 0
+
+define guard_assert with condition and label:
+    if condition == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define guard_child with executable and home and fault:
+    set pid to process_start(executable and [home,fault])
+    if pid == 0:
+        return 0 - 2
+    set deadline to transport_now(native_system()) + 10000
+    set status to process_poll(pid)
+    repeat while status == 0 - 1 && transport_now(native_system()) < deadline:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 10000)
+        set status to process_poll(pid)
+    return status
+
+define main:
+    set args to get_args()
+    if length_list(args) < 2:
+        return 1
+    set home to get_list(args and 1)
+    if length_list(args) == 3:
+        set_env("ECHOLITE_TEST_FAULT" and get_list(args and 2))
+        if recovery_guard(home and 1) == "":
+            return 1
+        return 0
+    set libc to native_system()
+    set path to concat(home and "/recovery.guard")
+    set initial to recovery_guard(home and 0)
+    guard_assert(snapshot_hex(initial and 64) and "new private recovery authority")
+    guard_assert(string_equals(recovery_guard(home and 0) and initial) and "ensure preserves authority")
+    guard_assert(string_equals(read_file(path) and concat(initial and "\n")) and "canonical persisted format")
+    set dir to native_open(home and 17826048 and 0)
+    guard_assert(string_equals(snapshot_read_hex(dir and "recovery.guard") and initial) and "private read interoperability")
+    set rotated to recovery_guard(home and 1)
+    guard_assert(snapshot_hex(rotated and 64) && string_equals(initial and rotated) == 0 and "rotation changes authority")
+    guard_assert(string_equals(recovery_guard(home and 0) and rotated) and "rotation persists")
+    write_file(path and "invalid authority\n")
+    guard_assert(recovery_guard(home and 0) == "" && recovery_guard(home and 1) == "" and "invalid authority never silently replaced")
+    guard_assert(read_file(path) == "invalid authority\n" and "invalid file preserved")
+    write_file(path and concat(rotated and "\n"))
+    ep_dlcall2(ep_dlsym(libc and "chmod") and path and 420)
+    guard_assert(recovery_guard(home and 0) == "" and "public authority rejected")
+    ep_dlcall2(ep_dlsym(libc and "chmod") and path and 384)
+    set extra to concat(home and "/hardlink")
+    guard_assert(ep_dlcall2(ep_dlsym(libc and "link") and path and extra) == 0 and "hardlink fixture")
+    guard_assert(recovery_guard(home and 1) == "" and "multiply linked authority rejected")
+    ep_dlcall1(ep_dlsym(libc and "unlink") and extra)
+    set staged to concat(home and concat("/recovery-" and concat(initial and ".pending")))
+    write_file(staged and "interrupted staging")
+    set unrelated to concat(home and "/recovery-unmanaged.pending")
+    write_file(unrelated and "keep")
+    guard_assert(string_equals(recovery_guard(home and 0) and rotated) and "cleanup preserves current authority")
+    guard_assert(file_exists(staged) == 0 && file_exists(unrelated) and "only recognized abandoned staging removed")
+    guard_assert(ep_dlcall2(ep_dlsym(libc and "symlink") and unrelated and staged) == 0 and "unsafe staging fixture")
+    guard_assert(recovery_guard(home and 0) == "" and "unsafe staging blocks publication")
+    guard_assert(read_file(unrelated) == "keep" and "staging target untouched")
+    ep_dlcall1(ep_dlsym(libc and "unlink") and staged)
+    guard_assert(guard_child(get_list(args and 0) and home and "recovery_before_publish") == 81 and "process interrupted before publication")
+    guard_assert(string_equals(snapshot_read_hex(dir and "recovery.guard") and rotated) and "before-publication interruption preserves old authority")
+    guard_assert(string_equals(recovery_guard(home and 0) and rotated) and "restart cleans interrupted staging without rotating")
+    guard_assert(guard_child(get_list(args and 0) and home and "recovery_after_publish") == 82 and "process interrupted after publication")
+    set published to snapshot_read_hex(dir and "recovery.guard")
+    guard_assert(snapshot_hex(published and 64) && string_equals(published and rotated) == 0 and "after-publication interruption retains new authority")
+    guard_assert(string_equals(recovery_guard(home and 0) and published) and "restart preserves published authority")
+    ep_dlcall1(ep_dlsym(libc and "close") and dir)
+    display concat("PASS: " and concat(int_to_string(checks) and " EP recovery authority checks"))
+    return 0

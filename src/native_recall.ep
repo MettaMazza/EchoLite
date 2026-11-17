@@ -1,0 +1,191 @@
+# EP semantic recall: bounded indexing, exact cosine ranking and persistent caches.
+import "native_embeddings"
+import "memory_beliefs"
+
+define native_recall_init with db:
+    if belief_schema(db) != 0 || belief_refresh(db) != 0:
+        return 1
+    return sql_execute(db and "CREATE TABLE IF NOT EXISTS ep_memory_vectors(memory INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,model TEXT NOT NULL,part INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,snippet TEXT NOT NULL,vector TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(memory,model,part)); CREATE TABLE IF NOT EXISTS ep_vector_documents(memory INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,model TEXT NOT NULL,body_hash TEXT NOT NULL,PRIMARY KEY(memory,model)); CREATE TRIGGER IF NOT EXISTS ep_invalidate_vectors AFTER UPDATE OF body ON memories BEGIN DELETE FROM ep_memory_vectors WHERE memory=new.id; DELETE FROM ep_vector_documents WHERE memory=new.id; END;")
+
+define native_recall_windows with db and token and body and epoch:
+    set windows to embedding_windows(db and token and body and epoch)
+    if length_list(windows) <= 1:
+        return windows
+    set start to 0
+    set position to 0
+    set added to 0
+    repeat while position < string_length(body) && added < 64:
+        set code to get_character(body and position)
+        set position to position + 1
+        if code == 46 || code == 33 || code == 63 || code == 10 || position == string_length(body):
+            set sentence to substring(body and start and position - start)
+            set exists to 0
+            set i to 0
+            repeat while i < length_list(windows):
+                if string_equals(get_list(get_list(windows and i) and 2) and sentence):
+                    set exists to 1
+                set i to i + 1
+            if exists == 0 && string_trim(sentence) != "":
+                set response to embedding_tokens(db and token and sentence and epoch)
+                if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [response]) != "ok":
+                    return create_list()
+                set count to string_to_int(result_cache_scalar(db and "SELECT json_extract(?,'$.count')" and [response]))
+                if count <= 256:
+                    append_list(windows and [int_to_string(start),int_to_string(position),sentence])
+                    set added to added + 1
+            set start to position
+    return windows
+
+define native_recall_sync with db and token and project and cutoff and scope and epoch returning Str:
+    set last to result_cache_scalar(db and "SELECT coalesce(max(id),0) FROM memories WHERE project=? AND id<CAST(? AS INTEGER)" and [project,cutoff])
+    set after to "0"
+    set complete to 0
+    repeat while complete == 0:
+        if result_cache_epoch(db and epoch) == 0:
+            return result_cache_error("Memory forgotten during indexing")
+        set pending to sql_query_params(db and "SELECT m.id,m.body FROM memories m LEFT JOIN ep_vector_documents d ON d.memory=m.id AND d.model=? WHERE m.project=? AND m.id>CAST(? AS INTEGER) AND m.id<=CAST(? AS INTEGER) AND m.status=? AND (m.status!='active' OR NOT EXISTS(SELECT 1 FROM memory_beliefs b WHERE b.memory=m.id AND b.available=0)) AND m.source NOT IN ('tool-request','tool-receipt') AND d.memory IS NULL ORDER BY m.id LIMIT 32" and [EMBEDDING_NAMESPACE,project,after,last,scope])
+        if length_list(pending) == 0:
+            set complete to 1
+        set index to 0
+        repeat while index < length_list(pending):
+            set memory to get_list(pending and index)
+            set identifier to get_list(memory and 0)
+            set body to get_list(memory and 1)
+            set windows to native_recall_windows(db and token and body and epoch)
+            if length_list(windows) == 0:
+                return result_cache_error("Unable to tokenize memory for recall")
+            set vectors to create_list()
+            set part to 0
+            repeat while part < length_list(windows):
+                set window to get_list(windows and part)
+                set embedded to embedding_vector(db and token and get_list(window and 2) and epoch)
+                if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [embedded]) != "ok":
+                    return embedded
+                append_list(vectors and result_cache_scalar(db and "SELECT json_extract(?,'$.vector')" and [embedded]))
+                set part to part + 1
+            if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+                return result_cache_error("Cannot acquire memory indexing transaction")
+            set current to sql_query_params(db and "SELECT body FROM memories WHERE id=? AND project=? AND status=?" and [identifier,project,scope])
+            if result_cache_epoch(db and epoch) == 0 || length_list(current) != 1:
+                sql_execute(db and "ROLLBACK")
+                return result_cache_error("Memory changed during indexing")
+            if string_equals(body and get_list(get_list(current and 0) and 0)) == 0:
+                sql_execute(db and "ROLLBACK")
+                return result_cache_error("Memory edited during indexing")
+            set rc to sql_execute_params(db and "DELETE FROM ep_memory_vectors WHERE memory=? AND model=?" and [identifier,EMBEDDING_NAMESPACE])
+            set part to 0
+            repeat while part < length_list(windows) && rc == 101:
+                set window to get_list(windows and part)
+                set vector to get_list(vectors and part)
+                set rc to sql_execute_params(db and "INSERT INTO ep_memory_vectors VALUES(?,?,?,?,?,?,?,?)" and [identifier,EMBEDDING_NAMESPACE,int_to_string(part),get_list(window and 0),get_list(window and 1),get_list(window and 2),vector,sha256(vector)])
+                set part to part + 1
+            if rc == 101:
+                set rc to sql_execute_params(db and "INSERT OR REPLACE INTO ep_vector_documents VALUES(?,?,?)" and [identifier,EMBEDDING_NAMESPACE,sha256(body)])
+            if rc != 101:
+                sql_execute(db and "ROLLBACK")
+                return result_cache_error("Cannot persist memory vectors")
+            if sql_execute(db and "COMMIT") != 0:
+                sql_execute(db and "ROLLBACK")
+                return result_cache_error("Cannot commit memory vectors")
+            set after to identifier
+            set index to index + 1
+    return ""
+
+define native_query_vector with db and token and text and epoch returning Str:
+    set namespace to concat(EMBEDDING_NAMESPACE and ":query-v1")
+    set cached to result_cache_get(db and namespace and text and epoch)
+    if cached != "":
+        return cached
+    set windows to embedding_windows(db and token and text and epoch)
+    if length_list(windows) == 0:
+        return result_cache_error("Cannot tokenize recall query")
+    if sql_execute(db and "CREATE TEMP TABLE IF NOT EXISTS ep_query_sum(dimension INTEGER PRIMARY KEY,value REAL NOT NULL); DELETE FROM ep_query_sum;") != 0:
+        return result_cache_error("Cannot prepare query vector")
+    set i to 0
+    repeat while i < length_list(windows):
+        set encoded to embedding_vector(db and token and get_list(get_list(windows and i) and 2) and epoch)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [encoded]) != "ok":
+            return encoded
+        set rc to sql_execute_params(db and "INSERT INTO ep_query_sum SELECT key,value FROM json_each(?,'$.vector') WHERE 1 ON CONFLICT(dimension) DO UPDATE SET value=ep_query_sum.value+excluded.value" and [encoded])
+        if rc != 101:
+            return result_cache_error("Cannot accumulate query vector")
+        set i to i + 1
+    set vector to result_cache_scalar(db and "SELECT json_group_array(value/(SELECT sqrt(sum(value*value)) FROM ep_query_sum)) FROM (SELECT value FROM ep_query_sum ORDER BY dimension)" and [])
+    if embedding_valid(db and vector) == 0:
+        return result_cache_error("Invalid aggregate query vector")
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','text','','vector',json(?))" and [vector])
+    return result_cache_put(db and namespace and text and epoch and result)
+
+define native_recall_search with db and token and project and text and cutoff and scope and expected_epoch returning Str:
+    if string_length(text) == 0 || string_length(text) > 6000 || string_length(project) == 0 || string_length(project) > 1024:
+        return result_cache_error("Invalid recall query or project")
+    if scope != "active" && scope != "archived":
+        return result_cache_error("Invalid recall scope")
+    if transport_number(cutoff and 10 and 9223372036854775807) < 0:
+        return result_cache_error("Invalid recall cutoff")
+    if result_cache_epoch(db and expected_epoch) == 0:
+        return result_cache_error("Memory forgotten before recall")
+    if belief_refresh(db) != 0:
+        return result_cache_error("Cannot refresh temporal memory applicability")
+    set revision to result_cache_scalar(db and "SELECT value FROM metadata WHERE key='memory_revision'" and [])
+    set request to result_cache_scalar(db and "SELECT json_array(?,?,?,?,?)" and [project,text,cutoff,scope,revision])
+    set namespace to concat(EMBEDDING_NAMESPACE and ":recall-v2-beliefs-threshold035")
+    set cached to result_cache_get(db and namespace and request and expected_epoch)
+    if cached != "":
+        set current to result_cache_scalar(db and "SELECT value FROM metadata WHERE key='memory_revision'" and [])
+        if string_equals(current and revision) == 0:
+            return result_cache_error("Memory changed during cached recall")
+        return cached
+    set problem to native_recall_sync(db and token and project and cutoff and scope and expected_epoch)
+    if problem != "":
+        return problem
+    set query to native_query_vector(db and token and text and expected_epoch)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [query]) != "ok":
+        return query
+    set query_vector to result_cache_scalar(db and "SELECT json_extract(?,'$.vector')" and [query])
+    if embedding_valid(db and query_vector) == 0:
+        return result_cache_error("Invalid cached recall query vector")
+    if sql_execute(db and "CREATE TEMP TABLE IF NOT EXISTS ep_query_values(dimension INTEGER PRIMARY KEY,value REAL); CREATE TEMP TABLE IF NOT EXISTS ep_recall_best(memory INTEGER PRIMARY KEY,score REAL,layer TEXT,snippet TEXT,source TEXT,created TEXT); DELETE FROM ep_query_values; DELETE FROM ep_recall_best;") != 0:
+        return result_cache_error("Cannot prepare recall ranking")
+    if sql_execute_params(db and "INSERT INTO ep_query_values SELECT key,value FROM json_each(?)" and [query_vector]) != 101:
+        return result_cache_error("Cannot load query vector")
+    if sql_execute(db and "BEGIN") != 0:
+        return result_cache_error("Cannot open recall snapshot")
+    if result_cache_epoch(db and expected_epoch) == 0 || string_equals(revision and result_cache_scalar(db and "SELECT value FROM metadata WHERE key='memory_revision'" and [])) == 0:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Memory changed during recall")
+    set missing to result_cache_scalar(db and "SELECT count(*) FROM memories m LEFT JOIN ep_vector_documents d ON d.memory=m.id AND d.model=? WHERE m.project=? AND m.id<CAST(? AS INTEGER) AND m.status=? AND (m.status!='active' OR NOT EXISTS(SELECT 1 FROM memory_beliefs b WHERE b.memory=m.id AND b.available=0)) AND m.source NOT IN ('tool-request','tool-receipt') AND d.memory IS NULL" and [EMBEDDING_NAMESPACE,project,cutoff,scope])
+    if missing != "0":
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Memory changed during indexing; retry recall")
+    set after_memory to "0"
+    set after_part to "-1"
+    set complete to 0
+    repeat while complete == 0:
+        set rows to sql_query_params(db and "SELECT m.id,v.part,m.layer,v.snippet,substr(m.source,1,100),m.created,v.vector,v.digest FROM ep_memory_vectors v JOIN memories m ON m.id=v.memory WHERE v.model=? AND m.project=? AND m.id<CAST(? AS INTEGER) AND m.status=? AND (m.status!='active' OR NOT EXISTS(SELECT 1 FROM memory_beliefs b WHERE b.memory=m.id AND b.available=0)) AND m.source NOT IN ('tool-request','tool-receipt') AND (m.id>CAST(? AS INTEGER) OR (m.id=CAST(? AS INTEGER) AND v.part>CAST(? AS INTEGER))) ORDER BY m.id,v.part LIMIT 32" and [EMBEDDING_NAMESPACE,project,cutoff,scope,after_memory,after_memory,after_part])
+        if length_list(rows) == 0:
+            set complete to 1
+        set i to 0
+        repeat while i < length_list(rows):
+            set row to get_list(rows and i)
+            set vector to get_list(row and 6)
+            if string_equals(sha256(vector) and get_list(row and 7)) == 0 || embedding_valid(db and vector) == 0:
+                sql_execute(db and "ROLLBACK")
+                return result_cache_error("Persisted memory vector failed integrity validation")
+            set score to result_cache_scalar(db and "SELECT sum(j.value*q.value) FROM json_each(?) j JOIN ep_query_values q ON q.dimension=j.key" and [vector])
+            set excerpt to get_list(row and 3)
+            set excerpt to substring(excerpt and 0 and embedding_boundary(excerpt and 900))
+            set rc to sql_execute_params(db and "INSERT INTO ep_recall_best SELECT ?,CAST(? AS REAL),?,?,?,? WHERE CAST(? AS REAL)>=0.35 ON CONFLICT(memory) DO UPDATE SET score=excluded.score,snippet=excluded.snippet WHERE excluded.score>ep_recall_best.score" and [get_list(row and 0),score,get_list(row and 2),excerpt,get_list(row and 4),get_list(row and 5),score])
+            if rc != 101 || sql_execute(db and "DELETE FROM ep_recall_best WHERE memory NOT IN (SELECT memory FROM ep_recall_best ORDER BY score DESC,memory LIMIT 6)") != 0:
+                sql_execute(db and "ROLLBACK")
+                return result_cache_error("Cannot retain ranked recall")
+            set after_memory to get_list(row and 0)
+            set after_part to get_list(row and 1)
+            set i to i + 1
+    set records to result_cache_scalar(db and "SELECT json_group_array(json_array(CAST(memory AS TEXT),layer,snippet,source,created)) FROM (SELECT * FROM ep_recall_best ORDER BY score DESC,memory)" and [])
+    set scores to result_cache_scalar(db and "SELECT json_group_array(score) FROM (SELECT score FROM ep_recall_best ORDER BY score DESC,memory)" and [])
+    if sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Cannot close recall snapshot")
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','text','','records',json(?),'scores',json(?),'epoch',?,'revision',?,'model',?,'scope',?)" and [records,scores,expected_epoch,revision,EMBEDDING_NAMESPACE,scope])
+    return result_cache_put(db and namespace and request and expected_epoch and result)

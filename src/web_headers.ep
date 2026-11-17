@@ -1,0 +1,100 @@
+# HTTP metadata and conservative freshness policy for local source snapshots.
+import "web_markup"
+import "transport"
+
+define web_headers with db and source returning Str:
+    if string_length(source) > 65536:
+        return web_markup_error(db and "Web response headers exceed 64 KiB")
+    set lines to string_split(source and "\r\n")
+    set headers to "{}"
+    set started to 0
+    set ended to 0
+    set i to 0
+    repeat while i < length_list(lines):
+        set line to get_list(lines and i)
+        if starts_with(line and "HTTP/"):
+            set headers to "{}"
+            set started to 1
+            set ended to 0
+        else if line == "":
+            if started == 1:
+                set ended to 1
+        else:
+            if started == 0 || ended == 1 || starts_with(line and " ") || starts_with(line and "\t"):
+                return web_markup_error(db and "Malformed or folded HTTP response headers")
+            set colon to string_index_of(line and ":")
+            if colon < 1:
+                return web_markup_error(db and "Malformed HTTP header field")
+            set name to result_cache_scalar(db and "SELECT lower(?)" and [substring(line and 0 and colon)])
+            set value to string_trim(substring(line and colon + 1 and string_length(line) - colon - 1))
+            set j to 0
+            repeat while j < string_length(line):
+                set byte to get_character(line and j)
+                if (byte < 32 && byte != 9) || byte == 127:
+                    return web_markup_error(db and "HTTP header contains control bytes")
+                set j to j + 1
+            if string_length(value) > 4096:
+                return web_markup_error(db and "HTTP header value exceeds 4096 bytes")
+            set recognized to result_cache_scalar(db and "SELECT ? IN ('location','content-type','content-encoding','cache-control','etag','last-modified','age','vary','pragma')" and [name])
+            if recognized == "1":
+                set key to concat("$." and name)
+                set previous to result_cache_scalar(db and "SELECT json_extract(?,?)" and [headers,key])
+                set exists to result_cache_scalar(db and "SELECT json_type(?,?) IS NOT NULL" and [headers,key])
+                if exists == "1":
+                    if name == "cache-control" || name == "vary" || name == "pragma":
+                        set value to concat(previous and concat("," and value))
+                    else:
+                        return web_markup_error(db and "Ambiguous duplicate HTTP metadata")
+                set headers to result_cache_scalar(db and "SELECT json_set(?,?,?)" and [headers,key,value])
+        set i to i + 1
+    if started == 0 || ended == 0:
+        return web_markup_error(db and "Incomplete HTTP response headers")
+    return result_cache_scalar(db and "SELECT json_object('status','ok','headers',json(?))" and [headers])
+
+define web_freshness with db and headers returning Str:
+    set control to result_cache_scalar(db and "SELECT lower(coalesce(json_extract(?,'$.cache-control'),''))" and [headers])
+    set directives to string_split(control and ",")
+    set ttl to 300
+    set store to 1
+    set revalidate to 0
+    set i to 0
+    repeat while i < length_list(directives):
+        set directive to string_trim(get_list(directives and i))
+        set separator to string_index_of(directive and "=")
+        set name to directive
+        set value to ""
+        if separator >= 0:
+            set name to string_trim(substring(directive and 0 and separator))
+            set value to string_trim(substring(directive and separator + 1 and string_length(directive) - separator - 1))
+            if starts_with(value and "\"") && ends_with(value and "\"") && string_length(value) >= 2:
+                set value to substring(value and 1 and string_length(value) - 2)
+        if name == "no-store":
+            set store to 0
+        if name == "no-cache":
+            set revalidate to 1
+        if name == "max-age":
+            set age to transport_number(value and 10 and 2147483647)
+            if age < 0:
+                set ttl to 0
+            else if age < ttl:
+                set ttl to age
+        set i to i + 1
+    set pragma to result_cache_scalar(db and "SELECT lower(coalesce(json_extract(?,'$.pragma'),''))" and [headers])
+    if control == "" && string_contains(pragma and "no-cache"):
+        set revalidate to 1
+    set age_text to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.age'),'0')" and [headers])
+    set age to transport_number(age_text and 10 and 2147483647)
+    if age < 0 || age >= ttl || revalidate == 1:
+        set ttl to 0
+    else:
+        set ttl to ttl - age
+    set vary to result_cache_scalar(db and "SELECT lower(coalesce(json_extract(?,'$.vary'),''))" and [headers])
+    set fields to string_split(vary and ",")
+    set i to 0
+    repeat while i < length_list(fields):
+        set field to string_trim(get_list(fields and i))
+        if field != "" && field != "accept" && field != "accept-encoding" && field != "user-agent":
+            set store to 0
+        set i to i + 1
+    set params to [int_to_string(ttl),int_to_string(store)]
+    return result_cache_scalar(db and "SELECT json_object('ttl_seconds',CAST(? AS INTEGER),'store',json(CASE WHEN CAST(? AS INTEGER)=1 THEN 'true' ELSE 'false' END))" and params)

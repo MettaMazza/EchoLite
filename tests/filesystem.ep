@@ -1,0 +1,121 @@
+import "../src/filesystem"
+import "fs"
+set checks to 0
+
+define file_assert with condition and label:
+    if condition == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define file_request with db and path and offset returning Str:
+    set values to [path,int_to_string(offset)]
+    return result_cache_scalar(db and "SELECT json_object('path',?,'offset',CAST(? AS INTEGER))" and values)
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    set db to sql_open(concat(home and "/test.sqlite3"))
+    file_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "new isolated cache")
+    set path to concat(home and "/read me 🌱.txt")
+    write_file(path and "First revision 🌱")
+    set request to file_request(db and path and 0)
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    file_assert(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result]) and "First revision 🌱") and "actual Unicode file read")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "0" and "first observation not cached")
+    file_assert(string_contains(result and "%20") && string_contains(result and "%F0%9F%8C%B1") and "file URI encoded")
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "unchanged observation reused")
+    write_file(path and "Second revision")
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result]) == "Second revision" and "changed content observed")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "0" and "changed content invalidates key")
+    set builder to create_builder()
+    set i to 0
+    repeat while i < 4095:
+        builder_append(builder and "a")
+        set i to i + 1
+    builder_append(builder and "🌱tail")
+    write_file(path and builder_to_string(builder))
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.next_offset')" and [result]) == "4095" and "page preserves UTF-8 boundary")
+    set result to filesystem_lookup(db and "file_read" and file_request(db and path and 4095) and "0")
+    file_assert(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result]) and "🌱tail") and "continuation loses no bytes")
+    set result to filesystem_lookup(db and "file_read" and file_request(db and path and 4096) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "mid-codepoint offset rejected")
+    set result to filesystem_lookup(db and "file_read" and file_request(db and path and 4103) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result]) == "" and "EOF page valid")
+    set result to filesystem_lookup(db and "file_read" and file_request(db and path and 5000) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "beyond EOF rejected")
+    set missing to concat(home and "/missing.txt")
+    set result to filesystem_lookup(db and "file_read" and file_request(db and missing and 0) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "missing file reported")
+    write_file(missing and "now exists")
+    set result to filesystem_lookup(db and "file_read" and file_request(db and missing and 0) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result]) == "now exists" and "missing-file failure not cached")
+    set result to filesystem_lookup(db and "file_read" and file_request(db and home and 0) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "directory not read as file")
+    set folder to concat(home and "/listing")
+    ep_dlcall2(ep_dlsym(native_system() and "mkdir") and folder and 448)
+    set i to 10
+    repeat while i < 43:
+        write_file(concat(folder and concat("/item" and int_to_string(i))) and "fixture")
+        set i to i + 1
+    set list_request to result_cache_scalar(db and "SELECT json_object('path',?,'after','')" and [folder])
+    set result to filesystem_lookup(db and "file_list" and list_request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_array_length(?,'$.names')" and [result]) == "30" and "bounded listing")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.names[0]')" and [result]) == "item10" and "sorted listing")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.next_after')" and [result]) == "item39" and "listing cursor")
+    set result to filesystem_lookup(db and "file_list" and result_cache_scalar(db and "SELECT json_object('path',?,'after','item39')" and [folder]) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_array_length(?,'$.names')" and [result]) == "3" and "remaining listing page")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.truncated')" and [result]) == "0" and "listing end marked")
+    set result to filesystem_lookup(db and "file_list" and list_request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "listing cache reused after observing names")
+    write_file(concat(folder and "/aaa-new") and "fixture")
+    set result to filesystem_lookup(db and "file_list" and list_request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.names[0]')" and [result]) == "aaa-new" and "new directory entry observed")
+    set raw to alloc_bytes(4097)
+    set i to 0
+    repeat while i < 4095:
+        poke_byte(raw and i and 97)
+        set i to i + 1
+    poke_byte(raw and 4096 and 97)
+    set fd to native_open(path and 16778241 and 0)
+    ep_dlcall3(ep_dlsym(native_system() and "write") and fd and raw and 4097)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "trailing NUL cannot masquerade as split UTF-8")
+    poke_byte(raw and 4095 and 255)
+    set fd to native_open(path and 16778241 and 0)
+    ep_dlcall3(ep_dlsym(native_system() and "write") and fd and raw and 4097)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    free_bytes(raw)
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "invalid final byte not silently discarded")
+    write_file(path and "retained")
+    set result to filesystem_lookup(db and "file_read" and result_cache_scalar(db and "SELECT json_set(?,'$.extra',1)" and [request]) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "unexpected argument rejected")
+    set result to filesystem_lookup(db and "file_read" and file_request(db and path and 0 - 1) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "negative offset rejected")
+    set result to filesystem_lookup(db and "file_read" and result_cache_scalar(db and "SELECT json_set(?,'$.offset',json('true'))" and [request]) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "boolean offset rejected")
+    set result to filesystem_lookup(db and "file_read" and file_request(db and "relative.txt" and 0) and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "relative path rejected")
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    sql_close(db)
+    set db to sql_open(concat(home and "/test.sqlite3"))
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "cache survives database reopen")
+    ep_dlcall1(ep_dlsym(native_system() and "unlink") and path)
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "failed" and "deleted file cannot replay old content")
+    write_file(path and "retained")
+    sql_execute(db and "UPDATE metadata SET value='1'")
+    set result to filesystem_lookup(db and "file_read" and request and "0")
+    file_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "error" and "stale epoch rejected")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native filesystem checks"))
+    return 0

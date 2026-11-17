@@ -1,0 +1,50 @@
+import "../src/text_layout"
+import "../src/document"
+import "../stdlib/bridge/raylib"
+import "os"
+set checks to 0
+
+define layout_assert with valid and message:
+    if valid == 0:
+        display concat("FAIL: " and message)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    set RAYLIB_HANDLE to ep_dlopen(get_list(args and 1))
+    raylib_init_window(900 and 600 and "EchoLite text layout validation")
+    font_init(RAYLIB_HANDLE)
+    set text to "file:///Users/example/Documents/fixtures/reference%20caf%C3%A9.docx#character=0"
+    set widths to [180,420,800]
+    set w to 0
+    repeat while w < length_list(widths):
+        set lines to layout_lines(text and get_list(widths and w) and 18)
+        set builder to create_builder()
+        set i to 0
+        repeat while i < length_list(lines):
+            set line to get_list(lines and i)
+            layout_assert(font_measure(line and 18) <= get_list(widths and w) and "URL line fits viewport")
+            builder_append(builder and line)
+            set i to i + 1
+        layout_assert(string_equals(builder_to_string(builder) and text) and "URL preserved byte for byte")
+        set w to w + 1
+    set text to "éééééééééééééééééééééééééééééééééééééééééééééééé"
+    set lines to layout_lines(text and 95 and 18)
+    set builder to create_builder()
+    set i to 0
+    repeat while i < length_list(lines):
+        set line to get_list(lines and i)
+        layout_assert(document_utf8(str_to_ptr(line) and string_length(line)) and "UTF-8 boundary preserved")
+        layout_assert(font_measure(line and 18) <= 95 and "Unicode line fits")
+        builder_append(builder and line)
+        set i to i + 1
+    layout_assert(string_equals(builder_to_string(builder) and text) and "Unicode text preserved")
+    set lines to layout_lines("first\n\n    indented\nlast" and 800 and 18)
+    layout_assert(length_list(lines) == 4 and "paragraph and blank lines retained")
+    layout_assert(string_equals(get_list(lines and 2) and "    indented") and "indentation retained")
+    layout_assert(layout_prefix("é🌱" and 0 and 18) == 2 and "tiny viewport advances whole codepoint")
+    raylib_close_window()
+    display concat("PASS: " and concat(int_to_string(checks) and " native font layout checks"))
+    return 0

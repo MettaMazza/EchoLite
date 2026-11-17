@@ -1,0 +1,51 @@
+import "../src/ui_attachment"
+import "../src/application_paths"
+import "os"
+set checks to 0
+
+define ui_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define ui_import_wait with pid:
+    set deadline to transport_now(native_system()) + 30000
+    set code to process_poll(pid)
+    repeat while code == 0 - 1 && transport_now(native_system()) < deadline:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 10000)
+        set code to process_poll(pid)
+    return code
+
+define main:
+    set args to get_args()
+    if length_list(args) != 4:
+        return 1
+    set home to get_list(args and 1)
+    set core to get_list(args and 2)
+    set source to get_list(args and 3)
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and "")
+    ui_assert(application_wait(core and ["init"]) == 0 and "isolated UI state")
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(db and "PRAGMA query_only=ON")
+    set pending to attachment_begin(core and "ui-attachment" and source)
+    ui_assert(get_list(pending and 0) > 0 && get_list(pending and 1) != 0 and "asynchronous native import launched")
+    set code to ui_import_wait(get_list(pending and 0))
+    ui_assert(code == 0 and "native import completed")
+    set result to attachment_finish(db and "ui-attachment" and get_list(pending and 1) and code)
+    ui_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok" and "UI received retained attachment ID")
+    set pending to attachment_begin(core and "ui-attachment" and source)
+    set code to ui_import_wait(get_list(pending and 0))
+    ui_assert(string_contains(attachment_finish(db and "wrong-project" and get_list(pending and 1) and code) and "no longer available") and "UI cannot accept another project's import receipt")
+    write_file(concat(home and "/invalid.png") and "This is not an image")
+    set pending to attachment_begin(core and "ui-attachment" and concat(home and "/invalid.png"))
+    set code to ui_import_wait(get_list(pending and 0))
+    ui_assert(code != 0 and "invalid image import fails")
+    set problem to attachment_finish(db and "ui-attachment" and get_list(pending and 1) and code)
+    ui_assert((string_contains(problem and "readable image") || string_contains(problem and "PNG, JPEG or HEIC")) and "useful import error preserved for composer")
+    ui_assert(string_contains(attachment_finish(db and "ui-attachment" and 0 and 1) and "Unable to start") and "missing import handle handled")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " UI attachment checks"))
+    return 0

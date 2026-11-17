@@ -1,0 +1,61 @@
+import "../src/browser_history"
+import "os"
+set checks to 0
+
+define history_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define history_receipt with db and id and turn and action and session and body and exitcode:
+    set arguments to result_cache_scalar(db and "SELECT json_object('argv',json_array('/fixture/bin/echolite-browser',?,?))" and [action,session])
+    if action == "close-current":
+        set arguments to "{\"argv\":[\"/fixture/bin/echolite-browser\",\"close-current\"]}"
+    sql_execute_params(db and "INSERT INTO tool_runs VALUES(?,?,?)" and [id,turn,arguments])
+    sql_execute_params(db and "INSERT INTO process_operations VALUES(?,'completed',json_object('exit_code',CAST(? AS INTEGER)),?)" and [id,exitcode,body])
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    if file_exists(concat(home and "/memory.sqlite3")):
+        display "Use a new fixture directory"
+        return 1
+    application_directory(home and 0)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(db and "CREATE TABLE turns(id INTEGER PRIMARY KEY,project TEXT)")
+    sql_execute(db and "CREATE TABLE tool_runs(id INTEGER PRIMARY KEY,turn_id INTEGER,arguments TEXT)")
+    sql_execute(db and "CREATE TABLE process_operations(operation_id INTEGER PRIMARY KEY,status TEXT,result TEXT,stdout BLOB)")
+    sql_execute(db and "INSERT INTO turns VALUES(1,'alpha'),(2,'beta')")
+    history_receipt(db and "1" and "1" and "new" and "" and "{\"outcome\":\"completed\",\"value\":{\"sessionId\":\"AAA-1\"}}" and "0")
+    history_receipt(db and "2" and "2" and "new" and "" and "{\"outcome\":\"completed\",\"value\":{\"sessionId\":\"BBB-2\"}}" and "0")
+    set_env("ECHOLITE_PROJECT" and "alpha")
+    set recorded to browser_recorded("/fixture" and home)
+    history_assert(result_cache_scalar(db and "SELECT json_array_length(?)" and [recorded]) == "1" and "only current project handle recovered after reopening")
+    history_assert(result_cache_scalar(db and "SELECT json_extract(?,'$[0].session_id')" and [recorded]) == "AAA-1" and "exact recorded handle preserved")
+    history_assert(string_contains(recorded and "verify with url/read") and "recorded state does not claim live state")
+    history_receipt(db and "3" and "1" and "close" and "AAA-1" and "{\"outcome\":\"failed\"}" and "1")
+    history_assert(browser_recorded("/fixture" and home) == recorded and "failed cleanup preserves recoverable handle")
+    history_receipt(db and "4" and "1" and "close-current" and "" and "{\"outcome\":\"completed\",\"session_id\":\"AAA-1\"}" and "0")
+    history_assert(browser_recorded("/fixture" and home) == "[]" and "successful current-session cleanup removes recorded handle")
+    set_env("ECHOLITE_PROJECT" and "beta")
+    history_assert(string_contains(browser_recorded("/fixture" and home) and "BBB-2") and "cleanup cannot remove another project's session")
+    set_env("ECHOLITE_PROJECT" and "unknown")
+    history_assert(browser_recorded("/fixture" and home) == "[]" and "unrelated project sees no handles")
+    history_assert(browser_recorded("/fixture" and concat(home and "/missing")) == "[]" and "missing history is handled without creating state")
+    history_assert(file_exists(concat(home and "/missing/memory.sqlite3")) == 0 and "read-only discovery never creates a database")
+    set_env("ECHOLITE_PROJECT" and "alpha")
+    history_receipt(db and "5" and "1" and "new-persistent" and "" and "{\"outcome\":\"completed\",\"value\":{\"sessionId\":\"CCC-3\"}}" and "0")
+    history_assert(string_contains(browser_recorded("/fixture" and home) and "CCC-3") and "explicit persistent session remains discoverable")
+    history_assert(browser_records(db and "/fixture" and "alpha" and "1" and "1") == "[]" and "persistent session does not create temporary cleanup obligation")
+    sql_execute(db and "INSERT INTO turns VALUES(3,'alpha')")
+    history_receipt(db and "6" and "3" and "new" and "" and "{\"outcome\":\"completed\",\"value\":{\"sessionId\":\"DDD-4\"}}" and "0")
+    history_assert(browser_records(db and "/fixture" and "alpha" and "1" and "1") == "[]" and "cleanup obligation is scoped to its creating turn")
+    history_assert(string_contains(browser_records(db and "/fixture" and "alpha" and "3" and "1") and "DDD-4") and "current turn retains unclosed temporary obligation")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " browser history checks"))
+    return 0

@@ -1,0 +1,29 @@
+# Actual UI retry of the earlier missing-file compiler operation.
+import "../src/result_cache"
+import "os"
+set checks to 0
+
+define proof_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set db to sql_open(concat(get_list(args and 1) and "/memory.sqlite3"))
+    set retry to result_cache_scalar(db and "SELECT r.id FROM tool_runs r JOIN process_operations o ON o.operation_id=r.id WHERE r.name='process_retry' AND json_extract(r.arguments,'$.retry_of')='5' AND o.status='completed' AND json_extract(o.result,'$.exit_code')=0 AND json_extract(o.result,'$.replayed_receipt')=0 ORDER BY r.id DESC LIMIT 1" and [])
+    proof_assert(retry != "" and "model requested and executed a fresh explicit compiler retry")
+    proof_assert(result_cache_scalar(db and "SELECT json_extract(result,'$.exit_code') FROM process_operations WHERE operation_id=5" and []) == "1" and "original failed compiler receipt remains unchanged")
+    proof_assert(result_cache_scalar(db and "SELECT json_extract(result,'$.retry_of')='5' AND json_extract(result,'$.output_ref')=CAST(operation_id AS TEXT) AND instr(json_extract(result,'$.stdout_excerpt'),'Successfully compiled')>0 FROM process_operations WHERE operation_id=?" and [retry]) == "1" and "fresh compiler success has its own output reference")
+    proof_assert(result_cache_scalar(db and "SELECT length(trim(json_extract(arguments,'$.retry_reason')))>0 FROM tool_runs WHERE id=?" and [retry]) == "1" and "explicit reason recorded")
+    proof_assert(result_cache_scalar(db and "SELECT count(*) FROM derivations WHERE parent=(SELECT observation FROM tool_runs WHERE id=5) AND child=(SELECT request_memory FROM tool_runs WHERE id=?)" and [retry]) == "1" and "retry links original receipt into memory provenance")
+    proof_assert(result_cache_scalar(db and "SELECT count(*) FROM derivations WHERE parent=(SELECT request_memory FROM tool_runs WHERE id=5) AND child=(SELECT request_memory FROM tool_runs WHERE id=?)" and [retry]) == "1" and "retry links original command request")
+    proof_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN turns t ON t.id=r.turn_id JOIN memories m ON m.id=t.reply_memory WHERE r.id=? AND t.status='completed' AND t.answer_basis='execution' AND instr(m.body,'0')>0" and [retry]) == "1" and "user receives verified fresh exit status")
+    proof_assert(result_cache_scalar(db and "WITH RECURSIVE reach(a,b) AS (SELECT parent,child FROM derivations UNION SELECT r.a,d.child FROM reach r JOIN derivations d ON d.parent=r.b) SELECT count(*) FROM reach WHERE a=b" and []) == "0" and "retry provenance stays acyclic")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " actual UI command retry checks"))
+    return 0

@@ -1,0 +1,48 @@
+import "../src/slot_lifecycle"
+import "../src/application_paths"
+import "os"
+set checks to 0
+
+define forgetting_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set home to get_list(args and 1)
+    set core to get_list(args and 2)
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and "")
+    forgetting_assert(application_wait(core and ["init"]) == 0 and "isolated core initialized")
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    set directory to slot_directory(home)
+    forgetting_assert(directory >= 0 and "isolated cache directory")
+    ep_dlcall1(ep_dlsym(native_system() and "close") and directory)
+    set filename to concat("echolite-" and concat(sha256("isolated forget fixture") and ".bin"))
+    set path to concat(home and concat("/native-slots/" and filename))
+    write_file(path and "abc")
+    sql_execute(db and "INSERT INTO prompt_cache VALUES('test','0','native-slot-v1','fixture','fixture',7,1); INSERT INTO response_cache VALUES('test','0','fixture','fixture',7,1)")
+    forgetting_assert(file_exists(path) and "fixture snapshot exists only in isolated state")
+    forgetting_assert(application_wait(core and ["remember","semantic","slot-forget-test","user","Temporary cache lifecycle memory"]) == 0 and "memory inserted by actual core")
+    set id to result_cache_scalar(db and "SELECT id FROM memories WHERE project='slot-forget-test' ORDER BY id DESC LIMIT 1" and [])
+    set held to slot_lock(slot_runtime_home())
+    forgetting_assert(held >= 0 and "simulated active inference lease")
+    forgetting_assert(application_wait(core and ["forget",id]) != 0 and "forget cannot race inference")
+    forgetting_assert(result_cache_epoch(db and "0") && file_exists(path) and "busy rejection preserves memory epoch and snapshot")
+    slot_unlock(held)
+    forgetting_assert(application_wait(core and ["forget",id]) == 0 and "actual core forget completes")
+    forgetting_assert(file_exists(path) == 0 and "saved native snapshot removed")
+    forgetting_assert(result_cache_scalar(db and "SELECT count(*) FROM prompt_cache" and []) == "0" && result_cache_scalar(db and "SELECT count(*) FROM response_cache" and []) == "0" and "persistent caches deleted")
+    forgetting_assert(result_cache_epoch(db and "1") and "forgetting epoch advanced")
+    forgetting_assert(result_cache_scalar(db and "SELECT count(*) FROM memories WHERE id=?" and [id]) == "0" and "selected memory removed")
+    set lock to slot_lock(slot_runtime_home())
+    forgetting_assert(lock >= 0 and "maintenance released runtime lease")
+    slot_unlock(lock)
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " real core cache-forgetting checks"))
+    return 0

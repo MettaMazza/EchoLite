@@ -1,0 +1,98 @@
+import "native_process"
+import "result_cache"
+import "native_progress"
+
+# UTF-8 composer operations keep complete code points.
+define chat_backspace with value returning Str:
+    set end to string_length(value)
+    if end == 0:
+        return value
+    set end to end - 1
+    repeat while end > 0 && get_character(value and end) >= 128 && get_character(value and end) < 192:
+        set end to end - 1
+    return substring(value and 0 and end)
+
+define chat_character with code returning Str:
+    set data to alloc_bytes(5)
+    set count to 1
+    if code < 128:
+        poke_byte(data and 0 and code)
+    else if code < 2048:
+        poke_byte(data and 0 and 192 + code / 64)
+        poke_byte(data and 1 and 128 + code % 64)
+        set count to 2
+    else if code < 65536:
+        poke_byte(data and 0 and 224 + code / 4096)
+        poke_byte(data and 1 and 128 + code / 64 % 64)
+        poke_byte(data and 2 and 128 + code % 64)
+        set count to 3
+    else:
+        poke_byte(data and 0 and 240 + code / 262144)
+        poke_byte(data and 1 and 128 + code / 4096 % 64)
+        poke_byte(data and 2 and 128 + code / 64 % 64)
+        poke_byte(data and 3 and 128 + code % 64)
+        set count to 4
+    poke_byte(data and count and 0)
+    set value to ptr_to_str(data)
+    free_bytes(data)
+    return value
+
+define chat_sessions with db and project:
+    set params to create_list()
+    append_list(params and project)
+    set rows to sql_query_params(db and "SELECT s.memory,COALESCE((SELECT CASE WHEN u.source='scheduled-event' THEN 'Scheduled task' ELSE substr(u.body,1,24) END FROM session_turns st JOIN turns t ON t.id=st.turn_id JOIN memories u ON u.id=t.user_memory WHERE st.session=s.memory ORDER BY t.id LIMIT 1),m.body),COALESCE(s.closed,'') FROM sessions s JOIN memories m ON m.id=s.memory WHERE s.project=? ORDER BY s.memory DESC LIMIT 12" and params)
+    return rows
+
+define chat_turns with db and session:
+    set params to create_list()
+    append_list(params and session)
+    set rows to sql_query_params(db and "SELECT t.id,CASE WHEN u.source='scheduled-event' THEN 'Scheduled task: '||coalesce((SELECT json_extract(m.body,'$.objective') FROM task_schedules s JOIN tasks k ON k.memory=s.task JOIN memories m ON m.id=k.current_memory WHERE s.turn_id=t.id),'Saved task') ELSE u.body END,COALESCE(a.body,''),t.status,COALESCE((SELECT group_concat(json_extract(g.response,'$.reasoning'),char(10)||char(10)) FROM generation_rounds g WHERE g.turn_id=t.id ORDER BY g.round),''),COALESCE((SELECT sum(json_extract(g.response,'$.completion_tokens')) FROM generation_rounds g WHERE g.turn_id=t.id),0),COALESCE((SELECT group_concat(r.name||' · '||r.status,', ') FROM tool_runs r WHERE r.turn_id=t.id),''),u.source FROM turns t JOIN session_turns st ON st.turn_id=t.id JOIN memories u ON u.id=t.user_memory LEFT JOIN memories a ON a.id=t.reply_memory WHERE st.session=? ORDER BY t.id" and params)
+    set has_progress to result_cache_scalar(db and "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='model_progress'" and [])
+    set i to 0
+    repeat while i < length_list(rows):
+        set row to get_list(rows and i)
+        set input_source to get_list(row and 7)
+        set_list(row and 7 and "0")
+        append_list(row and input_source)
+        if has_progress == "1" && get_list(row and 3) == "pending":
+            set snapshot to result_cache_scalar(db and "SELECT p.response FROM model_progress p JOIN turns t ON t.id=p.turn_id WHERE p.turn_id=? AND t.status='pending' AND p.epoch=(SELECT value FROM metadata WHERE key='cache_epoch')" and [get_list(row and 0)])
+            if snapshot != "":
+                set reasoning to result_cache_scalar(db and "SELECT COALESCE(json_extract(?,'$.reasoning'),'')" and [snapshot])
+                if reasoning != "":
+                    set prior to get_list(row and 4)
+                    if prior != "":
+                        set reasoning to concat(prior and concat("\n\n" and reasoning))
+                    set_list(row and 4 and reasoning)
+                set output to result_cache_scalar(db and "SELECT COALESCE(json_extract(?,'$.text'),'')" and [snapshot])
+                set preview to progress_answer(db and output)
+                if preview != "":
+                    set_list(row and 2 and concat("Draft while generating:\n" and preview))
+                set_list(row and 7 and "1")
+        set i to i + 1
+    return rows
+
+
+set CHAT_WHEEL_CIF to 0
+set CHAT_WHEEL_RESULT to 0
+
+define chat_wheel with raylib:
+    if CHAT_WHEEL_CIF == 0:
+        set CHAT_WHEEL_CIF to native_cif(ep_dlsym(FONT_FFI and "ffi_type_float") and [])
+        set CHAT_WHEEL_RESULT to alloc_bytes(8)
+    ep_dlcall4(FONT_CALL and CHAT_WHEEL_CIF and ep_dlsym(raylib and "GetMouseWheelMove") and CHAT_WHEEL_RESULT and 0)
+    set bits to process_integer(CHAT_WHEEL_RESULT and 4)
+    set sign to 1
+    if bits >= 2147483648:
+        set sign to 0 - 1
+        set bits to bits - 2147483648
+    set exponent to bits / 8388608 - 127 - 23
+    if bits == 0:
+        return 0
+    set amount to (bits % 8388608 + 8388608) * 40
+    repeat while exponent < 0:
+        set amount to amount / 2
+        set exponent to exponent + 1
+    repeat while exponent > 0:
+        set amount to amount * 2
+        set exponent to exponent - 1
+    return amount * sign

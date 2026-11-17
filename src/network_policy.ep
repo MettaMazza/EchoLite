@@ -1,0 +1,70 @@
+# Persistent launch policy. Local model/knowledge endpoints stay reachable offline.
+import "state_lock"
+import "fs"
+import "os"
+import "string"
+
+define network_mode with home returning Str:
+    set override to get_env("ECHOLITE_NETWORK_MODE")
+    if override != "":
+        if override == "offline" || override == "connected":
+            return override
+        return ""
+    if home == "":
+        return "offline"
+    set libc to native_system()
+    set descriptor to native_open(concat(home and "/network-mode") and 16777476 and 0)
+    if descriptor < 0:
+        set error to ep_dlcall0(ep_dlsym(libc and "__error"))
+        if lease_integer(error and 0 and 4) == 2:
+            return "offline"
+        return ""
+    set info to alloc_bytes(144)
+    set data to alloc_bytes(18)
+    set result to ""
+    if ep_dlcall2(ep_dlsym(libc and "fstat") and descriptor and info) == 0:
+        if lease_integer(info and 4 and 2) / 4096 == 8 && lease_integer(info and 6 and 2) == 1 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid")) && lease_integer(info and 96 and 8) <= 16:
+            set count to ep_dlcall3(ep_dlsym(libc and "read") and descriptor and data and 17)
+            if count > 0 && count <= 16 && count == lease_integer(info and 96 and 8) && count == string_length(ptr_to_str(data)):
+                set result to string_trim(ptr_to_str(data))
+    free_bytes(info)
+    free_bytes(data)
+    ep_dlcall1(ep_dlsym(libc and "close") and descriptor)
+    if result == "offline" || result == "connected":
+        return result
+    return ""
+
+define network_save with home and mode:
+    if mode != "offline" && mode != "connected":
+        return 0
+    set libc to native_system()
+    set name to concat(".network-mode-" and int_to_string(ep_dlcall0(ep_dlsym(libc and "getpid"))))
+    set directory to native_open(home and 17826048 and 0)
+    if directory < 0:
+        return 0
+    set descriptor to native_openat(directory and name and 16780033 and 384)
+    if descriptor < 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and directory)
+        return 0
+    set body to concat(mode and "\n")
+    set valid to ep_dlcall3(ep_dlsym(libc and "write") and descriptor and body and string_length(body)) == string_length(body)
+    if valid:
+        set valid to ep_dlcall1(ep_dlsym(libc and "fsync") and descriptor) == 0
+    ep_dlcall1(ep_dlsym(libc and "close") and descriptor)
+    if valid:
+        set valid to ep_dlcall4(ep_dlsym(libc and "renameat") and directory and name and directory and "network-mode") == 0
+    if valid:
+        set valid to ep_dlcall1(ep_dlsym(libc and "fsync") and directory) == 0
+    else:
+        ep_dlcall3(ep_dlsym(libc and "unlinkat") and directory and name and 0)
+    ep_dlcall1(ep_dlsym(libc and "close") and directory)
+    return valid
+
+define network_sandbox_args with executable and arguments:
+    set result to ["-p","(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip \"localhost:*\"))"]
+    append_list(result and executable)
+    set i to 0
+    repeat while i < length_list(arguments):
+        append_list(result and get_list(arguments and i))
+        set i to i + 1
+    return result

@@ -1,0 +1,73 @@
+import "web_headers"
+import "result_cache"
+
+# Turn a successful HTTP representation into a timestamped cache snapshot.
+define web_snapshot with db and url and response and previous returning Str:
+    set raw to result_cache_scalar(db and "SELECT json_extract(?,'$.headers')" and [response])
+    set parsed to web_headers(db and raw)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [parsed]) != "ok":
+        return parsed
+    set headers to result_cache_scalar(db and "SELECT json_extract(?,'$.headers')" and [parsed])
+    set status to result_cache_scalar(db and "SELECT json_extract(?,'$.http_status')" and [response])
+    set snapshot to ""
+    if status == "304":
+        if previous == "" || string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.url')" and [previous]) and url) == 0:
+            return web_markup_error(db and "HTTP 304 has no matching saved representation")
+        set old_headers to result_cache_scalar(db and "SELECT json_extract(?,'$.http_headers')" and [previous])
+        set headers to result_cache_scalar(db and "SELECT json_patch(json_remove(?,'$.age'),json(?))" and [old_headers,headers])
+        set snapshot to previous
+    else if status == "200":
+        set media to result_cache_scalar(db and "SELECT lower(coalesce(json_extract(?,'$.content-type'),''))" and [headers])
+        set mime to string_trim(get_list(string_split(media and ";") and 0))
+        set encoding to result_cache_scalar(db and "SELECT lower(coalesce(json_extract(?,'$.content-encoding'),'identity'))" and [headers])
+        if encoding != "identity" || (mime != "text/html" && mime != "text/plain"):
+            return web_markup_error(db and "Web reader requires uncompressed HTML or plain text")
+        set parts to string_split(media and ";")
+        set i to 1
+        repeat while i < length_list(parts):
+            set part to string_trim(get_list(parts and i))
+            if starts_with(part and "charset"):
+                set pair to string_split(part and "=")
+                if length_list(pair) != 2:
+                    return web_markup_error(db and "Invalid web text encoding")
+                set charset to string_trim(get_list(pair and 1))
+                set charset to string_replace(string_replace(charset and "\"" and "") and "'" and "")
+                if charset != "utf-8" && charset != "us-ascii":
+                    return web_markup_error(db and "Web text encoding is not supported faithfully")
+            set i to i + 1
+        set body to result_cache_scalar(db and "SELECT json_extract(?,'$.body')" and [response])
+        if mime == "text/html":
+            set snapshot to web_html(db and body and url)
+        else:
+            set captured to dictionary_excerpt(body and 20000)
+            set params to [captured,int_to_string(string_length(body) > string_length(captured))]
+            set snapshot to result_cache_scalar(db and "SELECT json_object('status','ok','text',?,'title','','links',json('[]'),'links_truncated',json('false'),'capture_truncated',json(CASE WHEN CAST(? AS INTEGER)=1 THEN 'true' ELSE 'false' END))" and params)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
+            return snapshot
+        set digest to sha256(body)
+        set snapshot to result_cache_scalar(db and "SELECT json_set(?,'$.content_sha256',?,'$.fetched_at',strftime('%Y-%m-%dT%H:%M:%SZ','now'))" and [snapshot,digest])
+    else:
+        return web_markup_error(db and concat("Unsupported HTTP response status " and status))
+    set policy to web_freshness(db and headers)
+    set params to [snapshot,url,headers,policy,policy,status]
+    return result_cache_scalar(db and "SELECT json_set(?,'$.url',?,'$.http_headers',json(?),'$.expires_at',CAST(strftime('%s','now') AS INTEGER)+json_extract(?,'$.ttl_seconds'),'$.store',json_extract(?,'$.store'),'$.validated_at',strftime('%Y-%m-%dT%H:%M:%SZ','now'),'$.revalidated',json(CASE WHEN ?='304' THEN 'true' ELSE 'false' END))" and params)
+
+# Persist reusable snapshots, or erase an older representation on no-store.
+define web_snapshot_store with db and namespace and url and epoch and snapshot returning Str:
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
+        return snapshot
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.store')" and [snapshot]) == "1":
+        return result_cache_put(db and namespace and url and epoch and snapshot)
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return web_markup_error(db and "Cannot acquire web cache transaction")
+    if result_cache_epoch(db and epoch) == 0:
+        sql_execute(db and "ROLLBACK")
+        return web_markup_error(db and "Memory forgotten during web read; snapshot discarded")
+    set key to result_cache_key(db and namespace and url)
+    if sql_execute_params(db and "DELETE FROM response_cache WHERE key=?" and [key]) != 101:
+        sql_execute(db and "ROLLBACK")
+        return web_markup_error(db and "Cannot remove non-storable web snapshot")
+    if sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return web_markup_error(db and "Cannot commit web cache removal")
+    return snapshot

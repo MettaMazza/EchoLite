@@ -1,0 +1,83 @@
+# Belief quality and temporal applicability are separate from memory lifecycle.
+import "result_cache"
+
+define belief_schema with db:
+    return sql_execute(db and "CREATE TABLE IF NOT EXISTS memory_beliefs(memory INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,state TEXT NOT NULL DEFAULT 'tentative' CHECK(state IN ('tentative','supported','disputed','superseded','expired')),revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>0),valid_from TEXT NOT NULL DEFAULT '',valid_until TEXT NOT NULL DEFAULT '',evidence INTEGER REFERENCES memories(id) ON DELETE SET NULL,origin TEXT NOT NULL DEFAULT 'unspecified' CHECK(origin IN ('unspecified','user_statement','direct_observation','external_source','inference')),available INTEGER NOT NULL DEFAULT 1 CHECK(available IN (0,1)),updated TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))); CREATE TABLE IF NOT EXISTS belief_history(memory INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,revision INTEGER NOT NULL,state TEXT NOT NULL,valid_from TEXT NOT NULL,valid_until TEXT NOT NULL,evidence INTEGER REFERENCES memories(id) ON DELETE SET NULL,origin TEXT NOT NULL,actor INTEGER REFERENCES memories(id) ON DELETE CASCADE,reason TEXT NOT NULL,recorded TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),PRIMARY KEY(memory,revision)); CREATE TRIGGER IF NOT EXISTS belief_new_note AFTER INSERT ON memories WHEN new.layer IN ('semantic','procedural') BEGIN INSERT OR IGNORE INTO memory_beliefs(memory) VALUES(new.id); END; CREATE TRIGGER IF NOT EXISTS belief_insert_revision AFTER INSERT ON memory_beliefs BEGIN UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='memory_revision'; INSERT INTO belief_history(memory,revision,state,valid_from,valid_until,evidence,origin,reason) VALUES(new.memory,new.revision,new.state,new.valid_from,new.valid_until,new.evidence,new.origin,'Initialized without assuming independent support'); END; CREATE TRIGGER IF NOT EXISTS belief_update_revision AFTER UPDATE ON memory_beliefs BEGIN UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='memory_revision'; END; CREATE TRIGGER IF NOT EXISTS belief_delete_revision AFTER DELETE ON memory_beliefs BEGIN UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='memory_revision'; END; CREATE TRIGGER IF NOT EXISTS belief_evidence_removed AFTER UPDATE OF evidence ON memory_beliefs WHEN old.evidence IS NOT NULL AND new.evidence IS NULL AND new.state='supported' BEGIN UPDATE memory_beliefs SET state='tentative',origin='unspecified',revision=revision+1,updated=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE memory=new.memory; INSERT INTO belief_history(memory,revision,state,valid_from,valid_until,evidence,origin,reason) SELECT memory,revision,state,valid_from,valid_until,evidence,origin,'Supporting record removed; support withdrawn' FROM memory_beliefs WHERE memory=new.memory; END; INSERT OR IGNORE INTO memory_beliefs(memory) SELECT id FROM memories WHERE layer IN ('semantic','procedural'); DROP VIEW IF EXISTS belief_details; CREATE VIEW belief_details AS SELECT b.memory,b.revision,b.state,CASE WHEN m.status='superseded' OR b.state='superseded' THEN 'superseded' WHEN b.state='expired' OR (b.valid_until!='' AND b.valid_until<=strftime('%Y-%m-%dT%H:%M:%SZ','now')) THEN 'expired' ELSE b.state END effective_state,b.valid_from,b.valid_until,b.evidence,b.origin,CASE WHEN m.status='active' THEN b.available ELSE 0 END available,b.updated,m.created learned_at FROM memory_beliefs b JOIN memories m ON m.id=b.memory;")
+
+# Only boundary changes bump retrieval revision; unchanged clocks reuse caches.
+define belief_refresh with db:
+    return sql_execute(db and "UPDATE memory_beliefs SET available=CASE WHEN state IN ('superseded','expired') OR (valid_from!='' AND valid_from>strftime('%Y-%m-%dT%H:%M:%SZ','now')) OR (valid_until!='' AND valid_until<=strftime('%Y-%m-%dT%H:%M:%SZ','now')) THEN 0 ELSE 1 END WHERE available<>CASE WHEN state IN ('superseded','expired') OR (valid_from!='' AND valid_from>strftime('%Y-%m-%dT%H:%M:%SZ','now')) OR (valid_until!='' AND valid_until<=strftime('%Y-%m-%dT%H:%M:%SZ','now')) THEN 0 ELSE 1 END")
+
+define belief_error with db and message returning Str:
+    set params to [message]
+    return result_cache_scalar(db and "SELECT json_object('status','ok','tool','memory_assess','outcome','failed','text',?)" and params)
+
+define belief_abort with db and message returning Str:
+    sql_execute(db and "ROLLBACK TO belief_edit; RELEASE belief_edit")
+    return belief_error(db and message)
+
+define belief_date with db and date:
+    if date == "":
+        return 1
+    return result_cache_scalar(db and "SELECT length(?)=20 AND substr(?,11,1)='T' AND strftime('%Y-%m-%dT%H:%M:%SZ',?,'+0 seconds')=?" and [date,date,date,date]) == "1"
+
+define belief_origin with db and project and evidence returning Str:
+    if evidence == "":
+        return "unspecified"
+    set source to result_cache_scalar(db and "SELECT source FROM memories WHERE id=? AND project=? AND status='active'" and [evidence,project])
+    if source == "user-message" || source == "user":
+        return "user_statement"
+    set name to result_cache_scalar(db and "SELECT r.name FROM tool_runs r JOIN memories m ON m.id=r.observation WHERE r.observation=? AND m.project=? AND m.status='active' AND r.status='completed' AND json_extract(CASE WHEN json_valid(m.body) THEN m.body ELSE '{}' END,'$.outcome')='completed' AND r.name IN ('dictionary','wikipedia','web_read','pdf_read','docx_read','file_read','file_list','calculator','process_run','process_retry','process_output') LIMIT 1" and [evidence,project])
+    if name == "":
+        return "unspecified"
+    if name == "calculator" || name == "process_run" || name == "process_retry" || name == "process_output":
+        return "direct_observation"
+    return "external_source"
+
+define belief_update with db and project and expression and actor returning Str:
+    if string_contains(expression and "\u0000") || result_cache_scalar(db and "SELECT json_valid(?)" and [expression]) != "1":
+        return belief_error(db and "Invalid assessment JSON")
+    set valid to result_cache_scalar(db and "SELECT json_type(?)='object' AND (SELECT count(*) FROM json_each(?))=7 AND (SELECT count(DISTINCT key) FROM json_each(?))=7 AND json_type(?,'$.note_id')='text' AND length(json_extract(?,'$.note_id')) BETWEEN 1 AND 18 AND json_extract(?,'$.note_id') NOT GLOB '*[^0-9]*' AND CAST(json_extract(?,'$.note_id') AS INTEGER)>0 AND json_type(?,'$.revision')='integer' AND json_extract(?,'$.revision') BETWEEN 1 AND 2147483647 AND json_extract(?,'$.state') IN ('tentative','supported','disputed','superseded','expired') AND json_type(?,'$.valid_from')='text' AND json_type(?,'$.valid_until')='text' AND json_type(?,'$.evidence_id')='text' AND (json_extract(?,'$.evidence_id')='' OR (length(json_extract(?,'$.evidence_id')) BETWEEN 1 AND 18 AND json_extract(?,'$.evidence_id') NOT GLOB '*[^0-9]*' AND CAST(json_extract(?,'$.evidence_id') AS INTEGER)>0)) AND json_type(?,'$.reason')='text' AND length(trim(json_extract(?,'$.reason')))>0 AND length(CAST(json_extract(?,'$.reason') AS BLOB))<=400" and [expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression])
+    if valid != "1":
+        return belief_error(db and "Use note_id, current revision, state, valid_from/valid_until UTC timestamps or empty strings, evidence_id or empty string, and a reason up to 400 bytes")
+    set note to result_cache_scalar(db and "SELECT json_extract(?,'$.note_id')" and [expression])
+    set revision to result_cache_scalar(db and "SELECT json_extract(?,'$.revision')" and [expression])
+    set state to result_cache_scalar(db and "SELECT json_extract(?,'$.state')" and [expression])
+    set valid_start to result_cache_scalar(db and "SELECT json_extract(?,'$.valid_from')" and [expression])
+    set valid_end to result_cache_scalar(db and "SELECT json_extract(?,'$.valid_until')" and [expression])
+    set evidence to result_cache_scalar(db and "SELECT json_extract(?,'$.evidence_id')" and [expression])
+    set reason to result_cache_scalar(db and "SELECT json_extract(?,'$.reason')" and [expression])
+    if belief_date(db and valid_start) == 0 || belief_date(db and valid_end) == 0 || (valid_start != "" && valid_end != "" && result_cache_scalar(db and "SELECT ?>=?" and [valid_start,valid_end]) == "1"):
+        return belief_error(db and "Use real UTC dates YYYY-MM-DDTHH:MM:SSZ, with start strictly before end. Empty means unknown; do not invent dates.")
+    if sql_execute(db and "SAVEPOINT belief_edit") != 0:
+        return belief_error(db and "Cannot acquire belief transaction")
+    if result_cache_scalar(db and "SELECT count(*) FROM memory_beliefs b JOIN memories m ON m.id=b.memory WHERE b.memory=? AND b.revision=? AND m.project=? AND m.status='active'" and [note,revision,project]) != "1":
+        return belief_abort(db and "Note must be active in this project at the supplied belief revision; read its current metadata first")
+    if result_cache_scalar(db and "SELECT count(*) FROM memories WHERE id=? AND project=? AND status='active'" and [actor,project]) != "1":
+        return belief_abort(db and "Assessment needs this project's retained originating request")
+    if evidence != "" && result_cache_scalar(db and "SELECT count(*) FROM memories WHERE id=? AND project=? AND status='active'" and [evidence,project]) != "1":
+        return belief_abort(db and "Evidence must be a retained active record in this project")
+    if result_cache_scalar(db and "WITH RECURSIVE children(id) AS (SELECT CAST(? AS INTEGER) UNION SELECT d.child FROM derivations d JOIN children c ON d.parent=c.id) SELECT count(*) FROM children WHERE id=? OR id=nullif(?,'')" and [note,actor,evidence]) != "0":
+        return belief_abort(db and "A claim cannot support itself through its own descendants")
+    set origin to belief_origin(db and project and evidence)
+    if state == "supported" && origin == "unspecified":
+        return belief_abort(db and "Supported requires a retained user statement or successful source/calculation/execution receipt; agent prose or bookkeeping is not independent support")
+    if sql_execute_params(db and "UPDATE memory_beliefs SET state=?,revision=revision+1,valid_from=?,valid_until=?,evidence=nullif(?,''),origin=?,updated=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE memory=? AND revision=?" and [state,valid_start,valid_end,evidence,origin,note,revision]) != 101:
+        return belief_abort(db and "Cannot save belief revision")
+    if sql_execute_params(db and "INSERT INTO belief_history(memory,revision,state,valid_from,valid_until,evidence,origin,actor,reason) SELECT memory,revision,state,valid_from,valid_until,evidence,origin,?,? FROM memory_beliefs WHERE memory=?" and [actor,reason,note]) != 101:
+        return belief_abort(db and "Cannot preserve assessment history")
+    if sql_execute_params(db and "INSERT OR IGNORE INTO derivations(parent,child) VALUES(?,?)" and [actor,note]) != 101:
+        return belief_abort(db and "Cannot link assessment provenance")
+    if evidence != "" && sql_execute_params(db and "INSERT OR IGNORE INTO derivations(parent,child) VALUES(?,?)" and [evidence,note]) != 101:
+        return belief_abort(db and "Cannot link supporting evidence")
+    if belief_refresh(db) != 0:
+        return belief_abort(db and "Cannot update temporal applicability")
+    sql_execute_params(db and "DELETE FROM belief_history WHERE memory=? AND revision NOT IN (SELECT revision FROM belief_history WHERE memory=? ORDER BY revision DESC LIMIT 64)" and [note,note])
+    if sql_execute(db and "RELEASE belief_edit") != 0:
+        return belief_abort(db and "Cannot finish assessment")
+    return result_cache_scalar(db and "SELECT json_object('status','ok','tool','memory_assess','outcome','completed','note_id',CAST(memory AS TEXT),'belief_revision',revision,'belief_state',effective_state,'valid_from',valid_from,'valid_until',valid_until,'evidence_id',coalesce(CAST(evidence AS TEXT),''),'origin',origin,'current',json(CASE WHEN available=1 THEN 'true' ELSE 'false' END),'text','Saved belief metadata without rewriting the original text. Supported means linked retained evidence, not guaranteed truth; a user statement remains attributed to the user.') FROM belief_details WHERE memory=?" and [note])
+
+# Bounded metadata for the already-selected records; original excerpts stay intact.
+define belief_context with db and records returning Str:
+    set params to [records]
+    return result_cache_scalar(db and "SELECT coalesce(json_group_array(json_object('note_id',CAST(b.memory AS TEXT),'belief_revision',b.revision,'belief_state',b.effective_state,'valid_from',b.valid_from,'valid_until',b.valid_until,'evidence_id',coalesce(CAST(b.evidence AS TEXT),''),'origin',b.origin,'current',json(CASE WHEN b.available=1 THEN 'true' ELSE 'false' END),'learned_at',b.learned_at)),'[]') FROM belief_details b WHERE b.memory IN (SELECT json_extract(value,'$[0]') FROM json_each(?))" and params)

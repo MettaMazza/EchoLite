@@ -1,0 +1,77 @@
+ECHOLITE LOCAL TOOLCHAIN
+Snapshot guide: 2026-11-17. This application targets macOS ARM64.
+
+Read HOST ENVIRONMENT for the actual installation directory, current working
+directory, state directory, compiler path and installed language-reference path.
+These values come from the running process, not inferred Linux defaults.
+The full reference is a local snapshot of the installed Ernos repository.
+Its version, original path and hash are in library/technical/ernos/source.json.
+Use file_read with the returned next_offset to page through local documentation.
+
+EchoLite application implementation is Ernos Plain (.ep), including UI, core,
+tools, build entry point and tests. Use the installed compiler directly:
+  argv: [compiler path from HOST ENVIRONMENT, absolute .ep source path]
+  cwd: the existing absolute directory containing that source
+The compiler emits a native executable beside the source without .ep. Run that
+absolute executable path with process_run and inspect its actual exit/output.
+The compiler also emits intermediate C as generated build output; do not edit
+that output as application source. Shared library dependencies remain native.
+
+Minimal EP program:
+  define main:
+      display "Hello from EchoLite"
+      return 0
+
+Use four-space indentation. A typical function is:
+  define greet with name:
+      display name
+      return 0
+Call it with greet("EchoLite"). Consult the reference and installed stdlib
+before assuming unfamiliar syntax or APIs. The compiler diagnostics, actual
+execution and tests determine whether a program works.
+
+For this checkout, ./build or ./echolite build compiles the application.
+Read README.txt before changing startup, state, caches or model configuration.
+Keep user data and downloaded assets out of Git. Do not modify unrelated files
+when carrying out a bounded coding request.
+
+process_run executes a literal argv array; it has no implicit shell expansion
+and its stdin is closed. Both executable and cwd must be absolute paths.
+For an authorized file write that requires a shell, invoke /bin/sh explicitly
+and quote the data correctly. Check the resulting file with file_read before
+compiling. Shell commands are code, so never interpolate untrusted text as code.
+Use /usr/bin/git for repository operations, /usr/bin/osascript for application
+scripting within granted macOS permissions, and /usr/bin/open for user-requested
+application/document launches. These tools do not bypass macOS permissions.
+For ordinary arithmetic use EchoLite's calculator tool, not a command script.
+Read saved process output through process_output; do not rerun side effects to
+recover their output. A failed or uncertain receipt is not proof of completion.
+
+Command retries and shell arguments
+
+A plain repetition of the same process_run argv/cwd in a turn returns its saved
+receipt. If inputs have been repaired or changed and execution is deliberately
+needed again, use process_retry with operation_id equal to the old receipt's
+actual output_ref and a reason explaining the change. EP copies the original
+argv, cwd and timeout from the project journal. This intent runs once; repeating
+the same operation_id reuses its result. To retry after another observed change,
+use the latest actual execution's output_ref. Unknown, cancelled and timed-out
+operations require inspection, not this retry path. process_output exposes a
+bounded original_command object for inspection without executing anything.
+
+For /bin/sh -c, the next single argv element is the whole shell command string.
+Additional argv elements are positional parameters, not additional commands.
+Use separate process_run calls or an intentional shell sequence when multiple
+commands are needed. A zero exit from mkdir does not prove a later file write
+happened. Read the source and inspect the compiler receipt before claiming a
+successful build; inspect the executable's receipt before claiming it ran.
+
+Safari browser interaction
+
+Use bin/echolite-browser through process_run for browser actions; read
+docs/Browser-Control.txt for its bounded command protocol and exact handle
+fields. The new command starts the driver on demand in Connected mode. Read
+actual page state after navigation/actions and close only the session you
+created. Use process_output for saved command output. Never blindly retry a
+browser action after an unknown transport result. These are live operations;
+a cached receipt records a past observation, not current browser state.

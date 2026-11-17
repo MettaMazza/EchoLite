@@ -1,0 +1,36 @@
+ECHOLITE — BELIEF STATES AND TIME BOUNDS
+
+Semantic and procedural notes keep their original IDs and bodies. Their belief
+metadata is separate from active/archived/superseded storage lifecycle:
+tentative, supported, disputed, superseded or expired. Existing notes migrate
+as tentative; an old source label is not assumed to establish truth.
+
+memory_assess records a revision using note_id, revision, state, valid_from,
+valid_until, evidence_id and reason. Read current revisions from beliefs[] in
+memory_search/memory_open or BELIEF METADATA in passive context. Unknown dates
+are empty; known dates use real UTC YYYY-MM-DDTHH:MM:SSZ. The start precedes the
+end. Learned-at is the original storage timestamp, not an invented event date.
+
+Supported requires a retained same-project user statement or completed source,
+calculation or execution receipt. Origin stays explicit: user_statement,
+external_source or direct_observation. A receipt is traceable support, not a
+proof that the claim logically follows or is certainly true. Agent prose and
+bookkeeping cannot establish independent support. Self-support and provenance
+cycles are rejected. Current request and supporting evidence are linked for
+forgetting. If evidence disappears directly, support is withdrawn to tentative.
+
+Time-limited claims stop appearing in current recall when their boundary passes.
+Future, expired and superseded claims remain inspectable as historical records.
+Disputed and tentative claims remain retrievable with explicit labels. Clock
+boundaries invalidate retrieval-result caches without discarding unchanged
+embedding vectors. Repeated reads before a boundary reuse persistent caches.
+
+memory_open includes the latest 16 assessment history entries. At most 64 are
+retained per note; original text is never overwritten by an assessment. Explicit
+forgetting removes dependent metadata/history with the original record.
+Corrections create a new tentative note and preserve the prior historical body;
+an unchanged wording is rejected with guidance to use memory_assess instead.
+
+All of this implementation and its tests are Ernos Plain. No second model or
+additional resident service is introduced. Existing bounded MiniLM recall and
+the completed 262144-token context validation remain in place.

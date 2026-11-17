@@ -1,0 +1,249 @@
+# Offline recovery publication. The caller holds exclusive core/worker leases.
+import "backup_create"
+
+define restore_ordinary with dir and name:
+    set libc to native_system()
+    set info to alloc_bytes(144)
+    set code to ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and 32)
+    set valid to 0
+    if code != 0:
+        set valid to transport_errno(libc) == 2
+    else:
+        set valid to lease_integer(info and 4 and 2) / 4096 == 8 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid")) && lease_integer(info and 6 and 2) == 1
+    free_bytes(info)
+    return valid
+
+define restore_remove with dir and name:
+    if restore_ordinary(dir and name) == 0:
+        return 0
+    set libc to native_system()
+    if ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and name and 0) != 0 && transport_errno(libc) != 2:
+        return 0
+    return 1
+
+define restore_read with dir and name and limit and private returning Str:
+    if restore_ordinary(dir and name) == 0:
+        return ""
+    set fd to native_openat(dir and name and 16777476 and 0)
+    if fd < 0:
+        return ""
+    set libc to native_system()
+    set info to alloc_bytes(144)
+    set valid to 1
+    if private == 1:
+        set valid to snapshot_private(fd and info)
+    free_bytes(info)
+    set data to alloc_bytes(limit + 2)
+    set used to 0
+    set done to 0
+    repeat while valid == 1 && used <= limit && done == 0:
+        set count to ep_dlcall3(ep_dlsym(libc and "read") and fd and data + used and limit + 1 - used)
+        if count == 0:
+            set done to 1
+        else if count < 0 || count > limit + 1 - used:
+            if transport_errno(libc) != 4:
+                set valid to 0
+        else:
+            set used to used + count
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    set result to ""
+    if valid == 1 && used <= limit:
+        set text to ptr_to_str(data)
+        if string_length(text) == used:
+            set result to text
+    free_bytes(data)
+    return result
+
+define restore_write_all with fd and data and count:
+    set libc to native_system()
+    set used to 0
+    repeat while used < count:
+        set wrote to ep_dlcall3(ep_dlsym(libc and "write") and fd and data + used and count - used)
+        if wrote == 0:
+            return 0
+        else if wrote < 0 || wrote > count - used:
+            if transport_errno(libc) != 4:
+                return 0
+        else:
+            set used to used + wrote
+    return 1
+
+define restore_intent with dir and contents:
+    if restore_remove(dir and ".restore.intent.tmp") == 0:
+        return 0
+    set libc to native_system()
+    set fd to native_openat(dir and ".restore.intent.tmp" and 16780033 and 384)
+    if fd < 0:
+        return 0
+    set valid to restore_write_all(fd and str_to_ptr(contents) and 98)
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and fd) != 0:
+        set valid to 0
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    if valid == 1:
+        set valid to ep_dlcall4(ep_dlsym(libc and "renameat") and dir and ".restore.intent.tmp" and dir and ".restore.pending") == 0
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        set valid to 0
+    return valid
+
+define restore_copy with source_dir and source and target_dir and target:
+    set input to native_openat(source_dir and source and 16777476 and 0)
+    if input < 0:
+        return 0
+    set libc to native_system()
+    set before to alloc_bytes(144)
+    set after to alloc_bytes(144)
+    set space to alloc_bytes(128)
+    set valid to snapshot_private(input and before) && ep_dlcall2(ep_dlsym(libc and "fstatvfs") and target_dir and space) == 0
+    if valid == 1:
+        set valid to lease_integer(space and 24 and 4) * lease_integer(space and 8 and 8) >= lease_integer(before and 96 and 8) + 67108864
+    free_bytes(space)
+    set output to 0 - 1
+    if valid == 1:
+        set output to native_openat(target_dir and target and 16780033 and 384)
+        if output < 0:
+            set valid to 0
+    set buffer to alloc_bytes(131072)
+    set total to 0
+    set finished to 0
+    set deadline to transport_now(libc) + 120000
+    repeat while valid == 1 && finished == 0:
+        if transport_now(libc) >= deadline:
+            set valid to 0
+        else:
+            set count to ep_dlcall3(ep_dlsym(libc and "read") and input and buffer and 131072)
+            if count == 0:
+                set finished to 1
+            else if count < 0 || count > 131072:
+                if transport_errno(libc) != 4:
+                    set valid to 0
+            else:
+                set valid to restore_write_all(output and buffer and count)
+                set total to total + count
+    if snapshot_private(input and after) == 0 || total != lease_integer(before and 96 and 8) || lease_integer(before and 96 and 8) != lease_integer(after and 96 and 8):
+        set valid to 0
+    set field to 48
+    repeat while field <= 72:
+        if lease_integer(before and field and 8) != lease_integer(after and field and 8):
+            set valid to 0
+        set field to field + 8
+    ep_dlcall1(ep_dlsym(libc and "close") and input)
+    if output >= 0:
+        if ep_dlcall1(ep_dlsym(libc and "fsync") and output) != 0:
+            set valid to 0
+        ep_dlcall1(ep_dlsym(libc and "close") and output)
+        if valid == 0:
+            ep_dlcall3(ep_dlsym(libc and "unlinkat") and target_dir and target and 0)
+    free_bytes(before)
+    free_bytes(after)
+    free_bytes(buffer)
+    return valid
+
+define restore_sync with dir and name and required:
+    if restore_ordinary(dir and name) == 0:
+        return 0
+    set libc to native_system()
+    set fd to native_openat(dir and name and 16777476 and 0)
+    if fd < 0:
+        return required == 0 && transport_errno(libc) == 2
+    set valid to ep_dlcall1(ep_dlsym(libc and "fsync") and fd) == 0
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    return valid
+
+define restore_identity with database and dir:
+    set db to backup_sql_open(database and 16777217)
+    if db == 0:
+        return 0
+    set body to health_scalar(db and "SELECT body FROM me_versions ORDER BY id DESC LIMIT 1" and 16385)
+    sql_close(db)
+    if body == "":
+        return 0
+    return string_equals(body and restore_read(dir and "Me.txt" and 16384 and 0))
+
+define restore_fault with name and code:
+    if string_equals(get_env("ECHOLITE_TEST_FAULT") and name):
+        ep_dlcall1(ep_dlsym(native_system() and "_exit") and code)
+    return 0
+
+define restore_finish with canonical and dir and identifier returning Str:
+    set libc to native_system()
+    set database to concat(canonical and "/memory.sqlite3")
+    set valid to string_contains(health_check(database) and "\"status\":\"ok\"") && restore_identity(database and dir) && restore_sync(dir and "memory.sqlite3" and 1) && restore_sync(dir and "memory.sqlite3-wal" and 0) && restore_sync(dir and "Me.txt" and 1)
+    if valid == 1:
+        set valid to restore_remove(dir and "restore-new.sqlite3.sha256") && restore_remove(dir and ".restore.intent.tmp") && ep_dlcall1(ep_dlsym(libc and "fsync") and dir) == 0
+    if valid == 1:
+        restore_fault("restore_before_clear" and 88)
+        set valid to ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and ".restore.pending" and 0) == 0 && ep_dlcall1(ep_dlsym(libc and "fsync") and dir) == 0
+    if valid == 0:
+        return backup_check_error("Restore finalization failed; rerun the same backup-restore command")
+    return concat("{\"status\":\"ok\",\"id\":\"" and concat(identifier and "\",\"restored\":true}"))
+
+define restore_stage with canonical and dir and identifier and guard and expected and pending returning Str:
+    set libc to native_system()
+    if string_contains(backup_check(canonical and identifier) and "\"status\":\"ok\"") == 0:
+        return backup_check_error("Backup is not sealed and authorized; live state was not opened")
+    set names to ["memory.sqlite3","memory.sqlite3-wal","memory.sqlite3-shm","Me.txt","Me.txt.pending"]
+    set i to 0
+    repeat while i < length_list(names):
+        if restore_ordinary(dir and get_list(names and i)) == 0:
+            return backup_check_error("Live restore paths must be owned regular files or absent")
+        set i to i + 1
+    if restore_remove(dir and "restore-new.sqlite3") == 0 || restore_remove(dir and "restore-new.sqlite3.sha256") == 0:
+        return backup_check_error("Cannot clean previous restore preparation")
+    set backups to native_openat(dir and "backups" and 17826048 and 0)
+    if backups < 0:
+        return backup_check_error("Managed backup directory unavailable")
+    set name to concat("backup-" and concat(identifier and ".sqlite3"))
+    set prepared to restore_copy(backups and name and dir and "restore-new.sqlite3") && restore_copy(backups and concat(name and ".sha256") and dir and "restore-new.sqlite3.sha256") && snapshot_seal_verify(dir and "restore-new.sqlite3")
+    ep_dlcall1(ep_dlsym(libc and "close") and backups)
+    if string_equals(snapshot_read_hex(dir and "recovery.guard") and guard) == 0:
+        set prepared to 0
+    if prepared == 0:
+        return backup_check_error("Replacement preparation or checksum verification failed; resume requires a valid original snapshot")
+    restore_fault("restore_before_intent" and 84)
+    if pending == 0 && restore_intent(dir and expected) == 0:
+        return backup_check_error("Cannot durably publish restore intent; retry the same backup")
+    restore_fault("restore_after_intent" and 85)
+    if restore_remove(dir and "memory.sqlite3-wal") == 0 || restore_remove(dir and "memory.sqlite3-shm") == 0 || ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        return backup_check_error("Cannot retire live sidecars; restore intent remains pending")
+    restore_fault("restore_after_sidecars" and 86)
+    if ep_dlcall4(ep_dlsym(libc and "renameat") and dir and "restore-new.sqlite3" and dir and "memory.sqlite3") != 0 || ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        return backup_check_error("Cannot publish replacement; restore intent remains pending")
+    restore_fault("restore_after_publish" and 87)
+    return "{\"status\":\"ok\",\"stage\":\"published\"}"
+
+define restore_state with home and operation and identifier returning Str:
+    if snapshot_hex(identifier and 32) == 0 || (operation != "stage" && operation != "finish"):
+        return backup_check_error("Invalid restore operation or backup ID")
+    set libc to native_system()
+    set resolved to alloc_bytes(1024)
+    set code to ep_dlcall2(ep_dlsym(libc and "realpath") and home and resolved)
+    set canonical to ptr_to_str(resolved)
+    free_bytes(resolved)
+    if code == 0 || string_length(canonical) > 900:
+        return backup_check_error("Cannot resolve restore directory")
+    set dir to native_open(canonical and 17826048 and 0)
+    if dir < 0:
+        return backup_check_error("Cannot open restore directory")
+    set guard to snapshot_read_hex(dir and "recovery.guard")
+    set result to backup_check_error("Valid independent recovery authority is required")
+    if guard != "":
+        set expected to concat(identifier and concat("\n" and concat(guard and "\n")))
+        set marker to restore_read(dir and ".restore.pending" and 98 and 1)
+        set info to alloc_bytes(144)
+        set code to ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and ".restore.pending" and info and 32)
+        set absent to code != 0 && transport_errno(libc) == 2
+        free_bytes(info)
+        set pending to 0
+        if absent == 0:
+            set pending to 1
+        if pending == 1 && string_equals(marker and expected) == 0:
+            set result to backup_check_error("Interrupted restore intent is invalid or belongs to another backup or recovery generation")
+        else if operation == "finish":
+            if pending == 0:
+                set result to backup_check_error("No restore intent to finalize")
+            else:
+                set result to restore_finish(canonical and dir and identifier)
+        else:
+            set result to restore_stage(canonical and dir and identifier and guard and expected and pending)
+    ep_dlcall1(ep_dlsym(libc and "close") and dir)
+    return result

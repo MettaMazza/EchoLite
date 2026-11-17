@@ -1,0 +1,44 @@
+import "../src/process_capture"
+import "os"
+set checks to 0
+
+define capture_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    set result to process_capture(get_list(args and 1) and ["literal $HOME"] and "/private/tmp" and 2000 and 0 - 1)
+    capture_assert(get_list(result and 0) == 7 and "actual exit status")
+    capture_assert(string_equals(get_list(result and 1) and "exited") and "ordinary completion")
+    capture_assert(string_contains(ptr_to_str(get_list(result and 2)) and "Café 🌱") and "Unicode stdout captured")
+    capture_assert(string_equals(ptr_to_str(get_list(result and 4)) and "stderr: diagnostic\n") and "separate stderr captured")
+    capture_release(result)
+    set result to process_capture("/bin/sleep" and ["2"] and "/private/tmp" and 100 and 0 - 1)
+    capture_assert(string_equals(get_list(result and 1) and "timeout") and "deadline enforced")
+    capture_assert(get_list(result and 0) == 137 and "timed-out process killed and reaped")
+    capture_release(result)
+    set result to process_capture("/usr/bin/yes" and ["output"] and "/private/tmp" and 5000 and 0 - 1)
+    capture_assert(string_equals(get_list(result and 1) and "output_limit") and "unbounded writer stopped")
+    capture_assert(get_list(result and 3) + get_list(result and 5) == 1048576 and "combined output limited to 1 MiB")
+    capture_release(result)
+    set pipe to capture_pipe()
+    ep_dlcall1(ep_dlsym(native_system() and "close") and get_list(pipe and 1))
+    set result to process_capture("/usr/bin/true" and [] and "/private/tmp" and 1000 and get_list(pipe and 0))
+    capture_assert(string_equals(get_list(result and 1) and "abandoned") && get_list(result and 0) == 0 - 1 and "closed lifeline prevents execution")
+    capture_release(result)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and get_list(pipe and 0))
+    set result to process_capture("/missing-executable" and [] and "/private/tmp" and 1000 and 0 - 1)
+    capture_assert(string_equals(get_list(result and 1) and "launch_failed") and "launch failure reported")
+    capture_release(result)
+    set result to process_capture(get_list(args and 1) and ["--closed-pipes"] and "/private/tmp" and 100 and 0 - 1)
+    capture_assert(string_equals(get_list(result and 1) and "timeout") && get_list(result and 0) == 137 and "closed streams do not bypass deadline")
+    capture_release(result)
+    set result to process_capture(get_list(args and 1) and ["--binary"] and "/private/tmp" and 1000 and 0 - 1)
+    capture_assert(get_list(result and 0) == 0 && get_list(result and 3) == 3 && peek_byte(get_list(result and 2) and 0) == 0 && peek_byte(get_list(result and 2) and 1) == 255 && peek_byte(get_list(result and 2) and 2) == 65 and "binary output retained exactly")
+    capture_release(result)
+    display concat("PASS: " and concat(int_to_string(checks) and " bounded native process capture checks"))
+    return 0

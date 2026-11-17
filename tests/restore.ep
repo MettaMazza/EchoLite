@@ -1,0 +1,95 @@
+import "../src/restore"
+import "../src/native_process"
+set checks to 0
+
+define restore_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define restore_command with core and home and arguments:
+    set log to private_lock(home and "journey.log")
+    if log < 0:
+        return 0 - 2
+    native_fcntl_int(log and 4 and 8)
+    set pid to process_launch(core and arguments and log)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and log)
+    if pid == 0:
+        return 0 - 2
+    set deadline to transport_now(native_system()) + 20000
+    set code to process_poll(pid)
+    repeat while code == 0 - 1 && transport_now(native_system()) < deadline:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 10000)
+        set code to process_poll(pid)
+    return code
+
+define restore_count with home:
+    set db to backup_sql_open(concat(home and "/memory.sqlite3") and 16777217)
+    if db == 0:
+        return "error"
+    set result to health_scalar(db and "SELECT count(*) FROM memories" and 32)
+    sql_close(db)
+    return result
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: restore EMPTY_STATE CORE_EXECUTABLE"
+        return 1
+    set home to get_list(args and 1)
+    set core to get_list(args and 2)
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_TEST_FAULT" and "")
+    restore_assert(restore_command(core and home and ["init"]) == 0 and "native state initialized")
+    restore_assert(restore_command(core and home and ["remember","semantic","restore-test","user","Original memory"]) == 0 and "original memory retained")
+    set identity to concat(home and "/identity.txt")
+    write_file(identity and "I am EchoLite. This is my saved local identity.")
+    restore_assert(restore_command(core and home and ["me-set",identity,"restore test","1"]) == 0 and "saved Me version")
+    set identifier to "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    restore_assert(string_contains(backup_create(home and identifier) and "\"status\":\"ok\"") and "EP snapshot created")
+    restore_assert(restore_command(core and home and ["remember","semantic","restore-test","user","Later memory"]) == 0 and "later memory retained")
+    restore_assert(restore_command(core and home and ["backup-restore",identifier]) == 0 and "actual restore command")
+    restore_assert(restore_count(home) == "1" and "later memory removed by restore")
+    restore_assert(string_equals(read_file(concat(home and "/Me.txt")) and read_file(identity)) and "Me projection restored")
+    set faults to ["restore_before_intent","restore_after_intent","restore_after_sidecars","restore_after_publish","restore_before_clear"]
+    set i to 0
+    repeat while i < length_list(faults):
+        restore_assert(restore_command(core and home and ["remember","semantic","restore-test","user","Post-snapshot record"]) == 0 and "pre-crash live state changed")
+        set_env("ECHOLITE_TEST_FAULT" and get_list(faults and i))
+        set code to restore_command(core and home and ["backup-restore",identifier])
+        set_env("ECHOLITE_TEST_FAULT" and "")
+        restore_assert(code == 84 + i and concat("crash boundary: " and get_list(faults and i)))
+        if i == 0:
+            restore_assert(file_exists(concat(home and "/.restore.pending")) == 0 and "pre-intent crash leaves no active marker")
+            restore_assert(restore_count(home) == "2" and "pre-intent crash retains live state")
+        else:
+            restore_assert(file_exists(concat(home and "/.restore.pending")) and "durable marker survives crash")
+            restore_assert(restore_command(core and home and ["status"]) != 0 and "ordinary commands blocked during recovery")
+            restore_assert(restore_command(core and home and ["backup-restore","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]) != 0 and "wrong restore cannot replace pending intent")
+        restore_assert(restore_command(core and home and ["backup-restore",identifier]) == 0 and "same-backup restart completes")
+        restore_assert(file_exists(concat(home and "/.restore.pending")) == 0 and "successful recovery clears marker")
+        restore_assert(restore_count(home) == "1" and "recovered memory matches snapshot")
+        restore_assert(string_equals(read_file(concat(home and "/Me.txt")) and read_file(identity)) and "recovered Me matches authoritative version")
+        set i to i + 1
+    write_file(concat(home and "/memory.sqlite3") and "Corrupt live database fixture")
+    restore_assert(restore_command(core and home and ["backup-restore",identifier]) == 0 and "valid backup recovers a corrupt live database")
+    restore_assert(restore_count(home) == "1" and "corrupt-state recovery preserves snapshot memory")
+    restore_assert(string_contains(restore_state(home and "stage" and identifier) and "\"status\":\"ok\"") and "direct staged finalization fixture")
+    write_file(concat(home and "/Me.txt") and "Incorrect identity projection")
+    restore_assert(string_contains(restore_state(home and "finish" and identifier) and "finalization failed") and "mismatched Me prevents finalization")
+    restore_assert(file_exists(concat(home and "/.restore.pending")) and "identity failure keeps recovery marker")
+    restore_assert(restore_command(core and home and ["backup-restore",identifier]) == 0 and "same-backup recovery repairs identity and finalizes")
+    set libc to native_system()
+    set original to concat(home and "/Me.original")
+    set me to concat(home and "/Me.txt")
+    rename_file(me and original)
+    restore_assert(ep_dlcall2(ep_dlsym(libc and "symlink") and original and me) == 0 and "unsafe live projection fixture")
+    restore_assert(restore_command(core and home and ["backup-restore",identifier]) != 0 and "unsafe live paths refused")
+    restore_assert(string_equals(read_file(original) and read_file(identity)) and "unsafe target unchanged")
+    ep_dlcall1(ep_dlsym(libc and "unlink") and me)
+    rename_file(original and me)
+    restore_assert(restore_command(core and home and ["doctor"]) == 0 and "final state health")
+    display concat("PASS: " and concat(int_to_string(checks) and " EP restore journey checks"))
+    return 0

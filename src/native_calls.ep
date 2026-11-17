@@ -1,0 +1,79 @@
+# Typed variadic operating-system calls for Apple Silicon, expressed in EP.
+# macOS ARM64 places variadic arguments differently from fixed arguments.
+external define get_list_data_ptr with list returning Int
+set NATIVE_SYSTEM to 0
+set NATIVE_VARIADIC_FFI to 0
+
+define native_system:
+    if NATIVE_SYSTEM == 0:
+        set NATIVE_SYSTEM to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    return NATIVE_SYSTEM
+
+define native_bytes_write with pointer and offset and value and count:
+    set number to value
+    set i to 0
+    repeat while i < count:
+        poke_byte(pointer and offset + i and number % 256)
+        set number to number / 256
+        set i to i + 1
+    return 0
+
+define native_variadic_int with function and fixed_count and arguments and kinds:
+    if NATIVE_VARIADIC_FFI == 0:
+        set NATIVE_VARIADIC_FFI to ep_dlopen("/usr/lib/libffi.dylib")
+    if NATIVE_VARIADIC_FFI == 0 || function == 0:
+        return 0 - 1
+    set count to length_list(arguments)
+    if count != length_list(kinds):
+        return 0 - 1
+    set cif to alloc_bytes(256)
+    set types to alloc_bytes(count * 8)
+    set values to alloc_bytes(count * 8)
+    set pointers to alloc_bytes(count * 8)
+    set result to alloc_bytes(8)
+    set int_type to ep_dlsym(NATIVE_VARIADIC_FFI and "ffi_type_sint32")
+    set pointer_type to ep_dlsym(NATIVE_VARIADIC_FFI and "ffi_type_pointer")
+    set i to 0
+    repeat while i < count:
+        set kind to get_list(kinds and i)
+        set type to int_type
+        set value to get_list(arguments and i)
+        set width to 4
+        if kind == 1:
+            set type to pointer_type
+            set width to 8
+        else if kind == 2:
+            set type to ep_dlsym(NATIVE_VARIADIC_FFI and "ffi_type_sint64")
+            set width to 8
+        else if value < 0:
+            set value to value + 4294967296
+        native_bytes_write(types and i * 8 and type and 8)
+        native_bytes_write(values and i * 8 and value and width)
+        native_bytes_write(pointers and i * 8 and values + i * 8 and 8)
+        set i to i + 1
+    set prep to ep_dlsym(NATIVE_VARIADIC_FFI and "ffi_prep_cif_var")
+    set status to ep_dlcall6(prep and cif and 1 and fixed_count and count and int_type and types)
+    set code to 0 - 1
+    if status == 0:
+        ep_dlcall4(ep_dlsym(NATIVE_VARIADIC_FFI and "ffi_call") and cif and function and result and pointers)
+        set code to peek_byte(result and 0) + peek_byte(result and 1) * 256 + peek_byte(result and 2) * 65536 + peek_byte(result and 3) * 16777216
+        if code >= 2147483648:
+            set code to code - 4294967296
+    free_bytes(result)
+    free_bytes(pointers)
+    free_bytes(values)
+    free_bytes(types)
+    free_bytes(cif)
+    return code
+
+define native_open with path and flags and mode:
+    set function to ep_dlsym(native_system() and "open")
+    return native_variadic_int(function and 2 and [str_to_ptr(path),flags,mode] and [1,0,0])
+
+define native_openat with directory and path and flags and mode:
+    set function to ep_dlsym(native_system() and "openat")
+    return native_variadic_int(function and 3 and [directory,str_to_ptr(path),flags,mode] and [0,1,0,0])
+
+define native_fcntl_int with descriptor and command and argument:
+    set function to ep_dlsym(native_system() and "fcntl")
+    return native_variadic_int(function and 2 and [descriptor,command,argument] and [0,0,0])

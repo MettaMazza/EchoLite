@@ -1,0 +1,89 @@
+# Model-based local embeddings and token counts, with persistent exact caching.
+import "transport"
+import "result_cache"
+set EMBEDDING_NAMESPACE to "minilm-7266519c-b12359-f16-mean-l2-ep1"
+
+define embedding_valid with db and vector:
+    set valid to result_cache_scalar(db and "SELECT json_valid(?)" and [vector])
+    if valid != "1":
+        return 0
+    set valid to result_cache_scalar(db and "SELECT json_type(?)='array' AND json_array_length(?)=384 AND (SELECT count(*) FROM json_each(?) WHERE type NOT IN ('integer','real'))=0 AND (SELECT sum(value*value) FROM json_each(?)) BETWEEN 0.999 AND 1.001" and [vector,vector,vector,vector])
+    return valid == "1"
+
+define embedding_tokens with db and token and text and epoch returning Str:
+    set namespace to concat(EMBEDDING_NAMESPACE and ":tokens")
+    set cached to result_cache_get(db and namespace and text and epoch)
+    if cached != "":
+        return cached
+    set payload to result_cache_scalar(db and "SELECT json_object('content',?,'add_special',json('true'))" and [text])
+    set response to transport_post(8401 and "/tokenize" and token and payload and 0 and 0)
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [response]) != "1":
+        return result_cache_error("Invalid local tokenizer response")
+    if result_cache_scalar(db and "SELECT json_type(?,'$.tokens')" and [response]) != "array":
+        return result_cache_error(concat("Local tokenizer failed: " and response))
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','text','','tokens',json_extract(?,'$.tokens'),'count',json_array_length(?,'$.tokens'))" and [response,response])
+    return result_cache_put(db and namespace and text and epoch and result)
+
+define embedding_vector with db and token and text and epoch returning Str:
+    set namespace to concat(EMBEDDING_NAMESPACE and ":vector")
+    set cached to result_cache_get(db and namespace and text and epoch)
+    if cached != "":
+        set vector to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.vector'),'')" and [cached])
+        if embedding_valid(db and vector):
+            return cached
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [cached]) != "ok":
+            return cached
+        sql_execute_params(db and "DELETE FROM response_cache WHERE key=?" and [result_cache_key(db and namespace and text)])
+    set tokens to embedding_tokens(db and token and text and epoch)
+    set count to result_cache_scalar(db and "SELECT CASE WHEN json_extract(?,'$.status')='ok' THEN json_extract(?,'$.count') ELSE -1 END" and [tokens,tokens])
+    if count == "" || string_to_int(count) < 0 || string_to_int(count) > 256:
+        return result_cache_error("Embedding window must contain at most 256 tokens")
+    set payload to result_cache_scalar(db and "SELECT json_object('input',?,'encoding_format','float')" and [text])
+    set response to transport_post(8401 and "/v1/embeddings" and token and payload and 0 and 0)
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [response]) != "1":
+        return result_cache_error("Invalid local embedding response")
+    set vector to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.data[0].embedding'),'')" and [response])
+    if embedding_valid(db and vector) == 0:
+        return result_cache_error(concat("Invalid local embedding vector: " and response))
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','text','','vector',json(?),'tokens',CAST(? AS INTEGER))" and [vector,count])
+    return result_cache_put(db and namespace and text and epoch and result)
+
+define embedding_boundary with text and index:
+    set boundary to index
+    if boundary >= string_length(text):
+        return string_length(text)
+    repeat while boundary > 0 && get_character(text and boundary) >= 128 && get_character(text and boundary) <= 191:
+        set boundary to boundary - 1
+    return boundary
+
+# Windows cover the entire original text. Counts come from the actual tokenizer.
+# Each row is start byte, end byte, original text; no reconstructed quotations.
+define embedding_windows with db and token and text and epoch:
+    set windows to create_list()
+    set start to 0
+    set finished to 0
+    repeat while finished == 0:
+        set end to embedding_boundary(text and start + 1024)
+        set piece to substring(text and start and end - start)
+        set ready to 0
+        repeat while ready == 0:
+            set response to embedding_tokens(db and token and piece and epoch)
+            if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [response]) != "ok":
+                return create_list()
+            set count to string_to_int(result_cache_scalar(db and "SELECT json_extract(?,'$.count')" and [response]))
+            if count <= 256:
+                set ready to 1
+            else:
+                set end to embedding_boundary(text and start + (end - start) / 2)
+                if end <= start:
+                    return create_list()
+                set piece to substring(text and start and end - start)
+        append_list(windows and [int_to_string(start),int_to_string(end),piece])
+        if end == string_length(text):
+            set finished to 1
+        else:
+            set next to embedding_boundary(text and end - 128)
+            if next <= start:
+                set next to end
+            set start to next
+    return windows

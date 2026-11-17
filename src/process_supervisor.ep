@@ -1,0 +1,49 @@
+# Independent EP execution supervisor. Pipe EOF cancels the owned command group.
+import "process_capture"
+import "process_journal"
+import "process_receipt"
+import "fs"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 6:
+        return 1
+    set database to get_list(args and 1)
+    set expression to get_list(args and 2)
+    set epoch to get_list(args and 3)
+    set operation to get_list(args and 4)
+    set lifeline to transport_number(get_list(args and 5) and 10 and 1048576)
+    if lifeline < 3 || native_fcntl_int(lifeline and 2 and 1) != 0 || native_fcntl_int(lifeline and 4 and 4) != 0:
+        display process_journal_error("Invalid process supervisor lifeline")
+        return 1
+    set lease to state_lease(path_dirname(database) and "shared")
+    if string_contains(lease and "\"status\":\"ok\"") == 0:
+        display lease
+        return 1
+    set db to sql_open(database)
+    if db == 0:
+        return 1
+    sql_execute(db and "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;")
+    set claim to process_claim(db and expression and epoch and operation)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [claim]) != "claimed":
+        display claim
+        sql_close(db)
+        return 0
+    set rows to sql_query_params(db and "SELECT value FROM json_each(?,'$.argv') ORDER BY CAST(key AS INTEGER)" and [expression])
+    set executable to get_list(get_list(rows and 0) and 0)
+    set arguments to create_list()
+    set i to 1
+    repeat while i < length_list(rows):
+        append_list(arguments and get_list(get_list(rows and i) and 0))
+        set i to i + 1
+    set directory to result_cache_scalar(db and "SELECT json_extract(?,'$.cwd')" and [expression])
+    set timeout to string_to_int(result_cache_scalar(db and "SELECT json_extract(?,'$.timeout_seconds')" and [expression])) * 1000
+    set started to transport_now(native_system())
+    set capture to process_capture(executable and arguments and directory and timeout and lifeline)
+    set receipt to process_receipt(db and operation and expression and capture and transport_now(native_system()) - started)
+    set result to process_finish(db and epoch and operation and receipt and capture)
+    capture_release(capture)
+    display result
+    sql_close(db)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and lifeline)
+    return 0

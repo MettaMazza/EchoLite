@@ -1,0 +1,45 @@
+# Atomic correction of durable notes. History remains, passive recall sees active notes.
+import "result_cache"
+
+define correction_schema with db:
+    return sql_execute(db and "CREATE TABLE IF NOT EXISTS memory_corrections(prior INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,replacement INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,source INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,reason TEXT NOT NULL,created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE INDEX IF NOT EXISTS corrections_replacement ON memory_corrections(replacement);")
+
+define correction_error with db and message returning Str:
+    set params to [message]
+    return result_cache_scalar(db and "SELECT json_object('status','ok','tool','memory_correct','outcome','failed','text',?)" and params)
+
+define correction_abort with db and message returning Str:
+    sql_execute(db and "ROLLBACK TO memory_correction; RELEASE memory_correction;")
+    return correction_error(db and message)
+
+define memory_correct with db and project and expression and request returning Str:
+    if string_contains(expression and "\u0000") || result_cache_scalar(db and "SELECT json_valid(?)" and [expression]) != "1":
+        return correction_error(db and "Invalid correction arguments")
+    set valid to result_cache_scalar(db and "SELECT json_type(?)='object' AND (SELECT count(*) FROM json_each(?))=3 AND (SELECT count(DISTINCT key) FROM json_each(?))=3 AND json_type(?,'$.note_id')='text' AND length(json_extract(?,'$.note_id')) BETWEEN 1 AND 18 AND json_extract(?,'$.note_id') NOT GLOB '*[^0-9]*' AND CAST(json_extract(?,'$.note_id') AS INTEGER)>0 AND json_type(?,'$.text')='text' AND length(trim(json_extract(?,'$.text')))>0 AND length(CAST(json_extract(?,'$.text') AS BLOB))<=2000 AND json_type(?,'$.reason')='text' AND length(trim(json_extract(?,'$.reason')))>0 AND length(CAST(json_extract(?,'$.reason') AS BLOB))<=400" and [expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression,expression])
+    if valid != "1":
+        return correction_error(db and "Use note_id, replacement text up to 2000 bytes, and a reason up to 400 bytes")
+    set prior to result_cache_scalar(db and "SELECT json_extract(?,'$.note_id')" and [expression])
+    set text to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [expression])
+    set reason to result_cache_scalar(db and "SELECT json_extract(?,'$.reason')" and [expression])
+    if sql_execute(db and "SAVEPOINT memory_correction") != 0:
+        return correction_error(db and "Cannot acquire correction transaction")
+    set layer to result_cache_scalar(db and "SELECT layer FROM memories WHERE id=? AND project=? AND status='active' AND layer IN ('semantic','procedural')" and [prior,project])
+    if layer == "":
+        return correction_abort(db and "Use notes[].note_id from memory search/open, not the receipt memory_id. The target must be an active semantic or procedural note in this project.")
+    if result_cache_scalar(db and "SELECT count(*) FROM memories WHERE id=? AND project=? AND source='tool-request' AND status='active'" and [request,project]) != "1":
+        return correction_abort(db and "Correction requires this project's recorded tool request")
+    if result_cache_scalar(db and "SELECT count(*) FROM memories WHERE id=? AND (body=? OR body='Model-authored note; not independently verified: '||? OR body='Model-authored correction; not independently verified: '||?)" and [prior,text,text,text]) == "1":
+        return correction_abort(db and "The wording is unchanged. Use memory_assess to change belief state or dates while retaining the original note; read beliefs[] for its current revision.")
+    set body to concat("Model-authored correction; not independently verified: " and text)
+    if sql_execute_params(db and "INSERT INTO memories(layer,project,source,body) VALUES(?,?,'agent-correction-unverified',?)" and [layer,project,body]) != 101:
+        return correction_abort(db and "Cannot save replacement note")
+    set replacement to result_cache_scalar(db and "SELECT last_insert_rowid()" and [])
+    if sql_execute_params(db and "INSERT INTO derivations(parent,child) VALUES(?,?)" and [request,replacement]) != 101:
+        return correction_abort(db and "Cannot link correction evidence")
+    if sql_execute_params(db and "INSERT INTO memory_corrections(prior,replacement,source,reason) VALUES(?,?,?,?)" and [prior,replacement,request,reason]) != 101:
+        return correction_abort(db and "Cannot retain correction history")
+    if sql_execute_params(db and "UPDATE memories SET status='superseded' WHERE id=? AND project=? AND status='active'" and [prior,project]) != 101:
+        return correction_abort(db and "Cannot supersede the prior note")
+    if sql_execute(db and "RELEASE memory_correction") != 0:
+        return correction_abort(db and "Cannot finish correction")
+    return result_cache_scalar(db and "SELECT json_object('status','ok','tool','memory_correct','outcome','completed','prior_memory_id',?,'note_memory_id',?,'layer',?,'authorship','model','verification','unverified','text','Saved the correction. The prior note remains historical and is excluded from active recall. This receipt confirms storage, not independent verification.')" and [prior,replacement,layer])

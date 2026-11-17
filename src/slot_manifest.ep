@@ -1,0 +1,122 @@
+# Small durable manifests; model bytes stay in native slot files, not EP memory.
+import "slot_cache"
+import "snapshot_seal"
+import "recovery_guard"
+
+define slot_binding with db and home and namespace and epoch returning Str:
+    if result_cache_epoch(db and epoch) == 0 || namespace == "":
+        return ""
+    set resolved to alloc_bytes(1024)
+    set rc to ep_dlcall2(ep_dlsym(native_system() and "realpath") and home and resolved)
+    set canonical to ""
+    if rc != 0:
+        set canonical to ptr_to_str(resolved)
+    free_bytes(resolved)
+    if canonical == "":
+        return ""
+    set guard to recovery_guard(home and 0)
+    if snapshot_hex(guard and 64) == 0:
+        return ""
+    return sha256(result_cache_scalar(db and "SELECT json_array(?,?,?,?)" and [canonical,guard,namespace,epoch]))
+
+define slot_manifest_decode with db and manifest and binding returning Str:
+    if binding == "" || string_length(manifest) > 2048 || result_cache_scalar(db and "SELECT json_valid(?)" and [manifest]) != "1":
+        return ""
+    set valid to result_cache_scalar(db and "SELECT json_extract(?,'$.version')=1 AND json_extract(?,'$.binding')=? AND json_type(?,'$.tokens')='integer' AND json_extract(?,'$.tokens') BETWEEN 0 AND 262144 AND json_type(?,'$.bytes')='integer' AND json_extract(?,'$.bytes') BETWEEN 1 AND 8589934592" and [manifest,manifest,binding,manifest,manifest,manifest,manifest])
+    if valid != "1":
+        return ""
+    set filename to result_cache_scalar(db and "SELECT json_extract(?,'$.filename')" and [manifest])
+    set digest to result_cache_scalar(db and "SELECT json_extract(?,'$.sha256')" and [manifest])
+    if slot_filename(filename) == 0 || snapshot_hex(digest and 64) == 0:
+        return ""
+    return manifest
+
+define slot_file_size with directory and filename:
+    if slot_filename(filename) == 0:
+        return 0 - 1
+    set fd to native_openat(directory and filename and 16777476 and 0)
+    if fd < 0:
+        return 0 - 1
+    set info to alloc_bytes(144)
+    set size to 0 - 1
+    if snapshot_private(fd and info):
+        set size to lease_integer(info and 96 and 8)
+        if size < 1 || size > 8589934592:
+            set size to 0 - 1
+        else if ep_dlcall1(ep_dlsym(native_system() and "fsync") and fd) != 0:
+            set size to 0 - 1
+    free_bytes(info)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    return size
+
+# The native server inherits its own umask. Tighten its newly written file
+# through a no-follow descriptor before hashing or publishing the manifest.
+define slot_file_secure with directory and filename:
+    if slot_filename(filename) == 0:
+        return 0
+    set fd to native_openat(directory and filename and 16777476 and 0)
+    if fd < 0:
+        return 0
+    set info to alloc_bytes(144)
+    set valid to ep_dlcall2(ep_dlsym(native_system() and "fstat") and fd and info) == 0
+    if valid:
+        set valid to lease_integer(info and 4 and 2) / 4096 == 8 && lease_integer(info and 6 and 2) == 1 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(native_system() and "getuid"))
+    if valid:
+        set valid to ep_dlcall2(ep_dlsym(native_system() and "fchmod") and fd and 384) == 0
+    free_bytes(info)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    return valid
+
+# Caller holds the global runtime lease across native save and publication.
+define slot_manifest_publish with db and home and directory and namespace and epoch and binding and receipt returning Str:
+    if string_equals(slot_binding(db and home and namespace and epoch) and binding) == 0 || binding == "":
+        return lease_error("Slot snapshot identity changed")
+    set filename to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.filename') ELSE '' END" and [receipt,receipt])
+    set checked to slot_receipt(db and "save" and filename and receipt)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [checked]) != "ok":
+        return checked
+    if slot_file_secure(directory and filename) == 0:
+        return lease_error("Cannot secure native slot snapshot")
+    set size to slot_file_size(directory and filename)
+    if size < 1 || string_equals(int_to_string(size) and result_cache_scalar(db and "SELECT CAST(json_extract(?,'$.n_written') AS TEXT)" and [checked])) == 0:
+        return lease_error("Slot snapshot size or private file identity is invalid")
+    set digest to snapshot_hash(directory and filename)
+    if digest == "" || ep_dlcall1(ep_dlsym(native_system() and "fsync") and directory) != 0:
+        return lease_error("Cannot seal durable slot snapshot")
+    set manifest to result_cache_scalar(db and "SELECT json_object('version',1,'binding',?,'filename',?,'sha256',?,'tokens',json_extract(?,'$.n_saved'),'bytes',CAST(? AS INTEGER))" and [binding,filename,digest,checked,int_to_string(size)])
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return lease_error("Cannot publish slot snapshot")
+    if string_equals(slot_binding(db and home and namespace and epoch) and binding) == 0:
+        sql_execute(db and "ROLLBACK")
+        return lease_error("Slot snapshot identity changed during publication")
+    set params to [namespace,epoch,manifest,sha256(manifest),int_to_string(string_length(manifest))]
+    if sql_execute_params(db and "INSERT OR REPLACE INTO prompt_cache(namespace,epoch,name,payload,digest,bytes,used) VALUES(?,?,'native-slot-v1',?,?,?,CAST(strftime('%s','now') AS INTEGER))" and params) != 101 || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return lease_error("Cannot commit slot snapshot manifest")
+    return result_cache_scalar(db and "SELECT json_set(?,'$.status','ok')" and [manifest])
+
+# Reject stale or damaged data before any native restore call.
+define slot_manifest_load with db and home and directory and namespace and epoch returning Str:
+    set binding to slot_binding(db and home and namespace and epoch)
+    if binding == "":
+        return ""
+    set rows to sql_query_params(db and "SELECT payload,digest FROM prompt_cache WHERE namespace=? AND epoch=? AND name='native-slot-v1'" and [namespace,epoch])
+    if length_list(rows) != 1:
+        return ""
+    set row to get_list(rows and 0)
+    set manifest to get_list(row and 0)
+    if string_equals(sha256(manifest) and get_list(row and 1)) == 0:
+        return ""
+    set manifest to slot_manifest_decode(db and manifest and binding)
+    if manifest == "":
+        return ""
+    set filename to result_cache_scalar(db and "SELECT json_extract(?,'$.filename')" and [manifest])
+    set size to slot_file_size(directory and filename)
+    if string_equals(int_to_string(size) and result_cache_scalar(db and "SELECT CAST(json_extract(?,'$.bytes') AS TEXT)" and [manifest])) == 0:
+        return ""
+    set digest to snapshot_hash(directory and filename)
+    if digest == "" || string_equals(digest and result_cache_scalar(db and "SELECT json_extract(?,'$.sha256')" and [manifest])) == 0:
+        return ""
+    if string_equals(slot_binding(db and home and namespace and epoch) and binding) == 0:
+        return ""
+    return manifest

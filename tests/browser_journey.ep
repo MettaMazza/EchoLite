@@ -1,0 +1,66 @@
+# Actual Safari session through the compiled EP CLI. Only a local test page.
+import "../src/browser_wire"
+import "fs"
+import "os"
+set checks to 0
+set failures to 0
+set receipts to ""
+
+define browser_check with valid and label:
+    set checks to checks + 1
+    if valid == 0:
+        set failures to failures + 1
+        display concat("FAIL: " and label)
+    return 0
+
+define browser_call with db and client and arguments returning Str:
+    set captured to process_capture(client and arguments and "/private/tmp" and 20000 and 0 - 1)
+    set output to get_list(process_display(get_list(captured and 2) and get_list(captured and 3) and 1) and 0)
+    set receipts to concat(receipts and concat(output and "\n"))
+    capture_release(captured)
+    return output
+
+define main:
+    set args to get_args()
+    if length_list(args) != 5:
+        display "Usage: browser_journey CLIENT SESSION_RECEIPT NEW_FIXTURE OUTPUT_LOG"
+        return 1
+    set client to get_list(args and 1)
+    set fixture to get_list(args and 3)
+    set db to sql_open(":memory:")
+    set session to result_cache_scalar(db and "SELECT json_extract(?,'$.value.sessionId')" and [read_file(get_list(args and 2))])
+    if session == "":
+        return 1
+    set_env("ECHOLITE_NETWORK_MODE" and "connected")
+    set page to "<!doctype html><meta charset='utf-8'><title>EchoLite Browser Fixture</title><h1>Local browser interaction</h1><label for='entry'>Test value</label><input id='entry'><button id='apply' onclick=\"document.getElementById('result').textContent='Saved '+document.getElementById('entry').value\">Apply</button><p id='result'>Not submitted</p><a href='#result'>Result</a>"
+    browser_check(file_exists(fixture) == 0 and "fixture path is unused")
+    if failures == 0:
+        browser_check(write_file(fixture and page) == 1 and "EP writes local test content")
+        set navigation to browser_call(db and client and ["navigate",session,concat("file://" and fixture)])
+        browser_check(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [navigation]) == "completed" and "navigate local page")
+        set found to browser_call(db and client and ["find",session,"#entry"])
+        set input_id to result_cache_scalar(db and "SELECT json_extract(?,'$.value.\"element-6066-11e4-a52e-4f735466cecf\"')" and [found])
+        browser_check(input_id != "" and "observed input handle")
+        set typed to browser_call(db and client and ["type",session,input_id,"MINT-731 café"])
+        browser_check(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [typed]) == "completed" and "type Unicode text")
+        set found to browser_call(db and client and ["find",session,"#apply"])
+        set button_id to result_cache_scalar(db and "SELECT json_extract(?,'$.value.\"element-6066-11e4-a52e-4f735466cecf\"')" and [found])
+        browser_check(button_id != "" and "observed button handle")
+        set clicked to browser_call(db and client and ["click",session,button_id])
+        browser_check(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [clicked]) == "completed" and "click applies page interaction")
+        set snapshot to browser_call(db and client and ["read",session,"0"])
+        browser_check(result_cache_scalar(db and "SELECT json_extract(?,'$.value.title')" and [snapshot]) == "EchoLite Browser Fixture" and "live page title returned")
+        browser_check(string_contains(result_cache_scalar(db and "SELECT json_extract(?,'$.value.text')" and [snapshot]) and "Saved MINT-731 café") and "page script observed typed text and click")
+        browser_check(result_cache_scalar(db and "SELECT json_array_length(?,'$.value.links')" and [snapshot]) == "1" and "page link discovered")
+        set location to browser_call(db and client and ["url",session])
+        browser_check(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.value')" and [location]) and concat("file://" and fixture)) and "actual browser URL verified")
+        set missing to browser_call(db and client and ["find",session,"#missing"])
+        browser_check(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [missing]) == "failed" and "missing element is an honest failed result")
+    set closed to browser_call(db and client and ["close",session])
+    browser_check(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [closed]) == "completed" and "only automation session closed")
+    write_file(get_list(args and 4) and receipts)
+    sql_close(db)
+    if failures > 0:
+        return 1
+    display concat("PASS: " and concat(int_to_string(checks) and " actual EP Safari workflow checks"))
+    return 0

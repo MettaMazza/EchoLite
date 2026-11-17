@@ -1,0 +1,23 @@
+{
+  "runtime": {
+    "name": "llama.cpp",
+    "release": "b12359",
+    "platform": "macos-arm64",
+    "archive_sha256": "82b00abc740160e1b9980e6cc79c117345fa34af058c80e6c0a69aa8ddccde75",
+    "executable": "models/runtime/llama-b12359/llama-server"
+  },
+  "model": {
+    "repository": "ggml-org/Qwen3.5-4B-GGUF",
+    "revision": "8d43d974efc48399cb58957ad49c8b26bf5a109c",
+    "file": "models/native/Qwen3.5-4B-Q4_K_M.gguf",
+    "sha256": "217002fa8008ef4fc6d548353a3aebef055a96e6ff8e0e2c0953ef8254a89c14",
+    "bytes": 3032091584,
+    "context_tokens": 262144
+  },
+  "vision_projector": {
+    "file": "models/native/mmproj-Qwen3.5-4B-Q8_0.gguf",
+    "sha256": "5a5ba634d46f9888599963bfc52194eadf099e1efdbee46d71957d911cf62654",
+    "bytes": 366894560
+  },
+  "integration": "Installed native EP integration; this manifest pins dependencies. Runtime arguments are defined by src/runtime_manager.ep."
+}

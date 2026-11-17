@@ -1,0 +1,128 @@
+# Native EP action protocol. Schemas also validate returned actions before dispatch.
+import "native_model"
+import "tool_catalog"
+import "process_journal"
+
+define action_field with name returning Str:
+    if name == "calculator":
+        return "expression"
+    if name == "me_update":
+        return "text"
+    return "query"
+
+define action_properties with name returning Str:
+    if name == "tool_select":
+        return "{\"group\":{\"enum\":[\"system\",\"documents\",\"memory\",\"tasks\"]}}"
+    if name == "process_run":
+        return "{\"argv\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"string\",\"maxLength\":4096}},\"cwd\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1024},\"timeout_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":60}}"
+    if name == "process_retry":
+        return "{\"operation_id\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":18,\"pattern\":\"^[1-9][0-9]{0,17}$\"},\"reason\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":400}}"
+    if name == "web_read":
+        return "{\"url\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":2048},\"offset\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":20000},\"refresh\":{\"type\":\"boolean\"}}"
+    if name == "pdf_read":
+        return "{\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1024},\"page\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1000},\"offset\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":20000}}"
+    if name == "docx_read":
+        return "{\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1024},\"offset\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":20000}}"
+    if name == "file_read":
+        return "{\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1024},\"offset\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":9007199254740992}}"
+    if name == "file_list":
+        return "{\"path\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1024},\"after\":{\"type\":\"string\",\"maxLength\":1024}}"
+
+    if name == "memory_assess":
+        return "{\"note_id\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":18},\"revision\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647},\"state\":{\"enum\":[\"tentative\",\"supported\",\"disputed\",\"superseded\",\"expired\"]},\"valid_from\":{\"type\":\"string\",\"maxLength\":20},\"valid_until\":{\"type\":\"string\",\"maxLength\":20},\"evidence_id\":{\"type\":\"string\",\"maxLength\":18},\"reason\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":400}}"
+    if name == "memory_correct":
+        return "{\"note_id\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":18},\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":2000},\"reason\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":400}}"
+    if name == "memory_note":
+        return "{\"layer\":{\"enum\":[\"semantic\",\"procedural\"]},\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":2000}}"
+    if name == "memory_compact":
+        return "{\"mode\":{\"enum\":[\"preview\",\"apply\"]},\"ids\":{\"type\":\"string\",\"minLength\":3,\"maxLength\":303},\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":1800},\"token\":{\"type\":\"string\",\"maxLength\":64}}"
+    if name == "task_schedule":
+        return "{\"task_id\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":18},\"revision\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647},\"delay_seconds\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":31536000}}"
+    if name == "schedule_cancel":
+        return "{\"schedule_id\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":18}}"
+    if name == "schedule_list":
+        return "{}"
+    if name == "task_create":
+        return "{\"objective\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":600},\"success_condition\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":600}}"
+    if name == "task_update":
+        return "{\"task_id\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":18},\"revision\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2147483647},\"status\":{\"enum\":[\"planned\",\"running\",\"waiting\",\"completed\",\"failed\",\"cancelled\"]},\"next_action\":{\"type\":\"string\",\"maxLength\":600},\"blocker\":{\"type\":\"string\",\"maxLength\":400},\"evidence_id\":{\"type\":\"string\",\"maxLength\":18}}"
+    return ""
+
+define action_schema with db and name returning Str:
+    set props to action_properties(name)
+    if props == "":
+        set maximum to "160"
+        if name == "calculator":
+            set maximum to "512"
+        if name == "me_update":
+            set maximum to "16000"
+        if name == "wikipedia":
+            set maximum to "1200"
+        set props to result_cache_scalar(db and "SELECT json_object(?,json_object('type','string','minLength',1,'maxLength',CAST(? AS INTEGER)))" and [action_field(name),maximum])
+    if name == "task_open":
+        set props to result_cache_scalar(db and "SELECT json_object('query',json_object('type','string','minLength',1,'maxLength',18,'pattern','^[0-9]{1,18}$'))" and [])
+    set props to result_cache_scalar(db and "SELECT json_patch(json_object('type',json_object('const','tool'),'name',json_object('const',?)),json(?))" and [name,props])
+    return result_cache_scalar(db and "SELECT json_object('type','object','properties',json(?),'required',json((SELECT json_group_array(key) FROM json_each(?))),'additionalProperties',json('false'))" and [props,props])
+
+define action_schemas with db and request returning Str:
+    # Only expose tools whose native execution path is connected. Further adapters
+    # are added here when their real native implementation is integrated.
+    set names to ["tool_select","process_run","process_retry","process_output","web_read","docx_read","pdf_read","wikipedia","file_read","file_list","calculator","dictionary","memory_search","memory_search_archived","memory_open","memory_lineage","memory_timeline","memory_sessions","memory_session","me_update","memory_note","memory_correct","memory_assess","memory_compact","task_create","task_update","task_open","task_schedule","schedule_cancel","schedule_list"]
+    set branches to "[]"
+    set allowed to result_cache_scalar(db and "SELECT CASE WHEN json_extract(?,'$.tool_required')='1' THEN '[]' ELSE (SELECT json_group_array(json_extract(value,'$[0]')) FROM json_each(?,'$.allowed_bases')) END" and [request,request])
+    if result_cache_scalar(db and "SELECT coalesce(json_array_length(?,'$.temporary_browser_sessions'),0)>0" and [request]) == "1":
+        set allowed to "[]"
+    if allowed != "[]":
+        set answer to result_cache_scalar(db and "SELECT json_object('type','object','properties',json_object('type',json_object('const','answer'),'basis',json_object('enum',json(?)),'text',json_object('type','string','minLength',1,'maxLength',6000)),'required',json('[\"type\",\"basis\",\"text\"]'),'additionalProperties',json('false'))" and [allowed])
+        set branches to result_cache_scalar(db and "SELECT json_insert(?,'$[#]',json(?))" and [branches,answer])
+    set remaining to result_cache_scalar(db and "SELECT CAST(json_extract(?,'$.tool_budget') AS INTEGER)>json_array_length(?,'$.tool_trace')" and [request,request])
+    if remaining == "1":
+        set i to 0
+        repeat while i < length_list(names):
+            set name to get_list(names and i)
+            set available to result_cache_scalar(db and "SELECT instr(','||COALESCE(json_extract(?,'$.unavailable_tools'),'')||',',','||?||',')=0" and [request,name])
+            if result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.scheduled_task_id'),'')" and [request]) != "" && (name == "task_create" || name == "task_schedule"):
+                set available to "0"
+            if available == "1" && tool_family_enabled(db and request and tool_family(name)):
+                set schema to action_schema(db and name)
+                set branches to result_cache_scalar(db and "SELECT json_insert(?,'$[#]',json(?))" and [branches,schema])
+            set i to i + 1
+    return result_cache_scalar(db and "SELECT json_object('anyOf',json(?))" and [branches])
+
+define action_validate with db and schema and action returning Str:
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [action]) != "1":
+        return "Action is not valid JSON"
+    if result_cache_scalar(db and "SELECT json_type(?)='object'" and [action]) != "1":
+        return "Action must be an object"
+    set branch to result_cache_scalar(db and "SELECT value FROM json_each(?,'$.anyOf') WHERE json_extract(value,'$.properties.type.const')=json_extract(?,'$.type') AND (json_extract(?,'$.type')='answer' OR json_extract(value,'$.properties.name.const')=json_extract(?,'$.name')) LIMIT 1" and [schema,action,action,action])
+    if branch == "":
+        return "Action is not allowed by the current turn budget"
+    set valid to result_cache_scalar(db and "SELECT (SELECT count(*) FROM json_each(?))=(SELECT count(*) FROM json_each(?,'$.properties')) AND NOT EXISTS(SELECT 1 FROM json_each(?,'$.properties') p LEFT JOIN json_each(?) a ON a.key=p.key WHERE a.key IS NULL OR (json_type(p.value,'$.const') IS NOT NULL AND (a.type!='text' OR a.value!=json_extract(p.value,'$.const'))) OR (json_type(p.value,'$.enum') IS NOT NULL AND (a.type!='text' OR a.value NOT IN(SELECT value FROM json_each(p.value,'$.enum')))) OR (json_extract(p.value,'$.type')='string' AND (a.type!='text' OR length(a.value)<COALESCE(json_extract(p.value,'$.minLength'),0) OR length(a.value)>COALESCE(json_extract(p.value,'$.maxLength'),1000000))) OR (json_extract(p.value,'$.type')='array' AND (a.type!='array' OR json_array_length(a.value)<json_extract(p.value,'$.minItems') OR json_array_length(a.value)>json_extract(p.value,'$.maxItems') OR EXISTS(SELECT 1 FROM json_each(a.value) item WHERE item.type!='text' OR length(item.value)>json_extract(p.value,'$.items.maxLength')))) OR (json_extract(p.value,'$.type')='boolean' AND a.type NOT IN ('true','false')) OR (json_extract(p.value,'$.type')='integer' AND (a.type!='integer' OR a.value<json_extract(p.value,'$.minimum') OR a.value>json_extract(p.value,'$.maximum')))) AND (SELECT count(*) FROM json_each(?))=(SELECT count(DISTINCT key) FROM json_each(?))" and [action,branch,branch,action,action,action])
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.name')='task_open' AND (length(json_extract(?,'$.query')) NOT BETWEEN 1 AND 18 OR json_extract(?,'$.query') GLOB '*[^0-9]*')" and [action,action,action]) == "1":
+        return "task_open requires a bare numeric task_id string"
+    if valid != "1":
+        return "Action fields do not match the tool schema"
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.name')" and [action]) == "process_run":
+        set command to result_cache_scalar(db and "SELECT json_remove(?,'$.type','$.name')" and [action])
+        if process_arguments(db and command) == 0:
+            return process_arguments_problem(db and command)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.name')" and [action]) == "process_retry":
+        set retry_request to result_cache_scalar(db and "SELECT json_remove(?,'$.type','$.name')" and [action])
+        if process_retry_request_valid(db and retry_request) == 0:
+            return "process_retry needs a canonical operation_id from output_ref and a nonblank reason"
+    return ""
+
+define action_decode with db and schema and action returning Str:
+    set problem to action_validate(db and schema and action)
+    if problem != "":
+        return result_cache_scalar(db and "SELECT json_object('status','ok','kind','retry','text',?)" and [problem])
+    set kind to result_cache_scalar(db and "SELECT json_extract(?,'$.type')" and [action])
+    if kind == "answer":
+        return result_cache_scalar(db and "SELECT json_object('status','ok','kind','answer','basis',json_extract(?,'$.basis'),'text',json_extract(?,'$.text'))" and [action,action])
+    set name to result_cache_scalar(db and "SELECT json_extract(?,'$.name')" and [action])
+    set expression to ""
+    if action_properties(name) != "":
+        set expression to result_cache_scalar(db and "SELECT json_remove(?,'$.type','$.name')" and [action])
+    else:
+        set expression to result_cache_scalar(db and "SELECT json_extract(?,'$.'||?)" and [action,action_field(name)])
+    return result_cache_scalar(db and "SELECT json_object('status','ok','kind','tool','tool',?,'expression',?)" and [name,expression])

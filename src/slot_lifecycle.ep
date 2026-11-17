@@ -1,0 +1,122 @@
+import "slot_manifest"
+
+# One retained native slot mirrors the one inference slot on this 8 GB machine.
+# Exact response caches remain independent and retain many prior requests.
+define slot_runtime_home returning Str:
+    set credential to get_env("ECHOLITE_NATIVE_TOKEN_FILE")
+    if credential == "":
+        return get_env("ECHOLITE_HOME")
+    return path_dirname(credential)
+
+define slot_directory with home:
+    set path to concat(home and "/native-slots")
+    if is_directory(path) == 0:
+        ep_dlcall2(ep_dlsym(native_system() and "mkdir") and path and 448)
+    set dir to native_open(path and 17826048 and 0)
+    if dir < 0:
+        return 0 - 1
+    set info to alloc_bytes(144)
+    set valid to ep_dlcall2(ep_dlsym(native_system() and "fstat") and dir and info) == 0
+    if valid:
+        set valid to lease_integer(info and 4 and 2) / 4096 == 4 && lease_integer(info and 4 and 2) % 64 == 0 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(native_system() and "getuid"))
+    free_bytes(info)
+    if valid == 0:
+        ep_dlcall1(ep_dlsym(native_system() and "close") and dir)
+        return 0 - 1
+    return dir
+
+# Under the global slot lease, remove only managed, owned regular files.
+define slot_prune with directory and keep:
+    set libc to native_system()
+    set duplicate to ep_dlcall1(ep_dlsym(libc and "dup") and directory)
+    if duplicate < 0 || duplicate > 2147483647:
+        return 0
+    set stream to ep_dlcall1(ep_dlsym(libc and "fdopendir") and duplicate)
+    if stream == 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and duplicate)
+        return 0
+    ep_dlcall1(ep_dlsym(libc and "rewinddir") and stream)
+    set info to alloc_bytes(144)
+    set errno_ptr to ep_dlcall0(ep_dlsym(libc and "__error"))
+    set valid to 1
+    set count to 0
+    repeat while valid:
+        native_bytes_write(errno_ptr and 0 and 0 and 4)
+        set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and stream)
+        if entry == 0:
+            if transport_errno(libc) != 0:
+                set valid to 0
+            break
+        set count to count + 1
+        if count > 10000:
+            set valid to 0
+            break
+        set name to ptr_to_str(entry + 21)
+        if slot_filename(name) && string_equals(name and keep) == 0:
+            if ep_dlcall4(ep_dlsym(libc and "fstatat") and directory and name and info and 32) != 0 || lease_integer(info and 4 and 2) / 4096 != 8 || lease_integer(info and 6 and 2) != 1 || lease_integer(info and 16 and 4) != ep_dlcall0(ep_dlsym(libc and "getuid")):
+                set valid to 0
+            else if ep_dlcall3(ep_dlsym(libc and "unlinkat") and directory and name and 0) != 0:
+                set valid to 0
+    free_bytes(info)
+    ep_dlcall1(ep_dlsym(libc and "closedir") and stream)
+    if valid && ep_dlcall1(ep_dlsym(libc and "fsync") and directory) != 0:
+        set valid to 0
+    return valid
+
+define slot_prepare with db and home and directory and namespace and epoch and token returning Str:
+    if result_cache_epoch(db and epoch) == 0:
+        return lease_error("Memory changed before slot restore")
+    if sql_execute(db and "CREATE TABLE IF NOT EXISTS prompt_cache(namespace TEXT NOT NULL,epoch TEXT NOT NULL,name TEXT NOT NULL,payload BLOB NOT NULL,digest TEXT NOT NULL,bytes INTEGER NOT NULL,used INTEGER NOT NULL,PRIMARY KEY(namespace,name))") != 0:
+        return lease_error("Cannot initialize slot manifest storage")
+    set manifest to slot_manifest_load(db and home and directory and namespace and epoch)
+    if manifest != "":
+        set filename to result_cache_scalar(db and "SELECT json_extract(?,'$.filename')" and [manifest])
+        set restored to slot_control(db and token and "restore" and filename)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.n_restored')=json_extract(?,'$.tokens') AND json_extract(?,'$.n_read')=json_extract(?,'$.bytes')" and [restored,restored,manifest,restored,manifest]) == "1":
+            return restored
+    # Clear any prior state, including a failed partial restore, before inference.
+    return slot_control(db and token and "erase" and "")
+
+define slot_save with db and home and directory and namespace and epoch and token returning Str:
+    set binding to slot_binding(db and home and namespace and epoch)
+    if binding == "":
+        return lease_error("Memory changed before slot save")
+    set name to concat("echolite-" and concat(result_cache_scalar(db and "SELECT lower(hex(randomblob(32)))" and []) and ".bin"))
+    set saved to slot_control(db and token and "save" and name)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [saved]) != "ok":
+        return saved
+    set published to slot_manifest_publish(db and home and directory and namespace and epoch and binding and saved)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [published]) != "ok":
+        ep_dlcall3(ep_dlsym(native_system() and "unlinkat") and directory and name and 0)
+        return published
+    if slot_prune(directory and name) == 0:
+        return lease_error("Snapshot saved but stale slot cleanup failed")
+    return saved
+
+# Called under the global slot lease, before deleting memory or restoring backup.
+define slot_forget_at with db and runtime_home and token and port returning Str:
+    set directory to slot_directory(runtime_home)
+    if directory < 0:
+        return lease_error("Cannot open private slot directory for forgetting")
+    if slot_prune(directory and "") == 0:
+        ep_dlcall1(ep_dlsym(native_system() and "close") and directory)
+        return lease_error("Cannot remove retained slot snapshots")
+    ep_dlcall1(ep_dlsym(native_system() and "close") and directory)
+    # Without a credential, finish disk-only cleanup. Subsequent managed
+    # generation always restores a valid snapshot or erases the slot first.
+    if token == "":
+        return "{\"status\":\"ok\",\"operation\":\"disk-purge\"}"
+    if slot_connection_state(port) == 0:
+        return "{\"status\":\"ok\",\"operation\":\"disk-purge-no-listener\",\"runtime_state\":\"connection_refused\"}"
+    set erased to slot_control_at(db and token and "erase" and "" and port)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [erased]) == "ok":
+        return erased
+    # The service can stop between the probe and erase; absence must still be
+    # established by a real socket result, never by server-provided JSON.
+    if slot_connection_state(port) == 0:
+        return "{\"status\":\"ok\",\"operation\":\"disk-purge-no-listener\",\"runtime_state\":\"connection_refused\"}"
+    return erased
+
+define slot_forget with db and runtime_home and token returning Str:
+    set result to slot_forget_at(db and runtime_home and token and 8400)
+    return result

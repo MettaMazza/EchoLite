@@ -1,0 +1,34 @@
+import "../src/native_process"
+import "os"
+import "string"
+
+define main:
+    set args to get_args()
+    set system to native_system()
+    if length_list(args) > 1:
+        if get_list(args and 1) == "--closed-pipes":
+            ep_dlcall1(ep_dlsym(system and "close") and 1)
+            ep_dlcall1(ep_dlsym(system and "close") and 2)
+            ep_dlcall1(ep_dlsym(system and "usleep") and 2000000)
+            return 0
+        if get_list(args and 1) == "--binary":
+            set bytes to alloc_bytes(3)
+            poke_byte(bytes and 0 and 0)
+            poke_byte(bytes and 1 and 255)
+            poke_byte(bytes and 2 and 65)
+            ep_dlcall3(ep_dlsym(system and "write") and 1 and bytes and 3)
+            free_bytes(bytes)
+            return 0
+    set output to "stdout: Café 🌱\n"
+    set error to "stderr: diagnostic\n"
+    ep_dlcall3(ep_dlsym(system and "write") and 1 and output and string_length(output))
+    ep_dlcall3(ep_dlsym(system and "write") and 2 and error and string_length(error))
+    set byte to alloc_bytes(1)
+    set received to ep_dlcall3(ep_dlsym(system and "read") and 0 and byte and 1)
+    free_bytes(byte)
+    if received != 0:
+        return 8
+    if length_list(args) > 1:
+        set literal to get_list(args and 1)
+        ep_dlcall3(ep_dlsym(system and "write") and 1 and literal and string_length(literal))
+    return 7

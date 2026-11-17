@@ -1,0 +1,41 @@
+# Verify an actual two-turn local conversation, without generating or changing state.
+import "../src/result_cache"
+import "os"
+import "fs"
+set checks to 0
+
+define boundary_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: me_boundary /absolute/isolated-state"
+        return 1
+    set home to get_list(args and 1)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    boundary_assert(result_cache_scalar(db and "SELECT count(*) FROM turns WHERE status='completed'" and []) == "2" and "both actual model turns completed")
+    set first to result_cache_scalar(db and "SELECT me_version FROM turns WHERE id=1" and [])
+    set next to result_cache_scalar(db and "SELECT me_version FROM turns WHERE id=2" and [])
+    boundary_assert(string_equals(first and next) == 0 and "next turn activates saved identity")
+    boundary_assert(result_cache_scalar(db and "SELECT count(*)>=1 FROM tool_runs WHERE turn_id=1 AND name='me_update' AND status='completed'" and []) == "1" and "model executed identity revision")
+    boundary_assert(result_cache_scalar(db and "SELECT count(*)>=2 FROM generation_rounds WHERE turn_id=1" and []) == "1" and "inference continued after revision")
+    boundary_assert(result_cache_scalar(db and "SELECT count(*) FROM generation_rounds g JOIN turns t ON t.id=g.turn_id WHERE CAST(json_extract(g.response,'$.active_me_version') AS INTEGER)!=t.me_version OR json_extract(g.response,'$.active_me_version') IS NULL" and []) == "0" and "every model round preserves its turn identity version")
+    set rounds to sql_query(db and "SELECT g.response,m.body FROM generation_rounds g JOIN turns t ON t.id=g.turn_id JOIN me_versions m ON m.id=t.me_version ORDER BY g.turn_id,g.round")
+    set i to 0
+    repeat while i < length_list(rounds):
+        set row to get_list(rounds and i)
+        set digest to result_cache_scalar(db and "SELECT json_extract(?,'$.active_me_sha256')" and [get_list(row and 0)])
+        boundary_assert(string_equals(digest and sha256(get_list(row and 1))) and "actual inference identity digest matches frozen version")
+        set i to i + 1
+    set latest to result_cache_scalar(db and "SELECT body FROM me_versions ORDER BY id DESC LIMIT 1" and [])
+    boundary_assert(string_equals(read_file(concat(home and "/Me.txt")) and latest) and "published Me matches saved revision after restart")
+    boundary_assert(string_contains(latest and "MINT-482") and "requested identity marker persisted")
+    boundary_assert(result_cache_scalar(db and "SELECT count(*)>=1 FROM tool_runs r JOIN memories m ON m.id=r.observation WHERE r.name='me_update' AND instr(m.body,'next turn boundary')>0" and []) == "1" and "tool receipt explains activation timing")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " actual conversation identity boundary checks"))
+    return 0

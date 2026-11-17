@@ -1,0 +1,161 @@
+# Streaming snapshot seals using the system SHA-256 library through EP.
+import "state_lock"
+import "transport"
+
+define snapshot_hex with text and count:
+    if string_length(text) != count:
+        return 0
+    set i to 0
+    repeat while i < count:
+        set byte to get_character(text and i)
+        if (byte < 48 || byte > 57) && (byte < 97 || byte > 102):
+            return 0
+        set i to i + 1
+    return 1
+
+define snapshot_name with name:
+    if name == "" || string_length(name) > 88 || string_contains(name and "/") || string_contains(name and ".."):
+        return 0
+    return 1
+
+define snapshot_private with fd and info:
+    set libc to native_system()
+    if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0:
+        return 0
+    if lease_integer(info and 4 and 2) / 4096 != 8 || lease_integer(info and 16 and 4) != ep_dlcall0(ep_dlsym(libc and "getuid")) || lease_integer(info and 6 and 2) != 1 || lease_integer(info and 4 and 2) % 64 != 0:
+        return 0
+    return 1
+
+define snapshot_hash with directory and name returning Str:
+    if snapshot_name(name) == 0:
+        return ""
+    set fd to native_openat(directory and name and 16777476 and 0)
+    if fd < 0:
+        return ""
+    set libc to native_system()
+    set crypto to ep_dlopen("/usr/lib/system/libcommonCrypto.dylib")
+    set before to alloc_bytes(144)
+    set after to alloc_bytes(144)
+    set ctx to alloc_bytes(256)
+    set buffer to alloc_bytes(131072)
+    set digest to alloc_bytes(32)
+    set valid to snapshot_private(fd and before)
+    if crypto == 0:
+        set valid to 0
+    else if ep_dlcall1(ep_dlsym(crypto and "CC_SHA256_Init") and ctx) != 1:
+        set valid to 0
+    set total to 0
+    set finished to 0
+    set deadline to transport_now(libc) + 120000
+    repeat while valid == 1 && finished == 0:
+        if transport_now(libc) >= deadline:
+            set valid to 0
+        else:
+            set bytes to ep_dlcall3(ep_dlsym(libc and "read") and fd and buffer and 131072)
+            if bytes == 0:
+                set finished to 1
+            else if bytes < 0 || bytes > 131072:
+                if transport_errno(libc) != 4:
+                    set valid to 0
+            else:
+                if ep_dlcall3(ep_dlsym(crypto and "CC_SHA256_Update") and ctx and buffer and bytes) != 1:
+                    set valid to 0
+                set total to total + bytes
+    if snapshot_private(fd and after) == 0 || total != lease_integer(before and 96 and 8) || lease_integer(before and 96 and 8) != lease_integer(after and 96 and 8):
+        set valid to 0
+    set field to 48
+    repeat while field <= 72:
+        if lease_integer(before and field and 8) != lease_integer(after and field and 8):
+            set valid to 0
+        set field to field + 8
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    set output to ""
+    if valid == 1 && ep_dlcall2(ep_dlsym(crypto and "CC_SHA256_Final") and digest and ctx) == 1:
+        set builder to create_builder()
+        set digits to "0123456789abcdef"
+        set i to 0
+        repeat while i < 32:
+            set byte to peek_byte(digest and i)
+            builder_append(builder and substring(digits and byte / 16 and 1))
+            builder_append(builder and substring(digits and byte % 16 and 1))
+            set i to i + 1
+        set output to builder_to_string(builder)
+    free_bytes(before)
+    free_bytes(after)
+    free_bytes(ctx)
+    free_bytes(buffer)
+    free_bytes(digest)
+    return output
+
+# The same fixed private text format is used by checksum and recovery sidecars.
+define snapshot_read_hex with directory and name returning Str:
+    if snapshot_name(name) == 0:
+        return ""
+    set fd to native_openat(directory and name and 16777476 and 0)
+    if fd < 0:
+        return ""
+    set libc to native_system()
+    set info to alloc_bytes(144)
+    set valid to snapshot_private(fd and info)
+    if lease_integer(info and 96 and 8) != 65:
+        set valid to 0
+    free_bytes(info)
+    set data to alloc_bytes(67)
+    set used to 0
+    repeat while valid == 1 && used < 66:
+        set count to ep_dlcall3(ep_dlsym(libc and "read") and fd and data + used and 66 - used)
+        if count == 0:
+            break
+        else if count < 0 || count > 66 - used:
+            if transport_errno(libc) != 4:
+                set valid to 0
+        else:
+            set used to used + count
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    set output to ""
+    if valid == 1 && used == 65 && peek_byte(data and 64) == 10:
+        poke_byte(data and 64 and 0)
+        set value to ptr_to_str(data)
+        if snapshot_hex(value and 64):
+            set output to value
+    free_bytes(data)
+    return output
+
+define snapshot_seal_verify with directory and name:
+    if snapshot_name(name) == 0:
+        return 0
+    set expected to snapshot_read_hex(directory and concat(name and ".sha256"))
+    if expected == "":
+        return 0
+    set actual to snapshot_hash(directory and name)
+    return string_equals(expected and actual)
+
+define snapshot_seal_create with directory and name:
+    set digest to snapshot_hash(directory and name)
+    if digest == "":
+        return 0
+    set sidecar to concat(name and ".sha256")
+    if snapshot_name(sidecar) == 0:
+        return 0
+    set fd to native_openat(directory and sidecar and 16780033 and 384)
+    if fd < 0:
+        return 0
+    set libc to native_system()
+    set data to concat(digest and "\n")
+    set used to 0
+    set valid to 1
+    repeat while used < 65 && valid == 1:
+        set count to ep_dlcall3(ep_dlsym(libc and "write") and fd and str_to_ptr(data) + used and 65 - used)
+        if count == 0:
+            set valid to 0
+        else if count < 0 || count > 65 - used:
+            if transport_errno(libc) != 4:
+                set valid to 0
+        else:
+            set used to used + count
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and fd) != 0:
+        set valid to 0
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    if valid == 0:
+        ep_dlcall3(ep_dlsym(libc and "unlinkat") and directory and sidecar and 0)
+    return valid

@@ -1,0 +1,52 @@
+import "../src/browser_service"
+import "os"
+set checks to 0
+
+define browser_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    browser_assert(browser_path("/status") and "status route accepted")
+    browser_assert(browser_path("/session/AB-123/element/EF-456/click") and "session route accepted")
+    browser_assert(browser_path("http://example.com/session") == 0 and "remote endpoint rejected")
+    browser_assert(browser_path("/session-other") == 0 and "unrelated driver route rejected")
+    browser_assert(browser_path("/session/a/../status") == 0 and "path traversal rejected")
+    browser_assert(browser_path("/session/a\r\nInjected: x") == 0 and "header injection rejected")
+    browser_assert(browser_path("/session/a?query=x") == 0 and "query injection rejected")
+    set success to browser_decode(db and "{\"value\":{\"sessionId\":\"abc\",\"capabilities\":{\"browserName\":\"safari\"}}}" and 200)
+    browser_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [success]) == "completed" and "session success decoded")
+    browser_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.value.sessionId')" and [success]) == "abc" and "exact session ID retained")
+    set closed to browser_decode(db and "{\"value\":null}" and 200)
+    browser_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [closed]) == "completed" and "null success is valid WebDriver result")
+    set denied to browser_decode(db and "{\"value\":{\"error\":\"session not created\",\"message\":\"Enable Allow remote automation\"}}" and 500)
+    browser_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [denied]) == "failed" and "permission refusal stays failed")
+    browser_assert(string_contains(denied and "Enable Allow remote automation") and "actionable driver message preserved")
+    set empty_message to browser_decode(db and "{\"value\":{\"error\":\"invalid session id\",\"message\":\"\"}}" and 404)
+    browser_assert(string_contains(empty_message and "invalid session id") and "empty driver message preserves the actual error code")
+    set misleading to browser_decode(db and "{\"value\":{\"error\":\"stale element reference\",\"message\":\"Element changed\"}}" and 200)
+    browser_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [misleading]) == "failed" and "error payload cannot masquerade as success")
+    set missing to browser_decode(db and "{\"result\":1}" and 200)
+    browser_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [missing]) == "unknown" and "missing protocol value is uncertain")
+    set duplicate to browser_decode(db and "{\"value\":true,\"value\":false}" and 200)
+    browser_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [duplicate]) == "unknown" and "ambiguous result rejected")
+    set malformed to browser_decode(db and "not json" and 200)
+    browser_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [malformed]) == "unknown" and "malformed reply never proves completion")
+    set bad_method to browser_request(db and "PUT" and "/status" and "{}")
+    browser_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [bad_method]) == "failed" and "invalid method rejected before network")
+    set ready to browser_decode(db and "{\"value\":{\"ready\":true}}" and 200)
+    browser_assert(browser_available(db and ready) and "ready driver is reusable")
+    set busy to browser_decode(db and "{\"value\":{\"ready\":false}}" and 200)
+    browser_assert(browser_available(db and busy) and "busy driver is not replaced")
+    browser_assert(browser_available(db and success) == 0 and "session response is not driver status")
+    browser_assert(browser_absent(db and "{\"curl_exit_code\":7}") and "connection refusal permits startup")
+    browser_assert(browser_absent(db and "{\"curl_exit_code\":28}") == 0 and "timeout cannot trigger replacement")
+    browser_assert(browser_absent(db and denied) == 0 and "permission error cannot trigger replacement")
+    sql_close(db)
+
+    display concat("PASS: " and concat(int_to_string(checks) and " browser protocol checks"))
+    return 0

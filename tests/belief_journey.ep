@@ -1,0 +1,25 @@
+import "../src/memory_beliefs"
+import "os"
+set checks to 0
+
+define journey_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    set db to sql_open(concat(get_list(args and 1) and "/memory.sqlite3"))
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs WHERE name='memory_assess' AND status='completed'" and []) == "1" and "local model used actual assessment tool")
+    journey_assert(result_cache_scalar(db and "SELECT body||':'||status FROM memories WHERE id=1" and []) == "The bicycle is stored in the garage.:active" and "original note ID wording and lifecycle preserved")
+    journey_assert(result_cache_scalar(db and "SELECT state||':'||revision||':'||valid_from||':'||valid_until FROM memory_beliefs WHERE memory=1" and []) == "disputed:2::" and "disputed revision saved with unknown dates")
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM memory_corrections" and []) == "0" and "belief-only edit does not replace the note")
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM belief_history WHERE memory=1" and []) == "2" and "initial and changed assessments retained")
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM turns t JOIN memories m ON m.id=t.reply_memory WHERE t.status='completed' AND t.answer_basis='experience' AND instr(lower(m.body),'disputed')>0" and []) == "1" and "completed chat confirms real disputed assessment")
+    journey_assert(result_cache_scalar(db and "SELECT count(*) FROM turns WHERE status='pending'" and []) == "0" and "no pending turn")
+    journey_assert(result_cache_scalar(db and "PRAGMA integrity_check" and []) == "ok" && length_list(sql_query(db and "PRAGMA foreign_key_check")) == 0 and "reopened state and provenance intact")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " actual belief chat checks"))
+    return 0

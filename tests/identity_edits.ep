@@ -1,0 +1,45 @@
+# Actual core subprocess edits using local tokenizer counts and persistent cache.
+import "../src/application_paths"
+import "../src/result_cache"
+set checks to 0
+
+define edits_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 5:
+        display "Usage: identity_edits NEW_STATE TOKEN_FILE CORE TOKEN_FIXTURES"
+        return 1
+    set home to get_list(args and 1)
+    set token_file to get_list(args and 2)
+    set core to get_list(args and 3)
+    set fixtures to get_list(args and 4)
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and token_file)
+    edits_assert(application_wait(core and ["init"]) == 0 and "actual core initializes isolated state")
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    set exact to concat(fixtures and "/exact.txt")
+    set over to concat(fixtures and "/over.txt")
+    set multilingual to concat(fixtures and "/multilingual.txt")
+    edits_assert(application_wait(core and ["me-set",exact,"Exact boundary","1"]) == 0 and "actual core saves 1200-token identity")
+    edits_assert(result_cache_scalar(db and "SELECT max(id) FROM me_versions" and []) == "2" and "accepted edit creates one version")
+    edits_assert(string_equals(read_file(concat(home and "/Me.txt")) and read_file(exact)) and "full identity projected without old byte truncation")
+    edits_assert(application_wait(core and ["me-set",over,"Over boundary","2"]) != 0 and "actual core rejects 1201 tokens")
+    edits_assert(result_cache_scalar(db and "SELECT max(id) FROM me_versions" and []) == "2" && string_equals(read_file(concat(home and "/Me.txt")) and read_file(exact)) and "rejection preserves database and Me file")
+    edits_assert(application_wait(core and ["me-set",multilingual,"Multilingual identity","2"]) == 0 and "actual core saves multilingual identity beyond old byte allowance")
+    edits_assert(application_wait(core and ["me-set",exact,"Stale edit","2"]) != 0 and "stale version still rejected")
+    edits_assert(result_cache_scalar(db and "SELECT max(id) FROM me_versions" and []) == "3" and "stale edit does not change version")
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and concat(home and "/no-credential"))
+    edits_assert(application_wait(core and ["me-set",exact,"Cached count replay","3"]) == 0 and "fresh core process reuses cached count without tokenizer credential")
+    sql_close(db)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    edits_assert(result_cache_scalar(db and "SELECT max(id) FROM me_versions" and []) == "4" and "cache-validated revision persists after database reopen")
+    edits_assert(result_cache_scalar(db and "SELECT count(*) FROM response_cache WHERE json_extract(payload,'$.token_limit')=1200 AND json_extract(payload,'$.tokens')=1200" and []) == "1" and "one exact token count retained persistently")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native Me edit pipeline checks"))
+    return 0

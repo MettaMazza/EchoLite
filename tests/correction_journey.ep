@@ -1,0 +1,33 @@
+# Inspect two real native UI turns across separate sessions after a correction.
+import "../src/result_cache"
+import "os"
+set checks to 0
+
+define recall_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set db to sql_open(concat(get_list(args and 1) and "/memory.sqlite3"))
+    recall_assert(result_cache_scalar(db and "SELECT count(*) FROM turns WHERE status='completed'" and []) == "2" and "both real model turns completed")
+    recall_assert(result_cache_scalar(db and "SELECT count(DISTINCT session) FROM session_turns" and []) == "2" and "recall request belongs to a new conversation")
+    recall_assert(result_cache_scalar(db and "SELECT body='The user prefers long paragraphs for project updates.' AND status='superseded' FROM memories WHERE id=1" and []) == "1" and "old preference retained unchanged as historical")
+    set replacement to result_cache_scalar(db and "SELECT replacement FROM memory_corrections WHERE prior=1" and [])
+    recall_assert(replacement != "" and "correction history identifies replacement")
+    recall_assert(result_cache_scalar(db and "SELECT status='active' AND instr(body,'concise bullet')>0 FROM memories WHERE id=?" and [replacement]) == "1" and "corrected preference active")
+    recall_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs WHERE name='memory_correct' AND status='completed'" and []) == "1" and "model corrected the existing note once")
+    recall_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs WHERE name='memory_correct' AND status='failed'" and []) == "0" and "explicit note IDs avoided failed corrections")
+    set first_action to result_cache_scalar(db and "SELECT coalesce((SELECT request_memory FROM tool_runs WHERE turn_id=2 ORDER BY id LIMIT 1),reply_memory) FROM turns WHERE id=2" and [])
+    recall_assert(result_cache_scalar(db and "SELECT count(*) FROM derivations WHERE parent=? AND child=?" and [replacement,first_action]) == "1" and "replacement was already in context before any active recall tool")
+    recall_assert(result_cache_scalar(db and "SELECT count(*) FROM derivations WHERE parent=1 AND child=?" and [first_action]) == "0" and "superseded note excluded from passive recall")
+    recall_assert(result_cache_scalar(db and "SELECT count(*) FROM turns t JOIN memories m ON m.id=t.reply_memory WHERE t.id=2 AND instr(lower(m.body),'bullet')>0 AND t.answer_basis='experience'" and []) == "1" and "new-session answer uses corrected preference with recorded-memory attribution")
+    recall_assert(result_cache_scalar(db and "SELECT count(*) FROM memory_corrections c JOIN derivations d ON d.parent=c.source AND d.child=c.replacement" and []) == "1" and "correction retains its evidence link")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " correction and passive recall journey checks"))
+    return 0

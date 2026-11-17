@@ -1,0 +1,461 @@
+{
+  "description": "Development sensitivity evaluation: previously evaluated 60-case fixture plus the observed authored-note miss and explicit-subject query. Not independent held-out evidence.",
+  "targets": {
+    "positive_hit_at_6": 0.95,
+    "positive_top_1": 0.9,
+    "negative_empty_rate": 0.9,
+    "macro_precision_at_returned": 0.75
+  },
+  "records": [
+    {
+      "key": "solder",
+      "body": "Mira keeps the soldering iron in the locked orange cabinet in the garage."
+    },
+    {
+      "key": "expenses",
+      "body": "Leonie reconciles travel reimbursements on the last Thursday of each month."
+    },
+    {
+      "key": "launch",
+      "body": "The Juniper public launch was postponed until 18 September because accessibility testing is unfinished."
+    },
+    {
+      "key": "entrance",
+      "body": "Visitors using wheelchairs should enter the studio through the courtyard ramp, not the front steps."
+    },
+    {
+      "key": "contact",
+      "body": "For urgent laboratory equipment faults, telephone technician Arun on extension 204."
+    },
+    {
+      "key": "watering",
+      "body": "During winter the greenhouse succulents are watered once every three weeks."
+    },
+    {
+      "key": "allergy",
+      "body": "Celia cannot eat sesame; meals for her must exclude tahini and sesame oil."
+    },
+    {
+      "key": "printer",
+      "body": "The upstairs label printer jams unless the glossy side of the roll faces downward."
+    },
+    {
+      "key": "backup",
+      "body": "The encrypted design archive is copied to the external silver SSD every Friday before shutdown."
+    },
+    {
+      "key": "mentor",
+      "body": "Tomas mentors new volunteers during their first two Saturday shifts at the repair cafe."
+    },
+    {
+      "key": "lease",
+      "body": "The ceramics workshop lease expires on 30 November; renewal discussions must start in August."
+    },
+    {
+      "key": "battery",
+      "body": "The field recorder takes two rechargeable AA cells; spare batteries are in the microphone pouch."
+    },
+    {
+      "key": "invoice",
+      "body": "Send supplier invoices as PDF attachments to Priya, who assigns each one a purchase-order number."
+    },
+    {
+      "key": "meeting",
+      "body": "The neighbourhood seed exchange meets in the library basement at 10:30 on the first Sunday."
+    },
+    {
+      "key": "paint",
+      "body": "Use water-based varnish on the toy shelves because solvent fumes trigger Daniel's headaches."
+    },
+    {
+      "key": "bike",
+      "body": "After the rear tyre punctured, Noor left the folding bicycle at Elm Street Cycles for collection on Tuesday."
+    },
+    {
+      "key": "password",
+      "body": "The guest wireless password is printed inside the reception drawer; do not read it aloud in the waiting room."
+    },
+    {
+      "key": "seedlings",
+      "body": "Keep the tomato seedlings indoors until overnight temperatures remain above ten degrees Celsius."
+    },
+    {
+      "key": "refund",
+      "body": "Refunds for the cancelled weaving class will be issued to the original payment cards within seven working days."
+    },
+    {
+      "key": "shipping",
+      "body": "Fragile glass samples go in foam-lined boxes with upright arrows on every side."
+    },
+    {
+      "key": "quiet",
+      "body": "The shared study room is reserved for silent work until noon; group discussions move to the kitchen."
+    },
+    {
+      "key": "calibrate",
+      "body": "Calibrate the digital scale with the sealed 100-gram reference weight before weighing pigments."
+    },
+    {
+      "key": "museum",
+      "body": "Our museum visit booking is under the surname Iqbal, and the confirmation code is RIVER-682."
+    },
+    {
+      "key": "translator",
+      "body": "For the oral-history recordings, Malika translates spoken Arabic and Joana checks the English subtitles."
+    },
+    {
+      "key": "authored_procedure",
+      "body": "Model-authored note; not independently verified: Before comparing monthly accounts, open the original ledger and check its reporting period."
+    }
+  ],
+  "queries": [
+    {
+      "query": "Where should I look for the tool used to join electronic components?",
+      "expected": [
+        "solder"
+      ]
+    },
+    {
+      "query": "Which cupboard holds the soldering equipment?",
+      "expected": [
+        "solder"
+      ]
+    },
+    {
+      "query": "Who checks the money owed back for business journeys?",
+      "expected": [
+        "expenses"
+      ]
+    },
+    {
+      "query": "When are staff travel expense repayments reconciled?",
+      "expected": [
+        "expenses"
+      ]
+    },
+    {
+      "query": "Why was the Juniper release pushed back?",
+      "expected": [
+        "launch"
+      ]
+    },
+    {
+      "query": "What delayed the public debut of Juniper?",
+      "expected": [
+        "launch"
+      ]
+    },
+    {
+      "query": "How can someone with limited mobility get into the studio?",
+      "expected": [
+        "entrance"
+      ]
+    },
+    {
+      "query": "Which studio entrance avoids stairs?",
+      "expected": [
+        "entrance"
+      ]
+    },
+    {
+      "query": "Who handles an instrument breakdown in the lab?",
+      "expected": [
+        "contact"
+      ]
+    },
+    {
+      "query": "What number reaches the technician for a laboratory emergency?",
+      "expected": [
+        "contact"
+      ]
+    },
+    {
+      "query": "How often do the fleshy greenhouse plants need water in cold weather?",
+      "expected": [
+        "watering"
+      ]
+    },
+    {
+      "query": "What is the winter watering schedule for our succulents?",
+      "expected": [
+        "watering"
+      ]
+    },
+    {
+      "query": "Which ingredient must be avoided when preparing food for Celia?",
+      "expected": [
+        "allergy"
+      ]
+    },
+    {
+      "query": "Why should tahini be left out of Celia's meal?",
+      "expected": [
+        "allergy"
+      ]
+    },
+    {
+      "query": "Which way should the label stock face to prevent a paper jam?",
+      "expected": [
+        "printer"
+      ]
+    },
+    {
+      "query": "How do we load the upstairs labelling machine correctly?",
+      "expected": [
+        "printer"
+      ]
+    },
+    {
+      "query": "When do we make the weekly duplicate of the design files?",
+      "expected": [
+        "backup"
+      ]
+    },
+    {
+      "query": "Where is the backup copy of our design archive stored?",
+      "expected": [
+        "backup"
+      ]
+    },
+    {
+      "query": "Who guides newcomers at the community repair sessions?",
+      "expected": [
+        "mentor"
+      ]
+    },
+    {
+      "query": "How long does Tomas supervise newly arrived volunteers?",
+      "expected": [
+        "mentor"
+      ]
+    },
+    {
+      "query": "When should we begin negotiating to keep the ceramics workspace?",
+      "expected": [
+        "lease"
+      ]
+    },
+    {
+      "query": "What is the deadline on the pottery studio rental agreement?",
+      "expected": [
+        "lease"
+      ]
+    },
+    {
+      "query": "Where are replacement cells for the portable sound recorder?",
+      "expected": [
+        "battery"
+      ]
+    },
+    {
+      "query": "What type of batteries powers the field recording device?",
+      "expected": [
+        "battery"
+      ]
+    },
+    {
+      "query": "Who assigns order references to bills from suppliers?",
+      "expected": [
+        "invoice"
+      ]
+    },
+    {
+      "query": "In what file format should supplier bills be sent to Priya?",
+      "expected": [
+        "invoice"
+      ]
+    },
+    {
+      "query": "Where does the local group swap seeds?",
+      "expected": [
+        "meeting"
+      ]
+    },
+    {
+      "query": "When is the neighbourhood seed-swapping gathering?",
+      "expected": [
+        "meeting"
+      ]
+    },
+    {
+      "query": "Why did we choose a low-fume finish for the toy shelving?",
+      "expected": [
+        "paint"
+      ]
+    },
+    {
+      "query": "Which finish should be applied to the shelves for toys?",
+      "expected": [
+        "paint"
+      ]
+    },
+    {
+      "query": "Where is Noor's folding bike being repaired?",
+      "expected": [
+        "bike"
+      ]
+    },
+    {
+      "query": "When can the bicycle with the punctured back tyre be collected?",
+      "expected": [
+        "bike"
+      ]
+    },
+    {
+      "query": "Where can a visitor find the guest Wi-Fi access code?",
+      "expected": [
+        "password"
+      ]
+    },
+    {
+      "query": "What is the privacy instruction for sharing the guest network password?",
+      "expected": [
+        "password"
+      ]
+    },
+    {
+      "query": "When is it safe to move our young tomato plants outside?",
+      "expected": [
+        "seedlings"
+      ]
+    },
+    {
+      "query": "What nighttime temperature determines transplanting the tomatoes?",
+      "expected": [
+        "seedlings"
+      ]
+    },
+    {
+      "query": "How will attendees get their money back for the cancelled craft lesson?",
+      "expected": [
+        "refund"
+      ]
+    },
+    {
+      "query": "How long should weaving-class participants wait for reimbursement?",
+      "expected": [
+        "refund"
+      ]
+    },
+    {
+      "query": "How should breakable laboratory glass samples be packed for transport?",
+      "expected": [
+        "shipping"
+      ]
+    },
+    {
+      "query": "Which markings belong on boxes of delicate glass specimens?",
+      "expected": [
+        "shipping"
+      ]
+    },
+    {
+      "query": "Where should we take a conversation while people are studying in the morning?",
+      "expected": [
+        "quiet"
+      ]
+    },
+    {
+      "query": "When does the quiet-only restriction in the study room end?",
+      "expected": [
+        "quiet"
+      ]
+    },
+    {
+      "query": "What must happen before measuring colour powders on the electronic balance?",
+      "expected": [
+        "calibrate"
+      ]
+    },
+    {
+      "query": "Which reference mass is used to check the pigment scale?",
+      "expected": [
+        "calibrate"
+      ]
+    },
+    {
+      "query": "What reference identifies our reserved museum trip?",
+      "expected": [
+        "museum"
+      ]
+    },
+    {
+      "query": "Whose surname should we give to retrieve the museum reservation?",
+      "expected": [
+        "museum"
+      ]
+    },
+    {
+      "query": "Who converts the Arabic interviews into English?",
+      "expected": [
+        "translator"
+      ]
+    },
+    {
+      "query": "Who proofreads captions for the oral-history videos?",
+      "expected": [
+        "translator"
+      ]
+    },
+    {
+      "query": "How do neutron stars produce pulsars?",
+      "expected": []
+    },
+    {
+      "query": "Who won the fictional interstellar chess championship of Zorvax?",
+      "expected": []
+    },
+    {
+      "query": "Explain how tectonic subduction forms a volcanic arc.",
+      "expected": []
+    },
+    {
+      "query": "What is the grammar of the invented language Neralic?",
+      "expected": []
+    },
+    {
+      "query": "Derive the determinant identity for a block matrix.",
+      "expected": []
+    },
+    {
+      "query": "Describe the life cycle of a jellyfish.",
+      "expected": []
+    },
+    {
+      "query": "What caused the Bronze Age collapse?",
+      "expected": []
+    },
+    {
+      "query": "How does gravitational lensing reveal dark matter?",
+      "expected": []
+    },
+    {
+      "query": "What is the plot of an unrecorded novel called The Violet Comet?",
+      "expected": []
+    },
+    {
+      "query": "Explain the difference between a sonnet and a villanelle.",
+      "expected": []
+    },
+    {
+      "query": "How are prime numbers distributed asymptotically?",
+      "expected": []
+    },
+    {
+      "query": "Which chemical reactions occur in a lithium-air cell?",
+      "expected": []
+    },
+    {
+      "query": "How should I prepare to review financial records?",
+      "expected": [
+        "authored_procedure"
+      ]
+    },
+    {
+      "query": "What steps should I take when comparing monthly accounts?",
+      "expected": [
+        "authored_procedure"
+      ]
+    }
+  ]
+}

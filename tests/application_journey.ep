@@ -1,0 +1,29 @@
+# Inspect real local-model process receipts; native UI verification is separate.
+import "../src/result_cache"
+import "fs"
+import "os"
+set checks to 0
+
+define application_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set db to sql_open(concat(get_list(args and 1) and "/memory.sqlite3"))
+    set document to get_list(args and 2)
+    application_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN process_operations o ON o.operation_id=r.id WHERE r.name='process_run' AND r.status='completed' AND json_extract(r.arguments,'$.argv[0]')='/usr/bin/open' AND json_extract(r.arguments,'$.argv[1]')='-a' AND json_extract(r.arguments,'$.argv[2]')='TextEdit' AND json_extract(r.arguments,'$.argv[3]')=? AND json_extract(o.result,'$.exit_code')=0 AND json_extract(o.result,'$.termination')='exited'" and [document]) == "1" and "actual model command requested the exact document in TextEdit and exited zero")
+    application_assert(result_cache_scalar(db and "SELECT count(*) FROM turns t JOIN memories m ON m.id=t.reply_memory WHERE t.status='completed' AND t.answer_basis='execution' AND instr(m.body,'TextEdit')>0 AND instr(m.body,'0')>0" and []) == "1" and "completed answer reports execution and actual zero exit")
+    application_assert(result_cache_scalar(db and "SELECT count(*) FROM turns WHERE status='pending'" and []) == "0" and "no unfinished app-control turn remains")
+    set expected to "EchoLite local application control\nVerification marker: MINT-APP-482\nThis temporary document belongs to the EchoLite validation workflow.\n"
+    application_assert(string_equals(read_file(document) and expected) and "opened document remains byte-for-byte unchanged")
+    application_assert(result_cache_scalar(db and "PRAGMA integrity_check" and []) == "ok" and "durable application conversation is intact")
+    application_assert(result_cache_scalar(db and "SELECT count(*) FROM pragma_foreign_key_check" and []) == "0" and "receipts and provenance retain referential integrity")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " actual application journey checks"))
+    return 0

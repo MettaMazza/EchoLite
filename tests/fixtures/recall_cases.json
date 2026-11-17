@@ -1,0 +1,335 @@
+{
+  "description": "Authored development benchmark, frozen before the changes in this checkpoint; not an independently held-out sample or a semantic-grounding test.",
+  "records": [
+    {
+      "key": "keys",
+      "body": "The spare keys are inside the blue ceramic bowl beside the door."
+    },
+    {
+      "key": "budget",
+      "body": "Orchid project budget is 2400 pounds. Noor approves purchases."
+    },
+    {
+      "key": "delivery",
+      "body": "Violet delivery arrives on 2027-02-03 with 19 sample trays."
+    },
+    {
+      "key": "backup",
+      "body": "Nightly backups go to the external Cedar drive; encryption is enabled."
+    },
+    {
+      "key": "compiler",
+      "body": "Ernos compiles a source by running ernos filename.ep. It produces an executable beside the source."
+    },
+    {
+      "key": "meeting",
+      "body": "The design review meeting is on Thursday at 14:30 with Priya."
+    },
+    {
+      "key": "cat",
+      "body": "Our cat Juniper eats salmon kibble and dislikes chicken."
+    },
+    {
+      "key": "coffee",
+      "body": "I prefer decaffeinated coffee after midday."
+    },
+    {
+      "key": "garden",
+      "body": "Tomato seedlings need watering every second morning."
+    },
+    {
+      "key": "invoice",
+      "body": "Invoice INV-731 belongs to Larch Studio and is due March 12."
+    },
+    {
+      "key": "colour",
+      "body": "The dashboard accent colour is amber, hex FFBE33."
+    },
+    {
+      "key": "location",
+      "body": "The sensor calibration notebook is in drawer four of the workshop."
+    },
+    {
+      "key": "owner",
+      "body": "Mina maintains the telemetry service. Pavel handles deployments."
+    },
+    {
+      "key": "travel",
+      "body": "For the Oslo trip, the train leaves platform six at 08:15."
+    },
+    {
+      "key": "book",
+      "body": "The next reading group book is The Dispossessed by Ursula Le Guin."
+    },
+    {
+      "key": "allergy",
+      "body": "A guest named Elliot cannot eat peanuts."
+    },
+    {
+      "key": "password",
+      "body": "Credentials are stored in the system keychain; never put them in log files."
+    },
+    {
+      "key": "restore",
+      "body": "To restore a snapshot, first validate its manifest and checksum."
+    },
+    {
+      "key": "identity",
+      "body": "Zoë manages the Zürich archive; preserve both spellings."
+    },
+    {
+      "key": "returns",
+      "body": "The borrowed microscope must be returned to Saira before Friday."
+    },
+    {
+      "key": "temperature",
+      "body": "The incubator target temperature is 37 degrees Celsius."
+    },
+    {
+      "key": "accounts",
+      "body": "Accounts are managed by Noor using a monthly ledger."
+    },
+    {
+      "key": "renewal",
+      "body": "The domain renewal deadline is April 18."
+    },
+    {
+      "key": "capacity",
+      "body": "The terracotta reservoir holds nine litres of rainwater."
+    }
+  ],
+  "queries": [
+    {
+      "query": "Where are the spare keys?",
+      "expected": [
+        "keys"
+      ]
+    },
+    {
+      "query": "Can you remind me where the spare keys are?",
+      "expected": [
+        "keys"
+      ]
+    },
+    {
+      "query": "What is the Orchid budget?",
+      "expected": [
+        "budget"
+      ]
+    },
+    {
+      "query": "Who approves Orchid purchases?",
+      "expected": [
+        "budget"
+      ]
+    },
+    {
+      "query": "When does the violet delivery arrive?",
+      "expected": [
+        "delivery"
+      ]
+    },
+    {
+      "query": "How many sample trays in the violet delivery?",
+      "expected": [
+        "delivery"
+      ]
+    },
+    {
+      "query": "Where do nightly backups go?",
+      "expected": [
+        "backup"
+      ]
+    },
+    {
+      "query": "How do I compile an Ernos source file?",
+      "expected": [
+        "compiler"
+      ]
+    },
+    {
+      "query": "Please tell me the design review time",
+      "expected": [
+        "meeting"
+      ]
+    },
+    {
+      "query": "Who is at the design review?",
+      "expected": [
+        "meeting"
+      ]
+    },
+    {
+      "query": "What does Juniper eat?",
+      "expected": [
+        "cat"
+      ]
+    },
+    {
+      "query": "Which coffee do I prefer after midday?",
+      "expected": [
+        "coffee"
+      ]
+    },
+    {
+      "query": "How often should I water tomato seedlings?",
+      "expected": [
+        "garden"
+      ]
+    },
+    {
+      "query": "When is invoice INV-731 due?",
+      "expected": [
+        "invoice"
+      ]
+    },
+    {
+      "query": "Which studio owns INV-731?",
+      "expected": [
+        "invoice"
+      ]
+    },
+    {
+      "query": "What is the dashboard accent colour?",
+      "expected": [
+        "colour"
+      ]
+    },
+    {
+      "query": "Where is the sensor calibration notebook?",
+      "expected": [
+        "location"
+      ]
+    },
+    {
+      "query": "Who maintains telemetry?",
+      "expected": [
+        "owner"
+      ]
+    },
+    {
+      "query": "Who handles deployments?",
+      "expected": [
+        "owner"
+      ]
+    },
+    {
+      "query": "What platform for the Oslo train?",
+      "expected": [
+        "travel"
+      ]
+    },
+    {
+      "query": "What time does the Oslo train leave?",
+      "expected": [
+        "travel"
+      ]
+    },
+    {
+      "query": "Which book is next for the reading group?",
+      "expected": [
+        "book"
+      ]
+    },
+    {
+      "query": "What food must Elliot avoid?",
+      "expected": [
+        "allergy"
+      ]
+    },
+    {
+      "query": "Where should credentials be stored?",
+      "expected": [
+        "password"
+      ]
+    },
+    {
+      "query": "What do I validate before snapshot restore?",
+      "expected": [
+        "restore"
+      ]
+    },
+    {
+      "query": "Who manages the Zürich archive?",
+      "expected": [
+        "identity"
+      ]
+    },
+    {
+      "query": "When must the microscope be returned?",
+      "expected": [
+        "returns"
+      ]
+    },
+    {
+      "query": "What is the incubator temperature?",
+      "expected": [
+        "temperature"
+      ]
+    },
+    {
+      "query": "Who manages our financial records?",
+      "expected": [
+        "accounts"
+      ]
+    },
+    {
+      "query": "When must we pay for the website address again?",
+      "expected": [
+        "renewal"
+      ]
+    },
+    {
+      "query": "How much rain can the clay water tank contain?",
+      "expected": [
+        "capacity"
+      ]
+    },
+    {
+      "query": "Where did I put the calibration notes?",
+      "expected": [
+        "location"
+      ]
+    },
+    {
+      "query": "How do I rebuild a program?",
+      "expected": [
+        "compiler"
+      ]
+    },
+    {
+      "query": "What does the kitten dislike?",
+      "expected": [
+        "cat"
+      ]
+    },
+    {
+      "query": "What is the current dashboard colour?",
+      "expected": [
+        "colour"
+      ]
+    },
+    {
+      "query": "Who is Zoë?",
+      "expected": [
+        "identity"
+      ]
+    },
+    {
+      "query": "What is the submarine serial number?",
+      "expected": []
+    },
+    {
+      "query": "Can you please tell me?",
+      "expected": []
+    },
+    {
+      "query": "Where is the cobalt telescope?",
+      "expected": []
+    },
+    {
+      "query": "Who owns the unicycle?",
+      "expected": []
+    }
+  ]
+}

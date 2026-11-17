@@ -1,0 +1,11 @@
+import "task_schedule"
+
+define ui_schedule_ready with now and activity and dispatched and busy and ready and draft and attachment:
+    if busy || ready != 1 || string_trim(draft) != "" || attachment != "":
+        return 0
+    return now - activity >= 10000 && now - dispatched >= 60000
+
+define ui_schedule_rows with db and project:
+    set parameters to [project]
+    set rows to sql_query_params(db and "SELECT coalesce(s.memory,''),t.memory,coalesce(s.status,'unscheduled'),coalesce(strftime('%Y-%m-%d %H:%M UTC',s.due_at,'unixepoch'),''),substr(json_extract(m.body,'$.objective'),1,180),t.status,coalesce(s.turn_id,''),coalesce(r.status,'') FROM tasks t JOIN memories m ON m.id=t.current_memory LEFT JOIN task_schedules s ON s.memory=(SELECT max(memory) FROM task_schedules WHERE task=t.memory) LEFT JOIN turns r ON r.id=s.turn_id WHERE t.project=? ORDER BY t.status IN ('planned','running','waiting') DESC,s.due_at,t.memory DESC LIMIT 32" and parameters)
+    return rows

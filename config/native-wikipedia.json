@@ -1,0 +1,15 @@
+{
+  "runtime": "kiwix-tools",
+  "version": "3.8.2",
+  "platform": "macos-arm64",
+  "source_url": "https://download.kiwix.org/release/kiwix-tools/kiwix-tools_macos-arm64-3.8.2.tar.gz",
+  "published_md5": "60d934c0cc75e5d2db83d2ed2de000ce",
+  "archive_sha256": "5c64d43176627e558a117146b02ea36b7da2b0cd3a332cbff075cde05d9585f9",
+  "executable": "models/runtime/kiwix-tools_macos-arm64-3.8.2/kiwix-serve",
+  "libkiwix": "14.2.0",
+  "libzim": "9.5.0",
+  "bind": "127.0.0.1:8402",
+  "threads": 2,
+  "documentation": "https://kiwix-tools.readthedocs.io/en/latest/kiwix-serve.html",
+  "source": "https://github.com/kiwix/kiwix-tools"
+}

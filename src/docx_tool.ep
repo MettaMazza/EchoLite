@@ -1,0 +1,40 @@
+# Native DOCX tool with isolated extraction and persistent content-addressed caching.
+import "pdf_tool"
+
+define docx_lookup with db and executable and expression and epoch returning Str:
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [expression]) != "1":
+        return pdf_error(db and "Invalid DOCX arguments")
+    set valid to result_cache_scalar(db and "SELECT json_type(?)='object' AND (SELECT count(*) FROM json_each(?))=2 AND (SELECT count(DISTINCT key) FROM json_each(?))=2 AND json_type(?,'$.path')='text' AND json_type(?,'$.offset')='integer' AND json_extract(?,'$.offset') BETWEEN 0 AND 20000" and [expression,expression,expression,expression,expression,expression])
+    if valid != "1":
+        return pdf_error(db and "DOCX arguments require path and character offset 0-20000")
+    set path to result_cache_scalar(db and "SELECT json_extract(?,'$.path')" and [expression])
+    if starts_with(path and "/") == 0 || string_length(path) > 1024 || result_cache_scalar(db and "SELECT instr(?,char(0))=0" and [path]) != "1":
+        return pdf_error(db and "DOCX path must be absolute and at most 1024 UTF-8 bytes")
+    set offset to result_cache_scalar(db and "SELECT json_extract(?,'$.offset')" and [expression])
+    set snapshot to pdf_snapshot(db and path)
+    if get_list(snapshot and 0) == 0:
+        return pdf_error(db and string_replace(get_list(snapshot and 3) and "PDF" and "DOCX"))
+    free_bytes(get_list(snapshot and 0))
+    set digest to get_list(snapshot and 2)
+    set namespace to concat("docx-ep-v1:" and pdf_cache_namespace())
+    set key to digest
+    set captured to result_cache_get(db and namespace and key and epoch)
+    set hit to "true"
+    if captured == "":
+        set hit to "false"
+        set captured to pdf_child(db and executable and path and 0)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [captured]) != "ok":
+            return captured
+        if string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.source_sha256')" and [captured]) and digest) == 0:
+            return pdf_error(db and "DOCX changed during extraction; result discarded")
+        set captured to result_cache_put(db and namespace and key and epoch and captured)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [captured]) != "ok":
+        return captured
+    set text to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [captured])
+    if result_cache_scalar(db and "SELECT CAST(? AS INTEGER)<=length(?)" and [offset,text]) != "1":
+        return pdf_error(db and "DOCX offset is beyond captured document text")
+    set remaining to result_cache_scalar(db and "SELECT substr(?,CAST(? AS INTEGER)+1)" and [text,offset])
+    set excerpt to dictionary_excerpt(remaining and 4096)
+    set next to result_cache_scalar(db and "SELECT CAST(? AS INTEGER)+length(?)" and [offset,excerpt])
+    set uri to concat(filesystem_uri(path) and concat("#character=" and offset))
+    return result_cache_scalar(db and "SELECT json_object('status','ok','tool','docx_read','outcome','completed','path',?,'text',?,'offset',CAST(? AS INTEGER),'next_offset',CASE WHEN CAST(? AS INTEGER)<length(?) THEN CAST(? AS INTEGER) ELSE NULL END,'more',json(CASE WHEN CAST(? AS INTEGER)<length(?) THEN 'true' ELSE 'false' END),'capture_truncated',json_extract(?,'$.capture_truncated'),'scope',json_extract(?,'$.scope'),'source_sha256',?,'entries',json_array(json_object('url',?)),'cache_hit',json(?),'parser_version','EP WordprocessingML / libarchive / libxml2','child_peak_rss_bytes',json_extract(?,'$.child_peak_rss_bytes'),'sampled_peak_rss_bytes',json_extract(?,'$.sampled_peak_rss_bytes'))" and [path,excerpt,offset,next,text,next,next,text,captured,captured,digest,uri,hit,captured,captured])

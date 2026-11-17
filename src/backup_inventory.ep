@@ -1,0 +1,99 @@
+# Managed backup inventory and deletion; caller holds the state writer lock.
+import "backup_check"
+
+define backup_inventory with home and operation and identifier returning Str:
+    if operation != "list" && operation != "delete":
+        return backup_check_error("Unknown backup inventory operation")
+    if operation == "delete" && snapshot_hex(identifier and 32) == 0:
+        return backup_check_error("Backup ID must be 32 lowercase hexadecimal characters")
+    set libc to native_system()
+    set resolved to alloc_bytes(1024)
+    set code to ep_dlcall2(ep_dlsym(libc and "realpath") and home and resolved)
+    set canonical to ptr_to_str(resolved)
+    free_bytes(resolved)
+    if code == 0 || string_length(canonical) > 900:
+        return backup_check_error("Cannot resolve state directory or path is too long")
+    set path to concat(canonical and "/backups")
+    set dir to native_open(path and 17826048 and 0)
+    if dir < 0:
+        if operation == "list" && transport_errno(libc) == 2:
+            return "{\"status\":\"ok\",\"backups\":[]}"
+        return backup_check_error("Backup directory is unavailable or is a symlink")
+    set info to alloc_bytes(144)
+    set owned to ep_dlcall2(ep_dlsym(libc and "fstat") and dir and info) == 0 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid"))
+    free_bytes(info)
+    if owned == 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and dir)
+        return backup_check_error("Backup directory must be owned by the current user")
+    set result to ""
+    if operation == "delete":
+        set result to backup_remove(dir and identifier)
+    else:
+        set result to backup_scan(dir)
+    ep_dlcall1(ep_dlsym(libc and "close") and dir)
+    return result
+
+define backup_remove with dir and identifier returning Str:
+    set libc to native_system()
+    set name to concat("backup-" and concat(identifier and ".sqlite3"))
+    set valid to ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and name and 0) == 0
+    set suffixes to ["-journal","-wal","-shm",".sha256"]
+    set i to 0
+    repeat while i < length_list(suffixes):
+        set sidecar to concat(name and get_list(suffixes and i))
+        if ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and sidecar and 0) != 0 && transport_errno(libc) != 2:
+            set valid to 0
+        set i to i + 1
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        set valid to 0
+    if valid == 0:
+        return backup_check_error("Cannot delete that managed backup")
+    return "{\"status\":\"ok\",\"deleted\":1}"
+
+define backup_scan with dir returning Str:
+    set libc to native_system()
+    set duplicate to ep_dlcall1(ep_dlsym(libc and "dup") and dir)
+    if duplicate > 2147483647 || duplicate < 0:
+        return backup_check_error("Cannot inspect managed backup inventory")
+    set stream to ep_dlcall1(ep_dlsym(libc and "fdopendir") and duplicate)
+    if stream == 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and duplicate)
+        return backup_check_error("Cannot inspect managed backup inventory")
+    ep_dlcall1(ep_dlsym(libc and "rewinddir") and stream)
+    set db to sql_open(":memory:")
+    set valid to sql_execute(db and "CREATE TABLE inventory(id TEXT,bytes INTEGER,modified INTEGER)") == 0
+    set scanned to 0
+    set count to 0
+    set finished to 0
+    set info to alloc_bytes(144)
+    set errno_pointer to ep_dlcall0(ep_dlsym(libc and "__error"))
+    repeat while valid == 1 && finished == 0:
+        native_bytes_write(errno_pointer and 0 and 0 and 4)
+        set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and stream)
+        if entry == 0:
+            set finished to 1
+            if transport_errno(libc) != 0:
+                set valid to 0
+        else:
+            set scanned to scanned + 1
+            if scanned > 10000:
+                set valid to 0
+            set name to ptr_to_str(entry + 21)
+            if string_length(name) == 47 && starts_with(name and "backup-") && ends_with(name and ".sqlite3"):
+                set identifier to substring(name and 7 and 32)
+                if snapshot_hex(identifier and 32):
+                    set count to count + 1
+                    if count > 3 || ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and 32) != 0 || lease_integer(info and 4 and 2) / 4096 != 8:
+                        set valid to 0
+                    else:
+                        set bytes to int_to_string(lease_integer(info and 96 and 8))
+                        set modified to int_to_string(lease_integer(info and 48 and 8))
+                        if sql_execute_params(db and "INSERT INTO inventory VALUES(?,CAST(? AS INTEGER),CAST(? AS INTEGER))" and [identifier,bytes,modified]) != 101:
+                            set valid to 0
+    free_bytes(info)
+    ep_dlcall1(ep_dlsym(libc and "closedir") and stream)
+    set result to backup_check_error("Managed backup inventory is invalid or exceeds scan limits")
+    if valid == 1:
+        set result to result_cache_scalar(db and "SELECT json_object('status','ok','backups',json_group_array(json_object('id',id,'bytes',bytes,'modified_unix',modified))) FROM (SELECT * FROM inventory ORDER BY modified DESC,id)" and [])
+    sql_close(db)
+    return result

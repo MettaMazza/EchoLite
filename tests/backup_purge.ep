@@ -1,0 +1,65 @@
+import "../src/backup_purge"
+set checks to 0
+
+define purge_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    set libc to native_system()
+    set initial to recovery_guard(home and 0)
+    purge_assert(string_contains(backup_purge(home) and "\"deleted\":0") and "missing backup directory purged")
+    purge_assert(string_equals(initial and recovery_guard(home and 0)) == 0 and "authority rotates without existing backup directory")
+    set directory to concat(home and "/backups")
+    ep_dlcall2(ep_dlsym(libc and "mkdir") and directory and 448)
+    set prefixes to ["backup-","pending-"]
+    set suffixes to [".sqlite3",".sqlite3-journal",".sqlite3-wal",".sqlite3-shm",".sqlite3.sha256"]
+    set p to 0
+    repeat while p < 2:
+        set s to 0
+        repeat while s < 5:
+            set name to concat(get_list(prefixes and p) and concat("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and get_list(suffixes and s)))
+            write_file(concat(directory and concat("/" and name)) and "managed fixture")
+            set s to s + 1
+        set p to p + 1
+    set unrelated to concat(directory and "/keep.txt")
+    write_file(unrelated and "unmanaged")
+    set link to concat(directory and "/backup-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.sqlite3")
+    purge_assert(ep_dlcall2(ep_dlsym(libc and "symlink") and unrelated and link) == 0 and "managed symlink fixture")
+    set preparations to ["restore-new.sqlite3","restore-new.sqlite3.sha256","restore-new.sqlite3-wal","restore-new.sqlite3-shm","restore-new.sqlite3-journal",".restore.intent.tmp"]
+    set i to 0
+    repeat while i < length_list(preparations):
+        write_file(concat(home and concat("/" and get_list(preparations and i))) and "restore fixture")
+        set i to i + 1
+    set result to backup_purge(home)
+    purge_assert(string_contains(result and "\"deleted\":11") and concat("managed snapshots and sidecars removed: " and result))
+    purge_assert(read_file(unrelated) == "unmanaged" and "unmanaged target retained")
+    set i to 0
+    repeat while i < length_list(preparations):
+        purge_assert(file_exists(concat(home and concat("/" and get_list(preparations and i)))) == 0 and "restore preparation removed")
+        set i to i + 1
+    purge_assert(string_contains(backup_purge(home) and "\"deleted\":0") and "empty purge succeeds")
+    set marker to concat(home and "/.restore.pending")
+    write_file(marker and "active intent")
+    purge_assert(string_contains(backup_purge(home) and "forgetting must not commit") and "active restore prevents purge completion")
+    purge_assert(read_file(marker) == "active intent" and "active restore intent preserved")
+    ep_dlcall1(ep_dlsym(libc and "unlink") and marker)
+    set staged to concat(home and "/restore-new.sqlite3")
+    purge_assert(ep_dlcall2(ep_dlsym(libc and "symlink") and unrelated and staged) == 0 and "unsafe restore staging")
+    purge_assert(string_contains(backup_purge(home) and "forgetting must not commit") and "unsafe restore preparation rejected")
+    purge_assert(read_file(unrelated) == "unmanaged" and "unsafe staging target retained")
+    ep_dlcall1(ep_dlsym(libc and "unlink") and staged)
+    set blocked to concat(directory and "/backup-cccccccccccccccccccccccccccccccc.sqlite3")
+    ep_dlcall2(ep_dlsym(libc and "mkdir") and blocked and 448)
+    purge_assert(string_contains(backup_purge(home) and "forgetting must not commit") and "managed-name directory fails closed")
+    purge_assert(is_directory(blocked) and "no recursive deletion")
+    purge_assert(backup_managed_name("backup-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.sqlite3.extra") == 0 and "unmanaged suffix excluded")
+    display concat("PASS: " and concat(int_to_string(checks) and " EP backup purge checks"))
+    return 0

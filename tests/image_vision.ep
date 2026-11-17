@@ -1,0 +1,37 @@
+# Real local multimodal request using the bounded normalized image receipt.
+import "../src/native_model"
+import "fs"
+import "os"
+define main:
+    set args to get_args()
+    if length_list(args) != 5:
+        return 1
+    set expected_left to get_list(args and 4)
+    if expected_left != "red" && expected_left != "blue":
+        return 1
+    set expected_right to "blue"
+    if expected_left == "blue":
+        set expected_right to "red"
+    set home to get_list(args and 1)
+    set credential to get_list(args and 2)
+    set normalized to read_file(get_list(args and 3))
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and credential)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    set token to string_trim(read_file(credential))
+    set url to result_cache_scalar(db and "SELECT json_extract(?,'$.data_url')" and [normalized])
+    if starts_with(url and "data:image/jpeg;base64,") == 0:
+        return 1
+    set messages to result_cache_scalar(db and "SELECT json_array(json_object('role','user','content',json_array(json_object('type','text','text','Identify the two large color regions in the attached image. Return their colors as left and right. Use red, blue, green, or yellow.'),json_object('type','image_url','image_url',json_object('url',?)))))" and [url])
+    set schema to "{\"type\":\"object\",\"properties\":{\"left\":{\"type\":\"string\",\"enum\":[\"red\",\"blue\",\"green\",\"yellow\"]},\"right\":{\"type\":\"string\",\"enum\":[\"red\",\"blue\",\"green\",\"yellow\"]}},\"required\":[\"left\",\"right\"],\"additionalProperties\":false}"
+    set payload to result_cache_scalar(db and "SELECT json_object('messages',json(?),'response_format',json_object('type','json_schema','json_schema',json_object('name','image_colors','strict',json('true'),'schema',json(?))),'max_tokens',64,'reasoning_budget_tokens',0,'temperature',0,'stream',json('true'),'stream_options',json_object('include_usage',json('true')),'cache_prompt',json('true'))" and [messages,schema])
+    set result to native_model_cached(db and token and payload and "native-image-vision-b12359-v1" and "0" and 0)
+    display result
+    set answer to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result])
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.slot_save.status')='ok'" and [result,result]) != "1":
+        return 1
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.left')=? AND json_extract(?,'$.right')=? ELSE 0 END" and [answer,answer,expected_left,answer,expected_right]) != "1":
+        return 1
+    sql_close(db)
+    display "PASS: real local vision recognized the expected ordered colors; inference snapshot persisted"
+    return 0

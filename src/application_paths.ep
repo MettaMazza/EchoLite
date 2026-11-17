@@ -1,0 +1,51 @@
+import "native_process"
+import "fs"
+import "os"
+import "string"
+
+define application_root with executable returning Str:
+    set resolved to alloc_bytes(1024)
+    set found to ep_dlcall2(ep_dlsym(native_system() and "realpath") and executable and resolved)
+    set result to ""
+    if found != 0:
+        set result to path_dirname(path_dirname(ptr_to_str(resolved)))
+    free_bytes(resolved)
+    return result
+
+define application_directory with path and depth:
+    if path == "" || depth > 64:
+        return 0
+    if is_directory(path):
+        return 1
+    set parent to path_dirname(path)
+    if string_equals(parent and path):
+        return 0
+    if application_directory(parent and depth + 1) == 0:
+        return 0
+    ep_dlcall2(ep_dlsym(native_system() and "mkdir") and path and 448)
+    return is_directory(path)
+
+define application_wait with executable and arguments:
+    set pid to process_start(executable and arguments)
+    if pid == 0:
+        return 127
+    set code to process_poll(pid)
+    repeat while code == 0 - 1:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 20000)
+        set code to process_poll(pid)
+    if code < 0:
+        return 126
+    return code
+
+# Replace the launcher so signals and exit status belong to the actual program.
+define application_exec with executable and arguments:
+    set argv to alloc_bytes((length_list(arguments) + 2) * 8)
+    native_bytes_write(argv and 0 and str_to_ptr(executable) and 8)
+    set i to 0
+    repeat while i < length_list(arguments):
+        native_bytes_write(argv and (i + 1) * 8 and str_to_ptr(get_list(arguments and i)) and 8)
+        set i to i + 1
+    ep_dlcall2(ep_dlsym(native_system() and "execv") and executable and argv)
+    free_bytes(argv)
+    display "Unable to start the requested EchoLite executable. Build EchoLite first."
+    return 127

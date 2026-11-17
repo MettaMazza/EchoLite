@@ -1,0 +1,124 @@
+import "../src/health"
+set assertions to 0
+
+define health_assert with condition and label:
+    if condition == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set assertions to assertions + 1
+    return 0
+
+define health_same_file with left and right:
+    set a to native_open(left and 0 and 0)
+    set b to native_open(right and 0 and 0)
+    set x to alloc_bytes(8192)
+    set y to alloc_bytes(8192)
+    set same to 1
+    set finished to 0
+    set libc to native_system()
+    repeat while finished == 0:
+        set n to ep_dlcall3(ep_dlsym(libc and "read") and a and x and 8192)
+        set m to ep_dlcall3(ep_dlsym(libc and "read") and b and y and 8192)
+        if n != m || n > 8192:
+            set same to 0
+            set finished to 1
+        else if n == 0:
+            set finished to 1
+        else if ep_dlcall3(ep_dlsym(libc and "memcmp") and x and y and n) != 0:
+            set same to 0
+            set finished to 1
+    ep_dlcall1(ep_dlsym(libc and "close") and a)
+    ep_dlcall1(ep_dlsym(libc and "close") and b)
+    free_bytes(x)
+    free_bytes(y)
+    return same
+
+define health_fixture with base and path and mutation:
+    copy_file(base and path)
+    set db to sql_open(path)
+    health_assert(sql_execute(db and mutation) == 0 and "fixture mutation")
+    sql_close(db)
+    return 0
+
+define health_unchanged with path and expected:
+    set before to concat(path and ".before")
+    copy_file(path and before)
+    set result to health_check(path)
+    health_assert(string_contains(result and expected) and concat("diagnosis: " and result))
+    health_assert(health_same_file(path and before) and "database bytes unchanged")
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: health INITIALIZED_DATABASE EMPTY_FIXTURE_DIRECTORY"
+        return 1
+    set base to get_list(args and 1)
+    set root to get_list(args and 2)
+    set good to concat(root and "/good.sqlite3")
+    copy_file(base and good)
+    health_unchanged(good and "\"status\":\"ok\"")
+    set missing to concat(root and "/missing.sqlite3")
+    health_assert(string_contains(health_check(missing) and "regular file") and "missing rejected")
+    health_assert(file_exists(missing) == 0 and "missing database not created")
+    set corrupt to concat(root and "/corrupt.sqlite3")
+    write_file(corrupt and "corrupt database fixture")
+    health_unchanged(corrupt and "integrity")
+    set corrupt_header to concat(root and "/corrupt-header.sqlite3")
+    write_file(corrupt_header and concat("XXXXXXXXXXXXXXXXXX" and concat(char_from_code(2) and char_from_code(2))))
+    health_unchanged(corrupt_header and "integrity")
+    set path to concat(root and "/foreign.sqlite3")
+    health_fixture(base and path and "PRAGMA foreign_keys=OFF; INSERT INTO derivations VALUES(999,998)")
+    health_unchanged(path and "foreign-key")
+    set path to concat(root and "/schema.sqlite3")
+    health_fixture(base and path and "UPDATE metadata SET value='999' WHERE key='schema'")
+    health_unchanged(path and "unsupported schema")
+    set path to concat(root and "/table.sqlite3")
+    health_fixture(base and path and "DROP TABLE process_operations")
+    health_unchanged(path and "tables or columns")
+    set path to concat(root and "/vectors.sqlite3")
+    health_fixture(base and path and "DROP TABLE ep_memory_vectors")
+    health_unchanged(path and "tables or columns")
+    set path to concat(root and "/epoch.sqlite3")
+    health_fixture(base and path and "UPDATE metadata SET value='bad epoch' WHERE key='cache_epoch'")
+    health_unchanged(path and "forgetting epoch")
+    set libc to native_system()
+    set link to concat(root and "/link.sqlite3")
+    health_assert(ep_dlcall2(ep_dlsym(libc and "symlink") and good and link) == 0 and "symlink fixture")
+    health_assert(string_contains(health_check(link) and "symlink") and "symlink rejected")
+    set path to concat(root and "/readonly.sqlite3")
+    copy_file(base and path)
+    ep_dlcall2(ep_dlsym(libc and "chmod") and path and 256)
+    health_unchanged(path and "\"status\":\"ok\"")
+    set info to alloc_bytes(144)
+    ep_dlcall2(ep_dlsym(libc and "stat") and path and info)
+    health_assert(lease_integer(info and 4 and 2) % 512 == 256 and "read-only permissions retained")
+    free_bytes(info)
+    set path to concat(root and "/writer.sqlite3")
+    copy_file(base and path)
+    set writer to sql_open(path)
+    health_assert(sql_execute(writer and "BEGIN IMMEDIATE; INSERT INTO memories(layer,project,source,body) VALUES('semantic','test','fixture','Uncommitted')") == 0 and "concurrent writer opened")
+    set result to health_check(path)
+    health_assert(string_contains(result and "\"memories\":0") and "uncommitted data excluded")
+    sql_execute(writer and "ROLLBACK")
+    sql_close(writer)
+    # Interrupt a running expensive statement, then join before connection close.
+    set db to sql_open(":memory:")
+    set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+    set mutex to alloc_bytes(64)
+    health_assert(ep_dlcall2(ep_dlsym(libc and "pthread_mutex_init") and mutex and 0) == 0 and "watchdog mutex")
+    set flag to alloc_bytes(2)
+    set done to channel
+    set start to transport_now(libc)
+    spawn health_watch(db and sqlite and mutex and flag and start + 20 and done)
+    set result to health_scalar(db and "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n" and 64)
+    set joined to receive from done
+    health_assert(result == "" && peek_byte(flag and 1) == 1 and "deadline interrupts SQLite computation")
+    health_assert(transport_now(libc) - start < 2000 and "bounded interrupt completion")
+    health_assert(health_scalar(db and "SELECT 1" and 64) == "1" and "connection usable after interrupt")
+    sql_close(db)
+    ep_dlcall1(ep_dlsym(libc and "pthread_mutex_destroy") and mutex)
+    free_bytes(flag)
+    free_bytes(mutex)
+    display concat("PASS: " and concat(int_to_string(assertions) and " native EP health checks"))
+    return 0

@@ -1,0 +1,49 @@
+import "../src/transport"
+import "../src/state_lock"
+set checks to 0
+
+define cancel_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define cancel_later with path and done:
+    ep_dlcall1(ep_dlsym(native_system() and "usleep") and 150000)
+    write_file(path and "cancel")
+    send 1 to done
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set path to concat(get_list(args and 1) and "/cancel-test")
+    cancel_assert(file_exists(path) == 0 and "new private fixture")
+    set libc to native_system()
+    set descriptors to alloc_bytes(8)
+    cancel_assert(ep_dlcall1(ep_dlsym(libc and "pipe") and descriptors) == 0 and "waiting pipe created")
+    set reader to lease_integer(descriptors and 0 and 4)
+    set writer to lease_integer(descriptors and 4 and 4)
+    set pollfd to alloc_bytes(8)
+    set done to channel
+    spawn cancel_later(path and done)
+    set start to transport_now(libc)
+    set result to transport_wait_cancel(libc and pollfd and reader and 1 and start + 5000 and path)
+    set elapsed to transport_now(libc) - start
+    set joined to receive from done
+    cancel_assert(result == 0 - 1 and "cancellation interrupts a silent connection wait")
+    cancel_assert(elapsed < 1500 and "stop does not wait for the request deadline")
+    set response to transport_request_cancel("POST" and 1 and "/unused" and "" and "{}" and 1 and 0 and path)
+    cancel_assert(string_contains(response and "Local request cancelled") and "pre-existing signal prevents network request")
+    cancel_assert(remove_file(path) and "fixture signal removed")
+    set start to transport_now(libc)
+    cancel_assert(transport_wait_cancel(libc and pollfd and reader and 1 and start + 150 and path) == 0 and "unsignalled deadline still expires normally")
+    ep_dlcall1(ep_dlsym(libc and "close") and writer)
+    cancel_assert(transport_wait(libc and pollfd and reader and 1 and transport_now(libc) + 1000) == 1 and "ordinary ready-descriptor API preserved")
+    ep_dlcall1(ep_dlsym(libc and "close") and reader)
+    free_bytes(descriptors)
+    free_bytes(pollfd)
+    display concat("PASS: " and concat(int_to_string(checks) and " cancellation transport checks"))
+    return 0

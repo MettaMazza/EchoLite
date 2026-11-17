@@ -1,0 +1,36 @@
+# Recover exact browser handles from this project's durable process receipts.
+# This is a record of observed creation/cleanup, not a claim of current liveness.
+import "application_paths"
+import "state_lock"
+import "result_cache"
+
+define browser_recorded with root and home returning Str:
+    if home == "":
+        return "[]"
+    set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+    set handle to alloc_bytes(8)
+    set code to ep_dlcall4(ep_dlsym(sqlite and "sqlite3_open_v2") and concat(home and "/memory.sqlite3") and handle and 16777217 and 0)
+    set history to lease_integer(handle and 0 and 8)
+    free_bytes(handle)
+    if code != 0:
+        if history != 0:
+            sql_close(history)
+        return "[]"
+    ep_dlcall2(ep_dlsym(sqlite and "sqlite3_busy_timeout") and history and 1000)
+    set project to get_env("ECHOLITE_PROJECT")
+    if project == "":
+        set project to "local"
+    set result to browser_records(history and root and project and "" and "0")
+    sql_close(history)
+    if result == "":
+        return "[]"
+    return result
+
+define browser_records with history and root and project and turn and temporary returning Str:
+    if history == 0:
+        return "[]"
+    set query to "WITH receipts AS (SELECT r.id,r.turn_id,json_extract(r.arguments,'$.argv[1]') action,json_extract(r.arguments,'$.argv[2]') session,CASE WHEN json_valid(CAST(o.stdout AS TEXT)) THEN CAST(o.stdout AS TEXT) ELSE '{}' END body FROM process_operations o JOIN tool_runs r ON r.id=o.operation_id JOIN turns t ON t.id=r.turn_id WHERE t.project=? AND json_extract(r.arguments,'$.argv[0]')=? AND json_extract(r.arguments,'$.argv[1]') IN ('new','new-persistent','close','close-current') AND o.status='completed' AND json_extract(o.result,'$.exit_code')=0) SELECT coalesce(json_group_array(json_object('session_id',sid,'creation_receipt',id,'state','recorded open; verify with url/read')),json('[]')) FROM (SELECT n.id,json_extract(n.body,'$.value.sessionId') sid FROM receipts n WHERE n.action IN ('new','new-persistent') AND (?='' OR n.turn_id=CAST(? AS INTEGER)) AND (?='0' OR n.action='new') AND json_extract(n.body,'$.outcome')='completed' AND json_type(n.body,'$.value.sessionId')='text' AND NOT EXISTS(SELECT 1 FROM receipts c WHERE c.id>n.id AND c.action IN ('close','close-current') AND coalesce(c.session,json_extract(c.body,'$.session_id'))=json_extract(n.body,'$.value.sessionId') AND json_extract(c.body,'$.outcome')='completed') ORDER BY n.id DESC LIMIT 8)"
+    set result to result_cache_scalar(history and query and [project,concat(root and "/bin/echolite-browser"),turn,turn,temporary])
+    if result == "":
+        return "[]"
+    return result

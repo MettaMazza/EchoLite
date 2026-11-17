@@ -1,0 +1,152 @@
+# Consistent bounded SQLite backup and durable no-replace publication in EP.
+import "backup_inventory"
+import "backup_purge"
+
+define backup_sql_open with path and flags:
+    set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+    set handle to alloc_bytes(8)
+    set code to ep_dlcall4(ep_dlsym(sqlite and "sqlite3_open_v2") and path and handle and flags and 0)
+    set db to lease_integer(handle and 0 and 8)
+    free_bytes(handle)
+    if code != 0:
+        if db != 0:
+            sql_close(db)
+        return 0
+    ep_dlcall2(ep_dlsym(sqlite and "sqlite3_busy_timeout") and db and 1000)
+    return db
+
+define backup_copy with source and staging and guard and identifier:
+    set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+    set src to backup_sql_open(source and 16777217)
+    set dst to backup_sql_open(staging and 16777218)
+    set valid to src != 0 && dst != 0
+    if valid == 1:
+        set valid to sql_execute(src and "BEGIN") == 0 && sql_execute(dst and "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048;") == 0
+    if valid == 1:
+        set copy to ep_dlcall4(ep_dlsym(sqlite and "sqlite3_backup_init") and dst and "main" and src and "main")
+        if copy == 0:
+            set valid to 0
+        else:
+            set deadline to transport_now(native_system()) + 120000
+            set code to 0
+            repeat while code == 0 && transport_now(native_system()) < deadline:
+                set code to ep_dlcall2(ep_dlsym(sqlite and "sqlite3_backup_step") and copy and 128)
+            set finished to ep_dlcall1(ep_dlsym(sqlite and "sqlite3_backup_finish") and copy)
+            set valid to code == 101 && finished == 0
+    if dst != 0:
+        sql_close(dst)
+    if src != 0:
+        sql_close(src)
+    if valid == 0:
+        return 0
+    # Backup copies the WAL header; normalize a reopened standalone snapshot.
+    set dst to backup_sql_open(staging and 16777218)
+    if dst == 0:
+        return 0
+    set valid to health_scalar(dst and "PRAGMA journal_mode=DELETE" and 32) == "delete"
+    if valid == 1:
+        set valid to sql_execute_params(dst and "INSERT OR REPLACE INTO metadata(key,value) VALUES('backup_guard',?),('backup_id',?)" and [guard,identifier]) == 101
+    sql_close(dst)
+    return valid
+
+define backup_publish with canonical and dir and guard and identifier returning Str:
+    set libc to native_system()
+    set source to concat(canonical and "/memory.sqlite3")
+    set source_info to alloc_bytes(144)
+    set space to alloc_bytes(128)
+    set valid to ep_dlcall2(ep_dlsym(libc and "lstat") and source and source_info) == 0 && lease_integer(source_info and 4 and 2) / 4096 == 8 && ep_dlcall2(ep_dlsym(libc and "fstatvfs") and dir and space) == 0
+    if valid == 1:
+        set valid to lease_integer(space and 24 and 4) * lease_integer(space and 8 and 8) >= lease_integer(source_info and 96 and 8) + 67108864
+    free_bytes(space)
+    free_bytes(source_info)
+    if valid == 0:
+        return backup_check_error("Source is invalid or insufficient backup disk space")
+    set pending to concat("pending-" and concat(identifier and ".sqlite3"))
+    set final to concat("backup-" and concat(identifier and ".sqlite3"))
+    set staging to concat(canonical and concat("/backups/" and pending))
+    set fd to native_openat(dir and pending and 16780034 and 384)
+    if fd < 0:
+        return backup_check_error("Cannot create exclusive private backup staging")
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    set valid to backup_copy(source and staging and guard and identifier)
+    if valid == 1 && get_env("ECHOLITE_TEST_FAULT") == "backup_after_copy":
+        ep_dlcall1(ep_dlsym(libc and "_exit") and 79)
+    if valid == 1:
+        set valid to string_contains(health_check(staging) and "\"status\":\"ok\"")
+    set bytes to 0
+    if valid == 1:
+        set fd to native_openat(dir and pending and 16777472 and 0)
+        if fd < 0:
+            set valid to 0
+        else:
+            set info to alloc_bytes(144)
+            set valid to ep_dlcall1(ep_dlsym(libc and "fsync") and fd) == 0 && ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) == 0
+            set bytes to lease_integer(info and 96 and 8)
+            free_bytes(info)
+            ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    if valid == 1:
+        set valid to snapshot_seal_create(dir and pending)
+    if valid == 1:
+        set valid to ep_dlcall5(ep_dlsym(libc and "renameatx_np") and dir and pending and dir and final and 4) == 0 && ep_dlcall1(ep_dlsym(libc and "fsync") and dir) == 0
+    if valid == 1 && get_env("ECHOLITE_TEST_FAULT") == "backup_after_snapshot_publish":
+        ep_dlcall1(ep_dlsym(libc and "_exit") and 83)
+    if valid == 1:
+        set valid to ep_dlcall5(ep_dlsym(libc and "renameatx_np") and dir and concat(pending and ".sha256") and dir and concat(final and ".sha256") and 4) == 0 && ep_dlcall1(ep_dlsym(libc and "fsync") and dir) == 0
+    if valid == 0:
+        ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and pending and 0)
+    set suffixes to ["-journal","-wal","-shm",".sha256"]
+    set i to 0
+    repeat while i < length_list(suffixes):
+        set name to concat(pending and get_list(suffixes and i))
+        if ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and name and 0) != 0 && transport_errno(libc) != 2:
+            set valid to 0
+        set i to i + 1
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        set valid to 0
+    if valid == 0:
+        return backup_check_error("Backup failed integrity, I/O or time checks; no successful backup is claimed")
+    return concat("{\"status\":\"ok\",\"id\":\"" and concat(identifier and concat("\",\"bytes\":" and concat(int_to_string(bytes) and "}"))))
+
+define backup_create with home and identifier returning Str:
+    if snapshot_hex(identifier and 32) == 0:
+        return backup_check_error("Backup ID must be 32 lowercase hexadecimal characters")
+    set guard to recovery_guard(home and 0)
+    if guard == "":
+        return backup_check_error("Recovery authority is missing, invalid or cannot be persisted")
+    set libc to native_system()
+    set resolved to alloc_bytes(1024)
+    set code to ep_dlcall2(ep_dlsym(libc and "realpath") and home and resolved)
+    set canonical to ptr_to_str(resolved)
+    free_bytes(resolved)
+    if code == 0 || string_length(canonical) > 900:
+        return backup_check_error("Cannot resolve state directory or path is too long")
+    set directory to concat(canonical and "/backups")
+    if ep_dlcall2(ep_dlsym(libc and "mkdir") and directory and 448) != 0 && transport_errno(libc) != 17:
+        return backup_check_error("Cannot create private backup directory")
+    set parent to native_open(canonical and 17826048 and 0)
+    if parent < 0:
+        return backup_check_error("Cannot sync state directory")
+    set synced to ep_dlcall1(ep_dlsym(libc and "fsync") and parent) == 0
+    ep_dlcall1(ep_dlsym(libc and "close") and parent)
+    if synced == 0:
+        return backup_check_error("Cannot durably register backup directory")
+    set dir to native_open(directory and 17826048 and 0)
+    if dir < 0:
+        return backup_check_error("Backup directory is unavailable or is a symlink")
+    set info to alloc_bytes(144)
+    set owned to ep_dlcall2(ep_dlsym(libc and "fstat") and dir and info) == 0 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid")) && ep_dlcall2(ep_dlsym(libc and "fchmod") and dir and 448) == 0
+    free_bytes(info)
+    set result to backup_check_error("Backup directory must be owned by the current user")
+    if owned == 1:
+        set cleaned to backup_purge_entries(dir and 1)
+        set inventory to backup_scan(dir)
+        set db to sql_open(":memory:")
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.status')='ok'" and [cleaned,inventory]) != "1":
+            set result to backup_check_error("Cannot inspect or clean managed backup staging")
+        else if result_cache_scalar(db and "SELECT json_array_length(?,'$.backups')>=3" and [inventory]) == "1":
+            set result to backup_check_error("Three managed backups already exist; delete a listed backup before creating another")
+        else:
+            set result to backup_publish(canonical and dir and guard and identifier)
+        sql_close(db)
+    ep_dlcall1(ep_dlsym(libc and "close") and dir)
+    return result

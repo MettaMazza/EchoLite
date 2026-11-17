@@ -1,0 +1,40 @@
+import "process_bytes"
+
+define process_receipt with db and operation and expression and capture and elapsed returning Str:
+    set previews to create_list()
+    set stream to 0
+    repeat while stream < 2:
+        set size to get_list(capture and 3 + stream * 2)
+        set kept to size
+        if kept > 500:
+            set kept to 500
+        set decoded to process_display(get_list(capture and 2 + stream * 2) and kept and kept == size)
+        append_list(previews and get_list(decoded and 0))
+        set stream to stream + 1
+    set code to get_list(capture and 0)
+    set reason to get_list(capture and 1)
+    set outcome to "failed"
+    if code == 0 && string_equals(reason and "exited"):
+        set outcome to "completed"
+    set params to [outcome,int_to_string(code),int_to_string(code),reason,int_to_string(elapsed),int_to_string(get_list(capture and 3)),int_to_string(get_list(capture and 5)),get_list(previews and 0),get_list(previews and 1),int_to_string(get_list(capture and 3)),int_to_string(get_list(capture and 5)),reason,operation,expression,expression]
+    set receipt to result_cache_scalar(db and "SELECT json_object('status','ok','tool','process_run','outcome',?,'exit_code',CASE WHEN CAST(? AS INTEGER)>=0 THEN CAST(? AS INTEGER) ELSE NULL END,'termination',?,'seconds',CAST(? AS REAL)/1000,'stdout_bytes',CAST(? AS INTEGER),'stderr_bytes',CAST(? AS INTEGER),'stdout_excerpt',?,'stderr_excerpt',?,'stdout_excerpt_truncated',json(CASE WHEN CAST(? AS INTEGER)>500 THEN 'true' ELSE 'false' END),'stderr_excerpt_truncated',json(CASE WHEN CAST(? AS INTEGER)>500 THEN 'true' ELSE 'false' END),'output_truncated',json(CASE WHEN ?='output_limit' THEN 'true' ELSE 'false' END),'output_ref',?,'argv',json_extract(?,'$.argv'),'cwd',json_extract(?,'$.cwd'),'cache_hit',json('false'),'replayed_receipt',json('false'))" and params)
+    set text to concat("PROCESS RESULT: " and concat(outcome and concat(". Exit: " and concat(int_to_string(code) and concat(". Termination: " and concat(reason and concat(".\nSTDOUT:\n" and concat(get_list(previews and 0) and concat("\nSTDERR (its presence alone is not failure):\n" and get_list(previews and 1))))))))))
+    if get_list(capture and 3) > 500 || get_list(capture and 5) > 500:
+        set text to concat(text and "\nAdditional saved output is available with process_output; these excerpts are incomplete.")
+    set receipt to result_cache_scalar(db and "SELECT json_set(?,'$.text',?,'$.output_bytes',json_extract(?,'$.stdout_bytes')+json_extract(?,'$.stderr_bytes'))" and [receipt,text,receipt,receipt])
+    set stdout_tail to get_list(capture and 3) - 1024
+    set stderr_tail to get_list(capture and 5) - 1024
+    if stdout_tail < 0:
+        set stdout_tail to 0
+    if stderr_tail < 0:
+        set stderr_tail to 0
+    set stdout_query to concat(operation and ":stdout:0")
+    set stderr_query to concat(operation and ":stderr:0")
+    set stdout_end to concat(operation and concat(":stdout:" and int_to_string(stdout_tail)))
+    set stderr_end to concat(operation and concat(":stderr:" and int_to_string(stderr_tail)))
+    set receipt to result_cache_scalar(db and "SELECT json_set(?,'$.stdout_read_query',?,'$.stderr_read_query',?,'$.stdout_tail_query',?,'$.stderr_tail_query',?)" and [receipt,stdout_query,stderr_query,stdout_end,stderr_end])
+    if result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.retry_of'),'')!=''" and [expression]) == "1":
+        set receipt to result_cache_scalar(db and "SELECT json_set(?,'$.retry_of',json_extract(?,'$.retry_of'),'$.retry_reason',json_extract(?,'$.retry_reason'))" and [receipt,expression,expression])
+    if string_length(receipt) > 14000:
+        set receipt to result_cache_scalar(db and "SELECT json_set(?,'$.argv',json('[\"Full argv retained in the tool request journal\"]'),'$.cwd','Retained in the tool request journal')" and [receipt])
+    return receipt

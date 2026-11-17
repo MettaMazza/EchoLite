@@ -1,0 +1,36 @@
+# Small real-runtime integration probe; does not fill the context window.
+import "../src/native_model"
+import "fs"
+import "sql"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: native_runtime <token file>"
+        return 1
+    set token to string_trim(read_file(get_list(args and 1)))
+    if token == "":
+        display "Missing local runtime credential"
+        return 1
+    set payload to "{\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word ready.\"}],\"max_tokens\":256,\"temperature\":0,\"stream\":true,\"stream_options\":{\"include_usage\":true},\"cache_prompt\":true}"
+    set db to sql_open(":memory:")
+    set response to native_model_generate(db and token and payload and 0)
+    set rows to sql_query_params(db and "SELECT CASE WHEN json_valid(?) THEN 1 ELSE 0 END" and [response])
+    if length_list(rows) == 0 || get_list(get_list(rows and 0) and 0) != "1":
+        display "Invalid runtime JSON"
+        sql_close(db)
+        return 1
+    set rows to sql_query_params(db and "SELECT json_extract(?,'$.text'),json_extract(?,'$.reasoning'),json_extract(?,'$.prompt_tokens'),json_extract(?,'$.completion_tokens'),json_extract(?,'$.finish_reason')" and [response,response,response,response,response])
+    set row to get_list(rows and 0)
+    display concat("Answer: " and get_list(row and 0))
+    display concat("Thinking: " and get_list(row and 1))
+    display concat("Prompt tokens: " and get_list(row and 2))
+    display concat("Generated tokens: " and get_list(row and 3))
+    display concat("Finish: " and get_list(row and 4))
+    if get_list(row and 4) != "stop" || string_contains(string_to_lower(get_list(row and 0)) and "ready") == 0:
+        display response
+        sql_close(db)
+        return 1
+    sql_close(db)
+    display "PASS: short EP-to-native-model request"
+    return 0

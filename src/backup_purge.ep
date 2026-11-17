@@ -1,0 +1,116 @@
+# Forgetting revokes authority before removing any managed recovery artifacts.
+import "recovery_guard"
+import "backup_check"
+
+define backup_managed_name with name:
+    set start to 0
+    if starts_with(name and "backup-"):
+        set start to 7
+    else if starts_with(name and "pending-"):
+        set start to 8
+    else:
+        return 0
+    if string_length(name) < start + 32 || snapshot_hex(substring(name and start and 32) and 32) == 0:
+        return 0
+    set suffix to substring(name and start + 32 and string_length(name) - start - 32)
+    if suffix == ".sqlite3" || suffix == ".sqlite3-journal" || suffix == ".sqlite3-wal" || suffix == ".sqlite3-shm" || suffix == ".sqlite3.sha256":
+        return 1
+    return 0
+
+define recovery_discard_preparation with dir:
+    set libc to native_system()
+    set info to alloc_bytes(144)
+    set code to ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and ".restore.pending" and info and 32)
+    if code == 0 || transport_errno(libc) != 2:
+        free_bytes(info)
+        return 0
+    set names to ["restore-new.sqlite3","restore-new.sqlite3.sha256","restore-new.sqlite3-wal","restore-new.sqlite3-shm","restore-new.sqlite3-journal",".restore.intent.tmp"]
+    set valid to 1
+    set i to 0
+    repeat while i < length_list(names) && valid == 1:
+        set name to get_list(names and i)
+        set code to ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and 32)
+        if code != 0:
+            if transport_errno(libc) != 2:
+                set valid to 0
+        else if lease_integer(info and 4 and 2) / 4096 != 8 || lease_integer(info and 16 and 4) != ep_dlcall0(ep_dlsym(libc and "getuid")) || lease_integer(info and 6 and 2) != 1:
+            set valid to 0
+        else if ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and name and 0) != 0 && transport_errno(libc) != 2:
+            set valid to 0
+        set i to i + 1
+    free_bytes(info)
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        set valid to 0
+    return valid
+
+define backup_purge_entries with dir and pending_only returning Str:
+    set libc to native_system()
+    set duplicate to ep_dlcall1(ep_dlsym(libc and "dup") and dir)
+    if duplicate < 0 || duplicate > 2147483647:
+        return backup_check_error("Cannot inspect managed backup directory")
+    set stream to ep_dlcall1(ep_dlsym(libc and "fdopendir") and duplicate)
+    if stream == 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and duplicate)
+        return backup_check_error("Cannot inspect managed backup directory")
+    ep_dlcall1(ep_dlsym(libc and "rewinddir") and stream)
+    set error_pointer to ep_dlcall0(ep_dlsym(libc and "__error"))
+    set valid to 1
+    set finished to 0
+    set scanned to 0
+    set removed to 0
+    repeat while valid == 1 && finished == 0:
+        native_bytes_write(error_pointer and 0 and 0 and 4)
+        set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and stream)
+        if entry == 0:
+            set finished to 1
+            if transport_errno(libc) != 0:
+                set valid to 0
+        else:
+            set scanned to scanned + 1
+            if scanned > 10000:
+                set valid to 0
+            set name to ptr_to_str(entry + 21)
+            if backup_managed_name(name) && (pending_only == 0 || starts_with(name and "pending-")):
+                if ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and name and 0) != 0:
+                    set valid to 0
+                else:
+                    set removed to removed + 1
+    ep_dlcall1(ep_dlsym(libc and "closedir") and stream)
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        set valid to 0
+    if valid == 0:
+        return backup_check_error("Cannot invalidate all managed backups; forgetting must not commit")
+    return concat("{\"status\":\"ok\",\"deleted\":" and concat(int_to_string(removed) and "}"))
+
+define backup_purge with home returning Str:
+    if recovery_guard(home and 1) == "":
+        return backup_check_error("Cannot rotate recovery authority; forgetting must not commit")
+    set libc to native_system()
+    set resolved to alloc_bytes(1024)
+    set code to ep_dlcall2(ep_dlsym(libc and "realpath") and home and resolved)
+    set canonical to ptr_to_str(resolved)
+    free_bytes(resolved)
+    if code == 0:
+        return backup_check_error("Cannot resolve state directory")
+    set parent to native_open(canonical and 17826048 and 0)
+    if parent < 0:
+        return backup_check_error("Cannot open state directory")
+    set discarded to recovery_discard_preparation(parent)
+    if discarded == 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and parent)
+        return backup_check_error("Cannot discard interrupted restore preparation; forgetting must not commit")
+    set dir to native_openat(parent and "backups" and 17826048 and 0)
+    set missing to dir < 0 && transport_errno(libc) == 2
+    ep_dlcall1(ep_dlsym(libc and "close") and parent)
+    if missing:
+        return "{\"status\":\"ok\",\"deleted\":0}"
+    if dir < 0:
+        return backup_check_error("Backup directory is unavailable or is a symlink")
+    set info to alloc_bytes(144)
+    set owned to ep_dlcall2(ep_dlsym(libc and "fstat") and dir and info) == 0 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid"))
+    free_bytes(info)
+    set result to backup_check_error("Backup directory must be owned by the current user")
+    if owned:
+        set result to backup_purge_entries(dir and 0)
+    ep_dlcall1(ep_dlsym(libc and "close") and dir)
+    return result

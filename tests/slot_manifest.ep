@@ -1,0 +1,55 @@
+import "../src/slot_manifest"
+import "os"
+set checks to 0
+
+define manifest_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    set path to concat(home and "/memory.sqlite3")
+    set db to sql_open(path)
+    manifest_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE prompt_cache(namespace TEXT,epoch TEXT,name TEXT,payload BLOB,digest TEXT,bytes INTEGER,used INTEGER,PRIMARY KEY(namespace,name));") == 0 and "isolated metadata")
+    set binding to slot_binding(db and home and "model-v1" and "0")
+    manifest_assert(snapshot_hex(binding and 64) and "state and recovery identity bound")
+    set filename to concat("echolite-" and concat(sha256("fixture") and ".bin"))
+    set file to concat(home and concat("/" and filename))
+    write_file(file and "abc")
+    ep_dlcall2(ep_dlsym(native_system() and "chmod") and file and 420)
+    set directory to native_open(home and 17826048 and 0)
+    set receipt to result_cache_scalar(db and "SELECT json_object('id_slot',0,'filename',?,'n_saved',3,'n_written',3)" and [filename])
+    set published to slot_manifest_publish(db and home and directory and "model-v1" and "0" and binding and receipt)
+    manifest_assert(string_contains(published and "\"status\":\"ok\"") and concat("durable manifest published: " and published))
+    manifest_assert(slot_file_size(directory and filename) == 3 and "native writer permissions tightened before publication")
+    sql_close(db)
+    set db to sql_open(path)
+    set loaded to slot_manifest_load(db and home and directory and "model-v1" and "0")
+    manifest_assert(string_contains(loaded and "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") and "reopened manifest has independently known SHA-256")
+    manifest_assert(slot_manifest_load(db and home and directory and "model-v2" and "0") == "" and "different model namespace rejected")
+    sql_execute(db and "UPDATE metadata SET value='1' WHERE key='cache_epoch'")
+    manifest_assert(slot_manifest_load(db and home and directory and "model-v1" and "0") == "" and "forgotten epoch rejected")
+    manifest_assert(string_contains(slot_manifest_publish(db and home and directory and "model-v1" and "0" and binding and receipt) and "identity changed") and "stale writer cannot publish")
+    sql_execute(db and "UPDATE metadata SET value='0' WHERE key='cache_epoch'")
+    write_file(file and "abd")
+    manifest_assert(slot_manifest_load(db and home and directory and "model-v1" and "0") == "" and "same-size snapshot corruption rejected")
+    write_file(file and "abc")
+    ep_dlcall2(ep_dlsym(native_system() and "chmod") and file and 420)
+    manifest_assert(slot_manifest_load(db and home and directory and "model-v1" and "0") == "" and "non-private snapshot rejected")
+    ep_dlcall2(ep_dlsym(native_system() and "chmod") and file and 384)
+    sql_execute(db and "UPDATE prompt_cache SET digest='bad'")
+    manifest_assert(slot_manifest_load(db and home and directory and "model-v1" and "0") == "" and "manifest corruption rejected")
+    slot_manifest_publish(db and home and directory and "model-v1" and "0" and binding and receipt)
+    set rotated to recovery_guard(home and 1)
+    manifest_assert(snapshot_hex(rotated and 64) && string_equals(binding and slot_binding(db and home and "model-v1" and "0")) == 0 and "recovery authority rotation changes identity")
+    manifest_assert(slot_manifest_load(db and home and directory and "model-v1" and "0") == "" and "copied old database cannot restore revoked snapshot")
+    ep_dlcall1(ep_dlsym(native_system() and "close") and directory)
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " persistent native slot manifest checks"))
+    return 0

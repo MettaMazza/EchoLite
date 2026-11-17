@@ -1,0 +1,19 @@
+{
+  "library": "GMP",
+  "version": "6.3.0",
+  "source": "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz",
+  "source_sha256": "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898",
+  "file": "models/runtime/libgmp.10.dylib",
+  "architecture": "arm64",
+  "linkage": "dynamic",
+  "license": "LGPL-3.0-or-later",
+  "calculator": {
+    "implementation": "src/calculator.ep",
+    "arithmetic": "exact rational",
+    "expression_bytes": 512,
+    "maximum_nodes": 128,
+    "maximum_depth": 32,
+    "maximum_integer_bits": 16384,
+    "maximum_absolute_power": 1000
+  }
+}

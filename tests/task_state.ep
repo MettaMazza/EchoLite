@@ -1,0 +1,76 @@
+# Actual core lifecycle commands. Journal failure combinations are fixtures,
+# deliberately not represented as real tool execution or model inference.
+import "../src/application_paths"
+import "../src/result_cache"
+set checks to 0
+
+define state_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: task_state NEW_STATE CORE"
+        return 1
+    set home to get_list(args and 1)
+    set core to get_list(args and 2)
+    state_assert(ep_dlcall2(ep_dlsym(native_system() and "mkdir") and home and 448) == 0 and "exclusive private fixture directory")
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and "")
+    state_assert(application_wait(core and ["init"]) == 0 and "isolated core initializes")
+    set initial_me to read_file(concat(home and "/Me.txt"))
+    state_assert(application_wait(core and ["remember","episodic","tasks","user","Calculate the recorded project total"]) == 0 and "request persisted")
+    state_assert(application_wait(core and ["task-create","tasks","1","Project total","Successful calculator receipt"]) == 0 and "task created through command interface")
+    state_assert(application_wait(core and ["task-open","tasks","task_id:2"]) != 0 and "malformed task lookup is an explicit failure")
+    state_assert(application_wait(core and ["task-open","tasks","2"]) == 0 and "bare task ID reads persisted checkpoint")
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    state_assert(result_cache_scalar(db and "SELECT status||':'||revision FROM tasks WHERE memory=2" and []) == "planned:1" and "new process persisted planned checkpoint")
+    application_wait(core and ["task-create","tasks","1","Project total","Successful calculator receipt"])
+    state_assert(result_cache_scalar(db and "SELECT count(*) FROM tasks" and []) == "1" and "repeated creation reuses identical active task")
+    application_wait(core and ["task-update","tasks","2","1","running","Use calculator","","1"])
+    state_assert(result_cache_scalar(db and "SELECT status||':'||revision FROM tasks WHERE memory=2" and []) == "running:2" and "next process records active work")
+    application_wait(core and ["task-update","tasks","2","1","failed","","stale","1"])
+    state_assert(result_cache_scalar(db and "SELECT status||':'||revision FROM tasks WHERE memory=2" and []) == "running:2" and "stale revision cannot overwrite work")
+    application_wait(core and ["task-update","tasks","2","2","completed","","","1"])
+    state_assert(result_cache_scalar(db and "SELECT status FROM tasks WHERE memory=2" and []) == "running" and "prose cannot complete task")
+    # Construct a failed journal fixture, retaining foreign-key integrity.
+    sql_execute(db and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','tasks','tool-fixture','{\"status\":\"ok\",\"outcome\":\"failed\",\"text\":\"Deliberate failed tool fixture\"}')")
+    set receipt to result_cache_scalar(db and "SELECT last_insert_rowid()" and [])
+    sql_execute(db and "INSERT INTO turns(project,user_memory,me_version,status) VALUES('tasks',1,1,'completed')")
+    sql_execute_params(db and "INSERT INTO tool_runs(turn_id,name,arguments,status,observation) VALUES(1,'calculator','47*19','failed',?)" and [receipt])
+    application_wait(core and ["task-update","tasks","2","2","completed","","",receipt])
+    state_assert(result_cache_scalar(db and "SELECT status||':'||revision FROM tasks WHERE memory=2" and []) == "running:2" and "failed journal cannot complete task")
+    sql_execute(db and "UPDATE tool_runs SET status='completed'")
+    application_wait(core and ["task-update","tasks","2","2","completed","","",receipt])
+    state_assert(result_cache_scalar(db and "SELECT status||':'||revision FROM tasks WHERE memory=2" and []) == "running:2" and "failed payload cannot complete task despite journal status")
+    sql_execute_params(db and "UPDATE memories SET body=json_set(body,'$.outcome','completed') WHERE id=?" and [receipt])
+    sql_execute(db and "UPDATE tool_runs SET name='task_create'")
+    application_wait(core and ["task-update","tasks","2","2","completed","","",receipt])
+    state_assert(result_cache_scalar(db and "SELECT status||':'||revision FROM tasks WHERE memory=2" and []) == "running:2" and "bookkeeping receipt cannot prove work")
+    set bookkeeping to ["task_schedule","schedule_cancel","schedule_list","tool_select","memory_assess"]
+    set booking_index to 0
+    repeat while booking_index < length_list(bookkeeping):
+        sql_execute_params(db and "UPDATE tool_runs SET name=?" and [get_list(bookkeeping and booking_index)])
+        application_wait(core and ["task-update","tasks","2","2","completed","","",receipt])
+        state_assert(result_cache_scalar(db and "SELECT status||':'||revision FROM tasks WHERE memory=2" and []) == "running:2" and "scheduling or capability bookkeeping cannot prove task work")
+        set booking_index to booking_index + 1
+    sql_execute(db and "UPDATE tool_runs SET name='calculator'")
+    application_wait(core and ["task-update","tasks","2","2","completed","","",receipt])
+    state_assert(result_cache_scalar(db and "SELECT status||':'||revision FROM tasks WHERE memory=2" and []) == "completed:3" and "successful work receipt allows terminal checkpoint")
+    state_assert(result_cache_scalar(db and "SELECT m.status FROM tasks t JOIN memories m ON m.id=t.current_memory WHERE t.memory=2" and []) == "archived" and "completed task leaves active context")
+    application_wait(core and ["task-update","tasks","2","3","running","Repeat work","",receipt])
+    state_assert(result_cache_scalar(db and "SELECT status||':'||revision FROM tasks WHERE memory=2" and []) == "completed:3" and "terminal task cannot restart accidentally")
+    state_assert(application_wait(core and ["me-rollback","1","1"]) == 0 and "Me rollback creates a new durable revision")
+    state_assert(string_equals(read_file(concat(home and "/Me.txt")) and initial_me) and "rollback projects exact identity")
+    state_assert(application_wait(core and ["me-rollback","1","1"]) != 0 and "stale rollback rejected")
+    sql_close(db)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    state_assert(result_cache_scalar(db and "SELECT max(id) FROM me_versions" and []) == "2" and "identity revision persists after reopening")
+    state_assert(result_cache_scalar(db and "PRAGMA integrity_check" and []) == "ok" and "state remains consistent")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " core task and identity lifecycle checks"))
+    return 0

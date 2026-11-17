@@ -1,0 +1,54 @@
+import "../src/network_policy"
+import "../src/web_tool"
+set checks to 0
+
+define network_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_NETWORK_MODE" and "")
+    network_assert(network_mode(home) == "offline" and "new state defaults to offline")
+    network_assert(network_save(home and "connected") and "connected setting saved atomically")
+    network_assert(network_mode(home) == "connected" and "saved setting read from disk")
+    network_assert(network_save(home and "invalid") == 0 && network_mode(home) == "connected" and "invalid edit preserves prior setting")
+    network_assert(network_save(home and "offline") && network_mode(home) == "offline" and "offline mode persists")
+    set_env("ECHOLITE_NETWORK_MODE" and "connected")
+    network_assert(network_mode(home) == "connected" and "active launch mode stays fixed across saved-setting changes")
+    set_env("ECHOLITE_NETWORK_MODE" and "invalid")
+    network_assert(network_mode(home) == "" and "invalid active setting fails closed")
+    set_env("ECHOLITE_NETWORK_MODE" and "")
+    set db to sql_open(concat(home and "/web.sqlite3"))
+    network_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "private source cache")
+    set url to "https://offline-fixture.invalid/source"
+    set request to result_cache_scalar(db and "SELECT json_object('url',?,'offset',0,'refresh',json('true'))" and [url])
+    set missing to web_lookup(db and request and "0")
+    network_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.error_code')" and [missing]) == "offline" and "uncached URL returns explicit offline receipt without request")
+    set snapshot to result_cache_scalar(db and "SELECT json_object('status','ok','store',json('true'),'text','Retained source MINT-482','url',?,'title','Saved source','expires_at',0,'fetched_at','2026-11-17T00:00:00Z','validated_at','2026-11-17T00:00:00Z','links',json('[]'),'content_sha256',?)" and [url,sha256("Retained source MINT-482")])
+    web_snapshot_store(db and web_namespace() and url and "0" and snapshot)
+    sql_close(db)
+    set db to sql_open(concat(home and "/web.sqlite3"))
+    set saved to web_lookup(db and request and "0")
+    network_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [saved]) == "Retained source MINT-482" and "expired snapshot survives database reopen and refresh request offline")
+    network_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.offline_snapshot')=1 AND json_extract(?,'$.stale')=1 AND json_extract(?,'$.cache_hit')=1 AND json_extract(?,'$.revalidated')=0" and [saved,saved,saved,saved]) == "1" and "receipt discloses stale cached source with no revalidation")
+    network_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.validated_at')" and [saved]) == "2026-11-17T00:00:00Z" and "offline access does not invent new validation time")
+    set snapshot to result_cache_scalar(db and "SELECT json_set(?,'$.expires_at',CAST(strftime('%s','now') AS INTEGER)+300)" and [snapshot])
+    web_snapshot_store(db and web_namespace() and url and "0" and snapshot)
+    set fresh to web_lookup(db and request and "0")
+    network_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.stale')=0 AND json_extract(?,'$.offline_snapshot')=1 AND json_extract(?,'$.revalidated')=0" and [fresh,fresh,fresh]) == "1" and "refresh request does not mislabel an unexpired offline snapshot stale")
+    sql_execute(db and "UPDATE metadata SET value='1' WHERE key='cache_epoch'")
+    network_assert(string_contains(web_lookup(db and request and "0") and "Memory changed") and "forgetting epoch still prevents old snapshot reuse")
+    sql_close(db)
+    remove_file(concat(home and "/network-mode"))
+    ep_dlcall2(ep_dlsym(native_system() and "symlink") and "/etc/hosts" and concat(home and "/network-mode"))
+    network_assert(network_mode(home) == "" and "symlink setting rejected")
+    display concat("PASS: " and concat(int_to_string(checks) and " persistent network policy checks"))
+    return 0

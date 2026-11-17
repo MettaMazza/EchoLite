@@ -1,0 +1,55 @@
+import "../src/document"
+import "os"
+import "fs"
+
+set checks to 0
+
+define assert_document with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define rejected with result:
+    return get_json_value(get_json_object_value(json_parse(result) and "status")) == "error"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: document <existing temporary directory>"
+        return 1
+    set root to get_list(args and 1)
+    set path to concat(root and "/document.txt")
+    write_file(path and "Hello, café. 世界 🌱\n")
+    assert_document(read_document(path) == "OK\nHello, café. 世界 🌱\n" and "UTF-8 file round trip")
+    write_file(path and "")
+    assert_document(read_document(path) == "OK\n" and "empty file")
+    assert_document(rejected(read_document("relative.txt")) and "absolute path required")
+    assert_document(rejected(read_document(root)) and "directory rejected")
+    assert_document(rejected(read_document("/dev/zero")) and "device rejected without blocking")
+    assert_document(rejected(read_document(concat(root and "/missing"))) and "missing file")
+    set vectors to [[0],[192,128],[237,160,128],[244,144,128,128],[226,130],[128],[255]]
+    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set i to 0
+    repeat while i < length_list(vectors):
+        set bytes to get_list(vectors and i)
+        set data to alloc_bytes(length_list(bytes))
+        set j to 0
+        repeat while j < length_list(bytes):
+            poke_byte(data and j and get_list(bytes and j))
+            set j to j + 1
+        set fd to ep_dlcall3(ep_dlsym(libc and "open") and path and 1537 and 384)
+        assert_document(fd >= 0 && fd < 2147483647 and "fixture opened")
+        assert_document(ep_dlcall3(ep_dlsym(libc and "write") and fd and data and length_list(bytes)) == length_list(bytes) and "fixture written")
+        ep_dlcall1(ep_dlsym(libc and "close") and fd)
+        free_bytes(data)
+        assert_document(rejected(read_document(path)) and "malformed or NUL file rejected")
+        set i to i + 1
+    set fd to ep_dlcall2(ep_dlsym(libc and "open") and path and 1)
+    assert_document(ep_dlcall2(ep_dlsym(libc and "ftruncate") and fd and 8388609) == 0 and "oversize fixture")
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    assert_document(rejected(read_document(path)) and "8 MiB bound")
+    remove_file(path)
+    display concat("PASS: " and concat(int_to_string(checks) and " document checks in Ernos Plain"))
+    return 0

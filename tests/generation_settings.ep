@@ -1,0 +1,36 @@
+import "../src/generation_settings"
+set checks to 0
+
+define settings_assert with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    set_env("ECHOLITE_MAX_OUTPUT_TOKENS" and "")
+    set_env("ECHOLITE_REASONING_BUDGET" and "")
+    set defaults to generation_settings(db)
+    settings_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.max_tokens')=8192 AND json_extract(?,'$.reasoning_budget_tokens')=-1" and [defaults,defaults]) == "1" and "default output allowance and unrestricted thinking")
+    set_env("ECHOLITE_MAX_OUTPUT_TOKENS" and "1024")
+    set_env("ECHOLITE_REASONING_BUDGET" and "512")
+    set configured to generation_settings(db)
+    settings_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.max_tokens')=1024 AND json_extract(?,'$.reasoning_budget_tokens')=512" and [configured,configured]) == "1" and "explicit request settings")
+    settings_assert(string_equals(defaults and configured) == 0 and "settings alter request cache input")
+    set_env("ECHOLITE_REASONING_BUDGET" and "1024")
+    settings_assert(string_contains(generation_settings(db) and "error") and "answer reserve required")
+    set_env("ECHOLITE_REASONING_BUDGET" and "-2")
+    settings_assert(string_contains(generation_settings(db) and "error") and "invalid negative budget rejected")
+    set_env("ECHOLITE_REASONING_BUDGET" and "0")
+    settings_assert(string_contains(generation_settings(db) and "\"status\":\"ok\"") and "explicit no-thinking setting")
+    set_env("ECHOLITE_MAX_OUTPUT_TOKENS" and "32769")
+    settings_assert(string_contains(generation_settings(db) and "error") and "oversized output rejected")
+    set_env("ECHOLITE_MAX_OUTPUT_TOKENS" and "127")
+    settings_assert(string_contains(generation_settings(db) and "error") and "undersized output rejected")
+    set_env("ECHOLITE_MAX_OUTPUT_TOKENS" and "1024x")
+    settings_assert(string_contains(generation_settings(db) and "error") and "noninteger rejected")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " generation settings checks"))
+    return 0

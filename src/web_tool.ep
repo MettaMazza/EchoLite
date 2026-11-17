@@ -1,0 +1,105 @@
+# Native web orchestration: explicit HTTPS redirects, persistent snapshots, citations.
+import "web_transfer"
+import "web_snapshot"
+import "network_policy"
+
+define web_namespace returning Str:
+    set version to ptr_to_str(ep_dlcall0(ep_dlsym(web_url_library() and "curl_version")))
+    set data to alloc_bytes(128)
+    set size to alloc_bytes(8)
+    native_bytes_write(size and 0 and 127 and 8)
+    set os_version to "unknown"
+    if ep_dlcall5(ep_dlsym(native_system() and "sysctlbyname") and "kern.osversion" and data and size and 0 and 0) == 0:
+        set os_version to ptr_to_str(data)
+    free_bytes(data)
+    free_bytes(size)
+    return concat("web-ep-v1:" and concat(version and concat(":" and os_version)))
+
+define web_redirect with db and current and response returning Str:
+    set raw to result_cache_scalar(db and "SELECT json_extract(?,'$.headers')" and [response])
+    set parsed to web_headers(db and raw)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [parsed]) != "ok":
+        return ""
+    set location to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.headers.location'),'')" and [parsed])
+    return web_url(location and current)
+
+define web_fetch with db and original and previous returning Str:
+    set current to original
+    set hop to 0
+    repeat while hop < 4:
+        set etag to ""
+        set modified to ""
+        if previous != "":
+            if string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.url')" and [previous]) and current):
+                set etag to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.http_headers.etag'),'')" and [previous])
+                set modified to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.http_headers.\"last-modified\"'),'')" and [previous])
+        set response to web_transfer_request(db and current and etag and modified)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [response]) != "ok":
+            return response
+        set redirect to result_cache_scalar(db and "SELECT json_extract(?,'$.http_status') IN (301,302,303,307,308)" and [response])
+        if redirect == "1":
+            set next to web_redirect(db and current and response)
+            if next == "":
+                return web_markup_error(db and "Web redirect has no supported HTTPS target")
+            set current to next
+        else:
+            return web_snapshot(db and current and response and previous)
+        set hop to hop + 1
+    return web_markup_error(db and "Web redirect limit exceeded")
+
+define web_lookup with db and expression and epoch returning Str:
+    # This platform's JSON extractor can truncate U+0000; reject it before extraction.
+    if string_contains(expression and "\u0000"):
+        return web_markup_error(db and "Web arguments cannot contain NUL escapes")
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [expression]) != "1":
+        return web_markup_error(db and "Invalid web_read JSON arguments")
+    set valid to result_cache_scalar(db and "SELECT json_type(?)='object' AND (SELECT count(*) FROM json_each(?))=3 AND (SELECT count(DISTINCT key) FROM json_each(?))=3 AND json_type(?,'$.url')='text' AND json_type(?,'$.offset')='integer' AND json_extract(?,'$.offset') BETWEEN 0 AND 20000 AND json_type(?,'$.refresh') IN ('true','false') AND instr(json_extract(?,'$.url'),char(0))=0" and [expression,expression,expression,expression,expression,expression,expression,expression])
+    if valid != "1":
+        return web_markup_error(db and "web_read requires URL, character offset 0-20000 and boolean refresh")
+    set input to result_cache_scalar(db and "SELECT json_extract(?,'$.url')" and [expression])
+    if result_cache_scalar(db and "SELECT instr(?,char(0))=0" and [input]) != "1":
+        return web_markup_error(db and "Invalid web URL")
+    set url to web_url(input and "")
+    if url == "":
+        return web_markup_error(db and "Web reader requires credential-free HTTPS on port 443")
+    set namespace to web_namespace()
+    set snapshot to result_cache_get(db and namespace and url and epoch)
+    if snapshot != "" && result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
+        return snapshot
+    set mode to network_mode(get_env("ECHOLITE_HOME"))
+    if mode == "":
+        return web_markup_error(db and "Invalid network mode; web access is disabled")
+    if mode == "offline" && snapshot == "":
+        return result_cache_scalar(db and "SELECT json_object('status','ok','tool','web_read','outcome','failed','error_code','offline','text','Offline mode: no saved copy of this URL. Use local knowledge or enable connected mode. No web request was sent.')" and [])
+    set fresh to "0"
+    if snapshot != "":
+        set fresh to result_cache_scalar(db and "SELECT json_extract(?,'$.expires_at')>CAST(strftime('%s','now') AS INTEGER) AND json_extract(?,'$.refresh')=0" and [snapshot,expression])
+    set hit to "true"
+    set revalidated to "false"
+    if fresh != "1" && mode == "connected":
+        set hit to "false"
+        set snapshot to web_fetch(db and url and snapshot)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
+            return snapshot
+        set revalidated to result_cache_scalar(db and "SELECT CASE WHEN json_extract(?,'$.revalidated')=1 THEN 'true' ELSE 'false' END" and [snapshot])
+        set snapshot to web_snapshot_store(db and namespace and url and epoch and snapshot)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
+            return snapshot
+    set text to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [snapshot])
+    set offset to result_cache_scalar(db and "SELECT json_extract(?,'$.offset')" and [expression])
+    if result_cache_scalar(db and "SELECT CAST(? AS INTEGER)<=length(?)" and [offset,text]) != "1":
+        return web_markup_error(db and "Web offset is beyond captured source text")
+    set remaining to result_cache_scalar(db and "SELECT substr(?,CAST(? AS INTEGER)+1)" and [text,offset])
+    set excerpt to dictionary_excerpt(remaining and 1800)
+    set next to result_cache_scalar(db and "SELECT CAST(? AS INTEGER)+length(?)" and [offset,excerpt])
+    if result_cache_epoch(db and epoch) == 0:
+        return web_markup_error(db and "Memory forgotten during web read; result discarded")
+    set params to [snapshot,snapshot,snapshot,excerpt,offset,next,text,next,next,text,snapshot,snapshot,snapshot,snapshot,snapshot,snapshot,hit,revalidated]
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','tool','web_read','outcome','completed','url',json_extract(?,'$.url'),'entries',json_array(json_object('url',json_extract(?,'$.url'))),'title',json_extract(?,'$.title'),'text',?,'offset',CAST(? AS INTEGER),'next_offset',CASE WHEN CAST(? AS INTEGER)<length(?) THEN CAST(? AS INTEGER) ELSE NULL END,'more',json(CASE WHEN CAST(? AS INTEGER)<length(?) THEN 'true' ELSE 'false' END),'capture_truncated',json_extract(?,'$.capture_truncated'),'content_sha256',json_extract(?,'$.content_sha256'),'fetched_at',json_extract(?,'$.fetched_at'),'validated_at',json_extract(?,'$.validated_at'),'links',json_extract(?,'$.links'),'links_truncated',json_extract(?,'$.links_truncated'),'cache_hit',json(?),'revalidated',json(?))" and params)
+    set offline to "false"
+    set stale to "false"
+    if mode == "offline":
+        set offline to "true"
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.expires_at')>CAST(strftime('%s','now') AS INTEGER)" and [snapshot]) != "1":
+            set stale to "true"
+    return result_cache_scalar(db and "SELECT json_set(?,'$.network_mode',?,'$.offline_snapshot',json(?),'$.stale',json(?))" and [result,mode,offline,stale])

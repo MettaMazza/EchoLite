@@ -1,0 +1,122 @@
+# Bounded binary capture. Caller owns returned stdout/stderr buffers.
+import "native_process"
+import "state_lock"
+import "transport"
+
+define capture_pipe:
+    set result to create_list()
+    append_list(result and 0 - 1)
+    append_list(result and 0 - 1)
+    set descriptors to alloc_bytes(8)
+    if ep_dlcall1(ep_dlsym(native_system() and "pipe") and descriptors) == 0:
+        set reader to lease_integer(descriptors and 0 and 4)
+        set writer to lease_integer(descriptors and 4 and 4)
+        if native_fcntl_int(reader and 2 and 1) == 0 && native_fcntl_int(writer and 2 and 1) == 0 && native_fcntl_int(reader and 4 and 4) == 0:
+            set_list(result and 0 and reader)
+            set_list(result and 1 and writer)
+        else:
+            ep_dlcall1(ep_dlsym(native_system() and "close") and reader)
+            ep_dlcall1(ep_dlsym(native_system() and "close") and writer)
+    free_bytes(descriptors)
+    return result
+
+define capture_cancelled with descriptor:
+    if descriptor < 0:
+        return 0
+    set byte to alloc_bytes(1)
+    set count to ep_dlcall3(ep_dlsym(native_system() and "read") and descriptor and byte and 1)
+    set error to transport_errno(native_system())
+    free_bytes(byte)
+    if count == 0 || count == 1:
+        return 1
+    return error != 35 && error != 4
+
+# Returns [exit code, termination, stdout buffer, stdout bytes, stderr buffer, stderr bytes].
+define process_capture with executable and arguments and directory and timeout_ms and cancel_fd:
+    set result to create_list()
+    append_list(result and 0 - 1)
+    append_list(result and "launch_failed")
+    append_list(result and alloc_bytes(1048577))
+    append_list(result and 0)
+    append_list(result and alloc_bytes(1048577))
+    append_list(result and 0)
+    if timeout_ms < 1 || timeout_ms > 60000:
+        set_list(result and 1 and "invalid_timeout")
+        return result
+    if capture_cancelled(cancel_fd):
+        set_list(result and 1 and "abandoned")
+        return result
+    set output to capture_pipe()
+    set errors to capture_pipe()
+    set pipes to [output,errors]
+    set pid to 0
+    if get_list(output and 0) >= 0 && get_list(errors and 0) >= 0:
+        set pid to process_spawn_streams(executable and arguments and get_list(output and 1) and get_list(errors and 1) and 1 and directory and 1)
+    set stream to 0
+    repeat while stream < 2:
+        set pair to get_list(pipes and stream)
+        if get_list(pair and 1) >= 0:
+            ep_dlcall1(ep_dlsym(native_system() and "close") and get_list(pair and 1))
+        set stream to stream + 1
+    set scratch to alloc_bytes(65536)
+    set open_streams to [1,1]
+    set deadline to transport_now(native_system()) + timeout_ms
+    set code to 0 - 1
+    set reason to ""
+    set killed to 0
+    repeat while pid > 0 && (code == 0 - 1 || get_list(open_streams and 0) + get_list(open_streams and 1) > 0):
+        if reason == "" && capture_cancelled(cancel_fd):
+            set reason to "abandoned"
+        if reason == "" && transport_now(native_system()) >= deadline:
+            set reason to "timeout"
+        set stream to 0
+        repeat while stream < 2 && reason == "":
+            if get_list(open_streams and stream) == 1:
+                set reader to get_list(get_list(pipes and stream) and 0)
+                set count to ep_dlcall3(ep_dlsym(native_system() and "read") and reader and scratch and 65536)
+                if count == 0:
+                    set_list(open_streams and stream and 0)
+                else if count > 0 && count <= 65536:
+                    set room to 1048576 - get_list(result and 3) - get_list(result and 5)
+                    set kept to count
+                    if kept > room:
+                        set kept to room
+                        set reason to "output_limit"
+                    set slot to 2 + stream * 2
+                    ep_dlcall3(ep_dlsym(native_system() and "memcpy") and get_list(result and slot) + get_list(result and slot + 1) and scratch and kept)
+                    set_list(result and slot + 1 and get_list(result and slot + 1) + kept)
+                else:
+                    set error to transport_errno(native_system())
+                    if error != 35 && error != 4:
+                        set reason to "read_error"
+            set stream to stream + 1
+        if code == 0 - 1:
+            set code to process_poll(pid)
+        if (reason != "" || code != 0 - 1) && killed == 0:
+            ep_dlcall2(ep_dlsym(native_system() and "kill") and 0 - pid and 9)
+            set killed to 1
+        if reason != "":
+            set_list(open_streams and 0 and 0)
+            set_list(open_streams and 1 and 0)
+        if code == 0 - 2:
+            set reason to "wait_error"
+        if code == 0 - 1 || get_list(open_streams and 0) + get_list(open_streams and 1) > 0:
+            ep_dlcall1(ep_dlsym(native_system() and "usleep") and 10000)
+    if pid > 0:
+        set_list(result and 0 and code)
+        if reason == "":
+            set reason to "exited"
+        set_list(result and 1 and reason)
+    free_bytes(scratch)
+    set stream to 0
+    repeat while stream < 2:
+        set reader to get_list(get_list(pipes and stream) and 0)
+        if reader >= 0:
+            ep_dlcall1(ep_dlsym(native_system() and "close") and reader)
+        set stream to stream + 1
+    return result
+
+define capture_release with result:
+    free_bytes(get_list(result and 2))
+    free_bytes(get_list(result and 4))
+    return 0

@@ -1,0 +1,70 @@
+import "../src/backup_create"
+import "../src/native_process"
+set checks to 0
+
+define create_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define create_child with executable and home and identifier and fault:
+    set pid to process_start(executable and [home,identifier,fault])
+    if pid == 0:
+        return 0 - 2
+    set deadline to transport_now(native_system()) + 15000
+    set code to process_poll(pid)
+    repeat while code == 0 - 1 && transport_now(native_system()) < deadline:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 10000)
+        set code to process_poll(pid)
+    return code
+
+define main:
+    set args to get_args()
+    if length_list(args) < 2:
+        return 1
+    set home to get_list(args and 1)
+    if length_list(args) == 4:
+        set_env("ECHOLITE_TEST_FAULT" and get_list(args and 3))
+        set result to backup_create(home and get_list(args and 2))
+        if string_contains(result and "\"status\":\"ok\""):
+            return 0
+        return 1
+    set a to "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    set b to "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    set c to "cccccccccccccccccccccccccccccccc"
+    set d to "dddddddddddddddddddddddddddddddd"
+    create_assert(string_contains(backup_create(home and "bad") and "Backup ID") and "invalid ID rejected")
+    set live to sql_open(concat(home and "/memory.sqlite3"))
+    create_assert(sql_execute(live and "BEGIN IMMEDIATE; INSERT INTO memories(layer,project,source,body) VALUES('semantic','fixture','test','Uncommitted writer')") == 0 and "concurrent uncommitted writer")
+    set result to backup_create(home and a)
+    create_assert(string_contains(result and "\"status\":\"ok\"") and concat("consistent snapshot published: " and result))
+    sql_execute(live and "ROLLBACK")
+    sql_close(live)
+    create_assert(string_contains(backup_check(home and a) and "\"status\":\"ok\"") and "published snapshot passes EP authorization and health")
+    set path to concat(home and concat("/backups/backup-" and concat(a and ".sqlite3")))
+    set snapshot to backup_sql_open(path and 16777217)
+    create_assert(health_scalar(snapshot and "SELECT count(*) FROM memories WHERE body='Uncommitted writer'" and 32) == "0" and "uncommitted write excluded")
+    create_assert(health_scalar(snapshot and "PRAGMA journal_mode" and 32) == "delete" and "standalone DELETE journal snapshot")
+    sql_close(snapshot)
+    create_assert(string_contains(backup_create(home and a) and "error") and "existing ID never overwritten")
+    create_assert(string_contains(backup_check(home and a) and "\"status\":\"ok\"") and "original remains valid after collision")
+    create_assert(string_contains(backup_create(home and b) and "\"status\":\"ok\"") and "second snapshot")
+    create_assert(string_contains(backup_create(home and c) and "\"status\":\"ok\"") and "third snapshot")
+    create_assert(string_contains(backup_create(home and d) and "Three managed backups") and "retention ceiling respected")
+    create_assert(string_contains(backup_inventory(home and "delete" and b) and "\"deleted\":1") and "second removed")
+    create_assert(string_contains(backup_inventory(home and "delete" and c) and "\"deleted\":1") and "third removed")
+    create_assert(create_child(get_list(args and 0) and home and b and "backup_after_copy") == 79 and "crash after copying")
+    create_assert(file_exists(concat(home and concat("/backups/pending-" and concat(b and ".sqlite3")))) and "interrupted copy remains staging")
+    create_assert(string_contains(backup_create(home and c) and "\"status\":\"ok\"") and "restart publishes a new verified snapshot")
+    create_assert(file_exists(concat(home and concat("/backups/pending-" and concat(b and ".sqlite3")))) == 0 and "restart removes interrupted staging")
+    backup_inventory(home and "delete" and c)
+    create_assert(create_child(get_list(args and 0) and home and b and "backup_after_snapshot_publish") == 83 and "crash between snapshot and seal publication")
+    create_assert(string_contains(backup_check(home and b) and "checksum") and "unsealed snapshot never authorized")
+    create_assert(string_contains(backup_create(home and c) and "\"status\":\"ok\"") and "subsequent create succeeds after publication interruption")
+    create_assert(string_contains(backup_check(home and c) and "\"status\":\"ok\"") and "new snapshot valid")
+    create_assert(string_contains(backup_check(home and b) and "checksum") and "restart does not fabricate interrupted seal")
+    create_assert(string_contains(backup_inventory(home and "delete" and b) and "\"deleted\":1") and "incomplete snapshot explicitly removable")
+    display concat("PASS: " and concat(int_to_string(checks) and " EP snapshot creation checks"))
+    return 0

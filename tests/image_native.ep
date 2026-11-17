@@ -1,0 +1,43 @@
+import "image_fixture"
+import "../src/pdf_tool"
+import "os"
+set checks to 0
+
+define image_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set home to get_list(args and 1)
+    set helper to get_list(args and 2)
+    set db to sql_open(":memory:")
+    set path to concat(home and "/colours.png")
+    image_assert(image_fixture(path and 1600 and 1000) and "native EP colour fixture")
+    set result to document_child(db and helper and path and 0 and 1048576)
+    image_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok" and concat("isolated image decoded: " and substring(result and 0 and 200)))
+    image_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.width')=1024 AND json_extract(?,'$.height')=640" and [result,result]) == "1" and "aspect ratio and longest-edge limit")
+    image_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.source_width')=1600 AND json_extract(?,'$.source_height')=1000" and [result,result]) == "1" and "source dimensions retained")
+    image_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.bytes') BETWEEN 1 AND 524288 AND json_extract(?,'$.data_url') LIKE 'data:image/jpeg;base64,%'" and [result,result]) == "1" and "bounded JPEG data URL")
+    image_assert(result_cache_scalar(db and "SELECT length(json_extract(?,'$.source_sha256'))=64 AND length(json_extract(?,'$.image_sha256'))=64" and [result,result]) == "1" and "source and normalized content identities")
+    image_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.child_peak_rss_bytes') BETWEEN 1 AND 268435456" and [result]) == "1" and "isolated decode peak within 256 MiB")
+    set again to document_child(db and helper and path and 0 and 1048576)
+    image_assert(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.image_sha256')" and [result]) and result_cache_scalar(db and "SELECT json_extract(?,'$.image_sha256')" and [again])) and "stable normalization across helper processes")
+    write_file(concat(home and "/invalid.png") and "not an image")
+    image_assert(string_contains(document_child(db and helper and concat(home and "/invalid.png") and 0 and 1048576) and "error") and "invalid image rejected")
+    image_assert(string_contains(document_child(db and helper and path and 0 and 512) and "budget") and "parent output budget enforced")
+    image_assert(string_contains(document_child(db and helper and path and 0 and 1048577) and "Invalid") and "unbounded helper output rejected")
+    write_file(concat(home and "/normalized.json") and result)
+    set reversed_path to concat(home and "/reversed.png")
+    image_assert(image_fixture_order(reversed_path and 1600 and 1000 and 1) and "counterfactual image created in EP")
+    set reversed to document_child(db and helper and reversed_path and 0 and 1048576)
+    image_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [reversed]) == "ok" and "counterfactual image normalized")
+    write_file(concat(home and "/normalized-reversed.json") and reversed)
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native image normalization checks"))
+    return 0

@@ -1,0 +1,101 @@
+# Bounded local text ingestion, implemented in Ernos Plain.
+# macOS arm64 stat layout follows the platform SDK; libc supplies OS calls only.
+import "json"
+
+define document_error with reason returning Str:
+    set fields to [create_json_string("error"),create_json_string(reason)]
+    set result to json_stringify(create_json_object(["status","text"] and fields))
+    return result
+
+define document_utf8 with data and count:
+    set i to 0
+    repeat while i < count:
+        set c to peek_byte(data and i)
+        set i to i + 1
+        if c == 0:
+            return 0
+        if c >= 128:
+            set more to 0
+            set minimum to 0
+            set code to 0
+            if c >= 194 && c <= 223:
+                set more to 1
+                set minimum to 128
+                set code to c % 32
+            else if c >= 224 && c <= 239:
+                set more to 2
+                set minimum to 2048
+                set code to c % 16
+            else if c >= 240 && c <= 244:
+                set more to 3
+                set minimum to 65536
+                set code to c % 8
+            else:
+                return 0
+            if more > count - i:
+                return 0
+            repeat while more > 0:
+                set next to peek_byte(data and i)
+                if next < 128 || next > 191:
+                    return 0
+                set code to code * 64 + next % 64
+                set i to i + 1
+                set more to more - 1
+            if code < minimum || code > 1114111 || (code >= 55296 && code <= 57343):
+                return 0
+    return 1
+
+define read_document with path returning Str:
+    if string_length(path) == 0 || substring(path and 0 and 1) != "/":
+        return document_error("Document path must be absolute")
+    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set close_fn to ep_dlsym(libc and "close")
+    set fd to ep_dlcall2(ep_dlsym(libc and "open") and path and 16777220)
+    if fd < 0 || fd > 2147483647:
+        return document_error("Cannot open local document")
+    set info to alloc_bytes(144)
+    set rc to ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info)
+    set mode to peek_byte(info and 4) + peek_byte(info and 5) * 256
+    set size to 0
+    set i to 7
+    repeat while i >= 0:
+        set size to size * 256 + peek_byte(info and 96 + i)
+        set i to i - 1
+    free_bytes(info)
+    if rc != 0 || mode / 4096 != 8:
+        ep_dlcall1(close_fn and fd)
+        return document_error("Document must be a regular file")
+    if size < 0 || size > 8388608:
+        ep_dlcall1(close_fn and fd)
+        return document_error("Document exceeds 8 MiB byte limit")
+    set data to alloc_bytes(8388610)
+    if data == 0:
+        ep_dlcall1(close_fn and fd)
+        return document_error("Allocation failed")
+    set used to 0
+    set reading to 1
+    set problem to ""
+    set read_fn to ep_dlsym(libc and "read")
+    repeat while reading == 1 && used <= 8388608:
+        set n to ep_dlcall3(read_fn and fd and data + used and 8388609 - used)
+        if n < 0:
+            set errno_ptr to ep_dlcall0(ep_dlsym(libc and "__error"))
+            if peek_byte(errno_ptr and 0) != 4:
+                set problem to "Document read failed"
+                set reading to 0
+        else if n == 0:
+            set reading to 0
+        else:
+            set used to used + n
+    ep_dlcall1(close_fn and fd)
+    if used > 8388608:
+        set problem to "Document grew beyond 8 MiB byte limit"
+    if problem == "" && document_utf8(data and used) == 0:
+        set problem to "Document must be UTF-8 text without NUL bytes"
+    if problem != "":
+        free_bytes(data)
+        return document_error(problem)
+    poke_byte(data and used and 0)
+    set body to ptr_to_str(data)
+    free_bytes(data)
+    return concat("OK\n" and body)

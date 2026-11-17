@@ -1,0 +1,42 @@
+# Inspect actual native UI task creation and resumption across separate sessions.
+import "../src/result_cache"
+import "os"
+set checks to 0
+
+define task_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: task_journey STATE planned|completed"
+        return 1
+    set phase to get_list(args and 2)
+    set db to sql_open(concat(get_list(args and 1) and "/memory.sqlite3"))
+    task_assert(result_cache_scalar(db and "SELECT count(*) FROM tasks WHERE project='task-journey'" and []) == "1" and "one durable task created")
+    task_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs WHERE turn_id=1 AND name='task_create' AND status='completed'" and []) == "1" and "actual model created task exactly once")
+    task_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs WHERE turn_id=1 AND name='calculator'" and []) == "0" and "planning turn did not execute deferred calculation")
+    task_assert(result_cache_scalar(db and "SELECT count(*) FROM turns WHERE id=1 AND status='completed'" and []) == "1" and "planning conversation completed")
+    task_assert(result_cache_scalar(db and "SELECT count(*) FROM tasks t JOIN memories m ON m.id=t.current_memory WHERE instr(m.body,'47')>0 AND instr(m.body,'19')>0" and []) == "1" and "checkpoint retains observable success condition")
+    if phase == "planned":
+        task_assert(result_cache_scalar(db and "SELECT status FROM tasks" and []) == "planned" and "task remains planned after UI process exits")
+    else if phase == "completed":
+        task_assert(result_cache_scalar(db and "SELECT count(DISTINCT session) FROM session_turns" and []) == "2" and "resumption occurs in a fresh session")
+        task_assert(result_cache_scalar(db and "SELECT count(*) FROM turns WHERE status='completed'" and []) == "2" and "both conversations completed")
+        task_assert(result_cache_scalar(db and "SELECT status FROM tasks" and []) == "completed" and "resumed task is completed")
+        task_assert(result_cache_scalar(db and "SELECT count(*)>0 FROM derivations d JOIN memories m ON m.id=d.parent JOIN turns t ON t.id=(SELECT max(id) FROM turns WHERE status='completed') WHERE m.layer='working' AND m.source='task-checkpoint' AND m.id<t.user_memory AND d.child=(SELECT request_memory FROM tool_runs WHERE turn_id=(SELECT max(id) FROM turns WHERE status='completed') ORDER BY id LIMIT 1)" and []) == "1" and "prior task checkpoint was passively loaded before first action")
+        task_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs WHERE turn_id=(SELECT max(id) FROM turns WHERE status='completed') AND name='calculator' AND status='completed'" and []) == "1" and "resumption performs calculation once")
+        task_assert(result_cache_scalar(db and "SELECT count(*) FROM tasks t JOIN memories c ON c.id=t.current_memory JOIN tool_runs r ON r.observation=json_extract(c.body,'$.evidence') JOIN memories m ON m.id=r.observation WHERE r.name='calculator' AND r.status='completed' AND json_extract(m.body,'$.outcome')='completed' AND instr(m.body,'893')>0" and []) == "1" and "completed checkpoint links actual successful calculator receipt")
+        task_assert(result_cache_scalar(db and "SELECT count(*) FROM turns t JOIN memories m ON m.id=t.reply_memory WHERE t.id=(SELECT max(id) FROM turns WHERE status='completed') AND instr(m.body,'893')>0" and []) == "1" and "user sees verified answer")
+        task_assert(result_cache_scalar(db and "SELECT count(*) FROM tasks t JOIN memories m ON m.id=t.current_memory WHERE m.status='archived'" and []) == "1" and "terminal task leaves active working set")
+    else:
+        return 1
+    task_assert(result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN memories m ON m.id=r.observation WHERE r.turn_id=1 AND r.name='task_create' AND json_extract(m.body,'$.tasks[0].status')='planned' AND json_extract(m.body,'$.tasks[0].task_id')=(SELECT CAST(memory AS TEXT) FROM tasks)" and []) == "1" and "receipt exposes named saved task checkpoint")
+    task_assert(result_cache_scalar(db and "WITH RECURSIVE reach(a,b) AS (SELECT parent,child FROM derivations UNION SELECT r.a,d.child FROM reach r JOIN derivations d ON d.parent=r.b) SELECT count(*) FROM reach WHERE a=b" and []) == "0" and "task and tool provenance remains acyclic")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " actual task journey checks"))
+    return 0

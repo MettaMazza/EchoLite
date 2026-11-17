@@ -1,0 +1,50 @@
+ECHOLITE — ONE-SHOT TASK SCHEDULING
+
+Ask in chat, for example: "In five minutes, use the calculator to work out
+47*19 and save the result as a completed task." EchoLite creates a tracked task
+and saves a schedule; the receipt gives its actual UTC due time. A request to
+save work without a due time remains a planned task.
+
+Open Tasks in the sidebar to inspect objectives, task status, the latest
+schedule, UTC due time and dispatch outcome. Cancel removes an armed schedule.
+It does not delete the task or undo work already executed. A dispatched turn
+appears in the chat as SCHEDULED TASK, with the normal thinking dropdown.
+Task completion and turn completion are displayed separately.
+
+While the app is open, due work starts after ten seconds without interaction,
+provided no chat/operation is running and there is no unsent draft or image.
+At most one task starts per minute. New typing, clicks or scrolling in EchoLite interrupt
+scheduled work using the normal Stop path; the unsent draft is preserved.
+Use the chat Stop button to interrupt explicitly. Completed tool effects remain.
+The app does not wake the computer or execute while closed. Due tasks persist
+and become eligible when it reopens. Network mode still applies.
+
+A scheduled execution is bounded to eight tools and twelve model rounds. It
+must update the existing task with actual work evidence or a concrete blocker;
+confirming that a scheduler will execute later does not finish the turn. It
+cannot create or schedule another task during that execution phase.
+
+Only planned tasks at their current revision can be scheduled. Delay is zero
+through 31536000 seconds from the local system clock. One armed schedule per
+task is allowed. Cancel an old schedule explicitly before replacing it.
+Changing a task checkpoint cancels its armed schedule, so old intentions cannot
+act on changed work. Armed schedules are protected from automatic retention
+and consolidation; cancellation releases that protection.
+
+The dispatch and scheduled event commit together. Preparation failure leaves
+the schedule armed. After that commit, failure, cancellation or process death
+never automatically launches the same schedule again. Inspect saved turns and
+command receipts before explicitly scheduling a new attempt. Restoring a
+backup cancels armed schedules to avoid replaying work whose later external
+effects are unknown. Explicit forgetting propagates through schedule provenance.
+
+Core commands, all implemented in EP:
+  ./echolite schedules PROJECT
+  ./echolite schedule-set PROJECT TASK_ID TASK_REV DELAY_SECONDS SOURCE_ID
+  ./echolite schedule-cancel PROJECT SCHEDULE_ID
+  ./echolite chat-due PROJECT
+
+Use actual task/memory receipt IDs; SOURCE_ID must be active in the project.
+Model tools: task_schedule(task_id, revision, delay_seconds), schedule_list(),
+schedule_cancel(schedule_id). Their receipts are bookkeeping, not evidence
+that the scheduled objective was accomplished.

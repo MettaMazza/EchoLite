@@ -1,0 +1,39 @@
+import "../src/result_cache"
+import "os"
+set checks to 0
+
+define assert_cache with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: result_cache <new database path>"
+        return 1
+    set path to get_list(args and 1)
+    set db to sql_open(path)
+    assert_cache(sql_execute(db and "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "cache fixture initialized")
+    set payload to "{\"status\":\"ok\",\"text\":\"Hello 🌱\",\"reasoning\":\"Preserved thought\",\"completion_tokens\":11}"
+    assert_cache(result_cache_get(db and "runtime-A" and "request" and "0") == "" and "initial miss")
+    assert_cache(string_equals(result_cache_put(db and "runtime-A" and "request" and "0" and payload) and payload) and "result persisted")
+    sql_close(db)
+    set db to sql_open(path)
+    assert_cache(string_equals(result_cache_get(db and "runtime-A" and "request" and "0") and payload) and "restart preserves exact answer thinking and usage")
+    assert_cache(result_cache_get(db and "runtime-B" and "request" and "0") == "" and "runtime identity isolates entries")
+    assert_cache(result_cache_get(db and "runtime-A" and "changed-request" and "0") == "" and "request settings isolate entries")
+    sql_execute(db and "UPDATE response_cache SET payload='corrupted'")
+    assert_cache(result_cache_get(db and "runtime-A" and "request" and "0") == "" and "corrupt payload evicted")
+    assert_cache(result_cache_scalar(db and "SELECT count(*) FROM response_cache" and []) == "0" and "corrupt row removed")
+    result_cache_put(db and "runtime-A" and "request" and "0" and payload)
+    sql_execute(db and "UPDATE metadata SET value='1' WHERE key='cache_epoch'")
+    assert_cache(string_contains(result_cache_get(db and "runtime-A" and "request" and "0") and "forgetting") and "stale read refused")
+    assert_cache(string_contains(result_cache_put(db and "runtime-A" and "request" and "0" and payload) and "forgotten") and "stale write refused")
+    assert_cache(result_cache_get(db and "runtime-A" and "request" and "1") == "" and "new epoch cannot replay old result")
+    assert_cache(string_contains(result_cache_put(db and "runtime-A" and "partial" and "1" and "{\"status\":\"truncated\",\"text\":\"partial\"}") and "cannot enter") and "partial result not cached")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " persistent result cache checks in Ernos Plain"))
+    return 0

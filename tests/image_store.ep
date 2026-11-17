@@ -1,0 +1,54 @@
+import "../src/image_store"
+import "image_fixture"
+import "os"
+set checks to 0
+
+define store_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set home to get_list(args and 1)
+    set helper to get_list(args and 2)
+    set database to concat(home and "/memory.sqlite3")
+    set path to concat(home and "/attachment.png")
+    store_assert(image_fixture(path and 1600 and 1000) and "local source image")
+    set db to sql_open(database)
+    store_assert(sql_execute(db and "PRAGMA foreign_keys=ON; CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE memories(id INTEGER PRIMARY KEY AUTOINCREMENT,layer TEXT,project TEXT,source TEXT,body TEXT,status TEXT DEFAULT 'active'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 && image_schema(db) == 0 and "isolated image and memory schema")
+    set first to image_import(db and helper and "pictures" and path and "0")
+    store_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [first]) == "ok" and concat("first import: " and first))
+    set id to result_cache_scalar(db and "SELECT json_extract(?,'$.memory')" and [first])
+    store_assert(result_cache_scalar(db and "SELECT length(body)<1024 AND body NOT LIKE '%data:image%' FROM memories WHERE id=?" and [id]) == "1" and "searchable memory excludes encoded pixels")
+    set opened to image_open(db and "pictures" and id and "0")
+    store_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.data_url') LIKE 'data:image/jpeg;base64,%'" and [opened]) == "1" and "persisted pixels opened")
+    set again to image_import(db and "/missing/helper-proves-cache" and "pictures" and path and "0")
+    store_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.reused')" and [again]) == "1" && string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.memory')" and [again]) and id) and "normalization cache and project dedup avoid helper")
+    set other to image_import(db and "/missing/helper-proves-cache" and "another-project" and path and "0")
+    store_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [other]) == "ok" and "same pixels can have separate project ownership")
+    store_assert(string_contains(image_open(db and "another-project" and id and "0") and "another project") and "cross-project retrieval rejected")
+    sql_execute_params(db and "UPDATE memories SET status='archived' WHERE id=?" and [id])
+    store_assert(string_contains(image_open(db and "pictures" and id and "0") and "inactive") and "inactive attachment rejected")
+    sql_execute_params(db and "UPDATE memories SET status='active' WHERE id=?" and [id])
+    sql_execute_params(db and "UPDATE image_assets SET data_url='corrupted' WHERE memory=?" and [id])
+    store_assert(string_contains(image_open(db and "pictures" and id and "0") and "integrity") and "stored pixel corruption rejected")
+    set original to result_cache_scalar(db and "SELECT json_extract(?,'$.data_url')" and [opened])
+    sql_execute_params(db and "UPDATE image_assets SET data_url=? WHERE memory=?" and [original,id])
+    sql_close(db)
+    remove_file(path)
+    set db to sql_open(database)
+    sql_execute(db and "PRAGMA foreign_keys=ON")
+    store_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [image_open(db and "pictures" and id and "0")]) == "ok" and "attachment survives database reopen and source deletion")
+    sql_execute(db and "UPDATE metadata SET value='1'; DELETE FROM response_cache")
+    store_assert(string_contains(image_open(db and "pictures" and id and "0") and "epoch") and "stale epoch rejected")
+    sql_execute_params(db and "DELETE FROM memories WHERE id=?" and [id])
+    store_assert(result_cache_scalar(db and "SELECT count(*) FROM image_assets WHERE memory=?" and [id]) == "0" and "forgetting memory cascades to encoded image")
+    store_assert(result_cache_scalar(db and "SELECT count(*) FROM image_assets" and []) == "1" and "other project attachment preserved")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " persistent image attachment checks"))
+    return 0

@@ -1,0 +1,219 @@
+# Bounded native host filesystem observations. Reobserve before cache reuse.
+import "native_calls"
+import "os"
+import "state_lock"
+import "document"
+import "result_cache"
+
+define filesystem_error with db and name and message returning Str:
+    set params to [name,message]
+    return result_cache_scalar(db and "SELECT json_object('status','ok','tool',?,'outcome','failed','text',?,'cache_hit',json('false'))" and params)
+
+define filesystem_signature with db and info returning Str:
+    set parts to create_list()
+    set offsets to [0,8,96,48,56,64,72]
+    set i to 0
+    repeat while i < length_list(offsets):
+        set width to 8
+        if i == 0:
+            set width to 4
+        append_list(parts and int_to_string(lease_integer(info and get_list(offsets and i) and width)))
+        set i to i + 1
+    return result_cache_scalar(db and "SELECT json_array(?,?,?,?,?,?,?)" and parts)
+
+define filesystem_uri with path returning Str:
+    set result to "file://"
+    set alphabet to "0123456789ABCDEF"
+    set i to 0
+    repeat while i < string_length(path):
+        set byte to get_character(path and i)
+        if (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte == 47 || byte == 45 || byte == 46 || byte == 95 || byte == 126:
+            set result to concat(result and substring(path and i and 1))
+        else:
+            set result to concat(result and "%")
+            set result to concat(result and substring(alphabet and byte / 16 and 1))
+            set result to concat(result and substring(alphabet and byte % 16 and 1))
+        set i to i + 1
+    return result
+
+define filesystem_partial_utf8 with data and start and count:
+    set lead to peek_byte(data and start)
+    set width to 0
+    if lead >= 194 && lead <= 223:
+        set width to 2
+    else if lead >= 224 && lead <= 239:
+        set width to 3
+    else if lead >= 240 && lead <= 244:
+        set width to 4
+    if width == 0 || count >= width:
+        return 0
+    set i to 1
+    repeat while i < count:
+        set byte to peek_byte(data and start + i)
+        if byte < 128 || byte > 191:
+            return 0
+        if i == 1:
+            if (lead == 224 && byte < 160) || (lead == 237 && byte > 159) || (lead == 240 && byte < 144) || (lead == 244 && byte > 143):
+                return 0
+        set i to i + 1
+    return 1
+
+define filesystem_read with db and path and offset returning Str:
+
+    set libc to native_system()
+    set fd to native_open(path and 16777220 and 0)
+    if fd < 0 || fd > 2147483647:
+        return filesystem_error(db and "file_read" and "Cannot open the requested local file")
+    set info to alloc_bytes(144)
+    set problem to ""
+    set before to ""
+    set size to 0
+    if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0:
+        set problem to "Cannot inspect the opened file"
+    else if lease_integer(info and 4 and 2) / 4096 != 8:
+        set problem to "Only regular text files can be read"
+    else:
+        set before to filesystem_signature(db and info)
+        set size to lease_integer(info and 96 and 8)
+        if offset > size:
+            set problem to "Offset is beyond the file end"
+    set data to alloc_bytes(4097)
+    set used to 0
+    if problem == "":
+        set used to ep_dlcall4(ep_dlsym(libc and "pread") and fd and data and 4096 and offset)
+        if used < 0 || used > 4096:
+            set problem to "File read failed"
+        else if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0:
+            set problem to "Cannot verify the file after reading"
+        else if string_equals(before and filesystem_signature(db and info)) == 0:
+            set problem to "File changed during reading; retry"
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    free_bytes(info)
+    set consumed to used
+    if problem == "":
+        set valid to document_utf8(data and consumed)
+        # A 4096-byte page may end inside a Unicode code point.
+        if valid == 0 && offset + used < size:
+            set trim to 1
+            repeat while trim <= 3 && trim <= used && valid == 0:
+                set consumed to used - trim
+                set valid to document_utf8(data and consumed) && filesystem_partial_utf8(data and consumed and trim)
+                set trim to trim + 1
+        if valid == 0:
+            set problem to "The requested page is not UTF-8 text, contains binary data, or starts inside a character"
+    set result to ""
+    if problem == "":
+        poke_byte(data and consumed and 0)
+        set text to ptr_to_str(data)
+        set next to offset + consumed
+        set read_status to "Read completed; all remaining file content returned"
+        if next < size:
+            set read_status to "More bytes remain; continue using next_offset if needed"
+        else if consumed == 0 && offset > 0:
+            set read_status to "End of file reached; earlier pages remain valid"
+        set result to result_cache_scalar(db and "SELECT json_object('text',?,'read_status',?,'offset',CAST(? AS INTEGER),'next_offset',CAST(? AS INTEGER),'total_bytes',CAST(? AS INTEGER),'truncated',json(CASE WHEN CAST(? AS INTEGER)<CAST(? AS INTEGER) THEN 'true' ELSE 'false' END),'page_sha256',?,'file_signature',json(?))" and [text,read_status,int_to_string(offset),int_to_string(next),int_to_string(size),int_to_string(next),int_to_string(size),sha256(text),before])
+    else:
+        set result to filesystem_error(db and "file_read" and problem)
+    free_bytes(data)
+    return result
+
+define filesystem_list with db and path and after returning Str:
+    set libc to native_system()
+    set directory to ep_dlcall1(ep_dlsym(libc and "opendir") and path)
+    if directory == 0:
+        return filesystem_error(db and "file_list" and "Cannot open the requested directory")
+    set fd to ep_dlcall1(ep_dlsym(libc and "dirfd") and directory)
+    set info to alloc_bytes(144)
+    set before to ""
+    set problem to ""
+    if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0:
+        set problem to "Cannot inspect the opened directory"
+    else:
+        set before to filesystem_signature(db and info)
+    sql_execute(db and "CREATE TEMP TABLE IF NOT EXISTS ep_directory_page(name TEXT PRIMARY KEY COLLATE BINARY); DELETE FROM ep_directory_page;")
+    set count to 0
+    set ended to 0
+    set errno_pointer to ep_dlcall0(ep_dlsym(libc and "__error"))
+    repeat while ended == 0 && problem == "":
+        native_bytes_write(errno_pointer and 0 and 0 and 4)
+        set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and directory)
+        if entry == 0:
+            set ended to 1
+            if lease_integer(errno_pointer and 0 and 4) != 0:
+                set problem to "Directory scan failed; retry"
+        else:
+            set name to ptr_to_str(entry + 21)
+            if name != "." && name != "..":
+                set count to count + 1
+                if count > 10000:
+                    set problem to "Directory exceeds the 10,000-entry scan budget; choose a narrower directory"
+                else if document_utf8(str_to_ptr(name) and string_length(name)) == 0:
+                    set problem to "Directory contains a name that is not valid UTF-8"
+                else:
+                    sql_execute_params(db and "INSERT OR IGNORE INTO ep_directory_page SELECT ? WHERE ?>? COLLATE BINARY" and [name,name,after])
+                    sql_execute(db and "DELETE FROM ep_directory_page WHERE name NOT IN(SELECT name FROM ep_directory_page ORDER BY name LIMIT 31)")
+    if problem == "":
+        if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0:
+            set problem to "Cannot verify the directory after listing"
+        else if string_equals(before and filesystem_signature(db and info)) == 0:
+            set problem to "Directory changed during listing; retry"
+    free_bytes(info)
+    ep_dlcall1(ep_dlsym(libc and "closedir") and directory)
+    set result to ""
+    if problem == "":
+        set names to result_cache_scalar(db and "SELECT json_group_array(name) FROM (SELECT name FROM ep_directory_page ORDER BY name LIMIT 30)" and [])
+        if string_length(names) > 8000:
+            set problem to "Directory page exceeds the receipt budget"
+        else:
+            set result to result_cache_scalar(db and "SELECT json_object('text',?,'names',json(?),'next_after',CASE WHEN (SELECT count(*) FROM ep_directory_page)>30 THEN (SELECT name FROM ep_directory_page ORDER BY name LIMIT 1 OFFSET 29) ELSE NULL END,'truncated',json(CASE WHEN (SELECT count(*) FROM ep_directory_page)>30 THEN 'true' ELSE 'false' END),'directory_signature',json(?))" and [names,names,before])
+    sql_execute(db and "DELETE FROM ep_directory_page")
+    if problem != "":
+        return filesystem_error(db and "file_list" and problem)
+    return result
+
+define filesystem_lookup with db and name and expression and epoch returning Str:
+    if name != "file_read" && name != "file_list":
+        return filesystem_error(db and name and "Unsupported filesystem operation")
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [expression]) != "1":
+        return filesystem_error(db and name and "File arguments must be JSON")
+    set field to "offset"
+    if name == "file_list":
+        set field to "after"
+    set valid to result_cache_scalar(db and "SELECT json_type(?)='object' AND (SELECT count(*) FROM json_each(?))=2 AND (SELECT count(DISTINCT key) FROM json_each(?))=2 AND json_type(?,'$.path')='text' AND length(json_extract(?,'$.path')) BETWEEN 1 AND 1024 AND instr(json_extract(?,'$.path'),char(0))=0 AND json_type(?,'$.'||?) IS NOT NULL" and [expression,expression,expression,expression,expression,expression,expression,field])
+    if valid != "1":
+        return filesystem_error(db and name and "Invalid filesystem argument fields or path")
+    set path to result_cache_scalar(db and "SELECT json_extract(?,'$.path')" and [expression])
+    if starts_with(path and "~/"):
+        set path to concat(get_env("HOME") and substring(path and 1 and string_length(path) - 1))
+    if starts_with(path and "/") == 0:
+        return filesystem_error(db and name and "Use an absolute file path")
+    set resolved to alloc_bytes(4096)
+    set found to ep_dlcall2(ep_dlsym(native_system() and "realpath") and path and resolved)
+    if found == 0:
+        free_bytes(resolved)
+        return filesystem_error(db and name and "Requested path does not exist or cannot be resolved")
+    set path to ptr_to_str(resolved)
+    free_bytes(resolved)
+    set observed to ""
+    if name == "file_read":
+        if result_cache_scalar(db and "SELECT json_type(?,'$.offset')='integer' AND json_extract(?,'$.offset') BETWEEN 0 AND 9007199254740992" and [expression,expression]) != "1":
+            return filesystem_error(db and name and "Offset must be a nonnegative integer byte position")
+        set offset to string_to_int(result_cache_scalar(db and "SELECT json_extract(?,'$.offset')" and [expression]))
+        set observed to filesystem_read(db and path and offset)
+    else:
+        if result_cache_scalar(db and "SELECT json_type(?,'$.after')='text' AND length(json_extract(?,'$.after'))<=1024 AND instr(json_extract(?,'$.after'),char(0))=0" and [expression,expression,expression]) != "1":
+            return filesystem_error(db and name and "Invalid directory cursor")
+        set after to result_cache_scalar(db and "SELECT json_extract(?,'$.after')" and [expression])
+        set observed to filesystem_list(db and path and after)
+    if result_cache_scalar(db and "SELECT COALESCE(json_extract(?,'$.outcome'),'')" and [observed]) == "failed":
+        return observed
+    set request to result_cache_scalar(db and "SELECT json_array(?,?,json(?))" and [name,expression,observed])
+    set hit to result_cache_get(db and "ep-filesystem-v1" and request and epoch)
+    if hit != "":
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [hit]) != "ok":
+            return hit
+        return result_cache_scalar(db and "SELECT json_set(?,'$.cache_hit',json('true'))" and [hit])
+    set result to result_cache_scalar(db and "SELECT json_patch(json_object('status','ok','tool',?,'outcome','completed','path',?,'entries',json_array(json_object('url',?)),'cache_hit',json('false')),json(?))" and [name,path,filesystem_uri(path),observed])
+    if string_length(result) > 14000:
+        return filesystem_error(db and name and "Filesystem receipt exceeds its byte budget")
+    return result_cache_put(db and "ep-filesystem-v1" and request and epoch and result)

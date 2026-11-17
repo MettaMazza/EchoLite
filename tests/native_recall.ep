@@ -1,0 +1,73 @@
+import "../src/native_recall"
+import "fs"
+set checks to 0
+
+define assert_recall with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define recall_has with db and result and identifier:
+    return result_cache_scalar(db and "SELECT count(*) FROM json_each(?,'$.records') WHERE json_extract(value,'$[0]')=?" and [result,identifier]) == "1"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: native_recall <token file> <new database>"
+        return 1
+    set token to string_trim(read_file(get_list(args and 1)))
+    set path to get_list(args and 2)
+    set db to sql_open(path)
+    assert_recall(sql_execute(db and "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE; CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'),('memory_revision','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER); CREATE TABLE memories(id INTEGER PRIMARY KEY,layer TEXT,project TEXT,source TEXT,body TEXT,status TEXT,created TEXT DEFAULT CURRENT_TIMESTAMP); CREATE TRIGGER rev_insert AFTER INSERT ON memories BEGIN UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='memory_revision'; END; CREATE TRIGGER rev_update AFTER UPDATE ON memories BEGIN UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='memory_revision'; END; CREATE TRIGGER rev_delete AFTER DELETE ON memories BEGIN UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='memory_revision'; END;") == 0 and "isolated memory database")
+    assert_recall(native_recall_init(db) == 0 and "EP vector schema initialized")
+    sql_execute(db and "INSERT INTO memories(id,layer,project,source,body,status) VALUES(1,'episodic','home','user','The bicycle is stored in the garage.','active'),(2,'semantic','home','user','A pineapple is a tropical fruit.','active'),(3,'episodic','private','user','The bicycle is stored in a secret vault.','active'),(4,'episodic','home','user','The bicycle used to be kept in the shed.','archived'),(5,'episodic','home','tool-receipt','The bicycle is stored in the garage.','active');")
+    set result to native_recall_search(db and token and "home" and "Where do I keep my bike?" and "9223372036854775807" and "active" and "0")
+    assert_recall(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok" and concat("real semantic recall: " and result))
+    assert_recall(recall_has(db and result and "1") and "paraphrased garage memory recalled")
+    assert_recall(recall_has(db and result and "2") == 0 and "unrelated fruit excluded")
+    assert_recall(recall_has(db and result and "3") == 0 and "other project excluded")
+    assert_recall(recall_has(db and result and "4") == 0 and "archive excluded from passive recall")
+    assert_recall(recall_has(db and result and "5") == 0 and "tool receipt excluded")
+    sql_close(db)
+    set db to sql_open(path)
+    sql_execute(db and "PRAGMA foreign_keys=ON")
+    set replay to native_recall_search(db and "invalid-credential" and "home" and "Where do I keep my bike?" and "9223372036854775807" and "active" and "0")
+    assert_recall(string_equals(result and replay) and "search result survives process database reopen without model access")
+    set restricted to native_recall_search(db and token and "home" and "Where do I keep my bike?" and "1" and "active" and "0")
+    assert_recall(result_cache_scalar(db and "SELECT json_array_length(?,'$.records')" and [restricted]) == "0" and "current-turn cutoff enforced")
+    set archived to native_recall_search(db and token and "home" and "Where did my bicycle used to be kept?" and "9223372036854775807" and "archived" and "0")
+    assert_recall(recall_has(db and archived and "4") and "explicit archived recall works")
+    assert_recall(recall_has(db and archived and "1") == 0 and "archive search respects scope")
+    sql_execute(db and "UPDATE memories SET status='archived' WHERE id=1")
+    set changed to native_recall_search(db and "invalid-credential" and "home" and "Where do I keep my bike?" and "9223372036854775807" and "active" and "0")
+    assert_recall(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [changed]) == "ok" && recall_has(db and changed and "1") == 0 and "revision invalidates passive results while cached vectors remain usable")
+    sql_execute(db and "UPDATE memories SET body='The bicycle is now stored in the cellar.' WHERE id=1")
+    assert_recall(result_cache_scalar(db and "SELECT count(*) FROM ep_memory_vectors WHERE memory=1" and []) == "0" and "editing invalidates document vectors")
+    sql_execute(db and "BEGIN; DELETE FROM memories WHERE id=4; DELETE FROM response_cache; UPDATE metadata SET value='1' WHERE key='cache_epoch'; COMMIT;")
+    assert_recall(result_cache_scalar(db and "SELECT count(*) FROM ep_memory_vectors WHERE memory=4" and []) == "0" and "forgetting cascades to vectors")
+    assert_recall(string_contains(native_recall_search(db and token and "home" and "bicycle" and "9223372036854775807" and "active" and "0") and "forgotten") and "forgotten epoch refused")
+    set long_body to "A pineapple is a tropical fruit. "
+    set i to 0
+    repeat while i < 7:
+        set long_body to concat(long_body and long_body)
+        set i to i + 1
+    set long_body to concat(long_body and "The spare bicycle key is inside the blue teapot.")
+    sql_execute_params(db and "INSERT INTO memories(id,layer,project,source,body,status) VALUES(6,'episodic','home','user',?,'active')" and [long_body])
+    set long_result to native_recall_search(db and token and "home" and "Where is the spare bike key?" and "9223372036854775807" and "active" and "1")
+    assert_recall(recall_has(db and long_result and "6") and concat("short fact found within long memory: " and long_result))
+    assert_recall(string_contains(long_result and "blue teapot") and "winning original excerpt preserved")
+    sql_execute(db and "INSERT INTO memories(id,layer,project,source,body,status) VALUES(7,'semantic','home','user','The bicycle is stored in the garage.','active')")
+    set temporal to native_recall_search(db and token and "home" and "Where do I keep my bike?" and "9223372036854775807" and "active" and "1")
+    assert_recall(recall_has(db and temporal and "7") and "current tentative claim recalled")
+    sql_execute(db and "UPDATE memory_beliefs SET valid_until=strftime('%Y-%m-%dT%H:%M:%SZ','now','+3 seconds') WHERE memory=7")
+    set before_expiry to native_recall_search(db and token and "home" and "Where do I keep my bike?" and "9223372036854775807" and "active" and "1")
+    assert_recall(recall_has(db and before_expiry and "7") and "time-limited claim cached while current")
+    ep_dlcall1(ep_dlsym(native_system() and "sleep") and 4)
+    set after_expiry to native_recall_search(db and "invalid-credential" and "home" and "Where do I keep my bike?" and "9223372036854775807" and "active" and "1")
+    assert_recall(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [after_expiry]) == "ok" && recall_has(db and after_expiry and "7") == 0 and "real clock expiry invalidates cached recall without re-embedding")
+    assert_recall(result_cache_scalar(db and "SELECT count(*) FROM ep_memory_vectors WHERE memory=7" and []) != "0" and "expiry retains reusable vectors and historical original")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native recall checks in Ernos Plain"))
+    return 0

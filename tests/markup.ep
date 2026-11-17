@@ -1,0 +1,26 @@
+import "../src/markup"
+import "os"
+set checks to 0
+
+define markup_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    set result to markup_article(db and "<!doctype html><html><head><title>A &amp; B</title><style>hidden CSS</style></head><body><h1>Heading</h1><p>Hello &amp; 🌱<script>hidden JS</script></p><p>next&nbsp;line</p></body></html>")
+    markup_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.title')" and [result]) == "A & B" and "entities in title")
+    markup_assert(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [result]) and "Heading Hello & 🌱 next line") and "visible text and Unicode")
+    markup_assert(string_contains(result and "hidden") == 0 and "scripts/styles excluded")
+    set doc to markup_parse("<rss><channel><item><title>First</title><link>/content/book/One</link></item><item><title>Second</title></item></channel></rss>" and 0)
+    markup_assert(markup_xpath(doc and "string(/rss/channel/item[2]/title)") == "Second" and "search result XPath")
+    markup_assert(markup_xpath(doc and "count(/rss/channel/item)") == "2" and "result count")
+    markup_close(doc)
+    set result to markup_article(db and "<p>Recover <b>unfinished")
+    markup_assert(string_contains(result and "Recover unfinished") and "malformed HTML recovery")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native markup checks"))
+    return 0

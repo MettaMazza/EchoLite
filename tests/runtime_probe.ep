@@ -1,0 +1,18 @@
+import "../src/transport"
+import "../src/result_cache"
+import "fs"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set token to string_trim(read_file(get_list(args and 1)))
+    set db to sql_open(":memory:")
+    set ports to [8400,8401]
+    set i to 0
+    repeat while i < 2:
+        set props to transport_get(get_list(ports and i) and "/props" and token)
+        display result_cache_scalar(db and "SELECT json_object('model',json_extract(?,'$.model_path'),'context',json_extract(?,'$.default_generation_settings.n_ctx'),'build',json_extract(?,'$.build_info'),'defaults',json_extract(?,'$.default_generation_settings.params'))" and [props,props,props,props])
+        set i to i + 1
+    sql_close(db)
+    return 0

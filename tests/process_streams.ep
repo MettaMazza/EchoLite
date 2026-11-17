@@ -1,0 +1,64 @@
+import "../src/native_process"
+import "../src/transport"
+import "string"
+import "os"
+set checks to 0
+
+define stream_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define stream_wait with pid:
+    set deadline to transport_now(native_system()) + 5000
+    set code to process_poll(pid)
+    repeat while code == 0 - 1 && transport_now(native_system()) < deadline:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 10000)
+        set code to process_poll(pid)
+    if code == 0 - 1:
+        ep_dlcall2(ep_dlsym(native_system() and "kill") and pid and 9)
+    return code
+
+define stream_read with fd returning Str:
+    set data to alloc_bytes(4097)
+    set used to ep_dlcall4(ep_dlsym(native_system() and "pread") and fd and data and 4096 and 0)
+    set result to ""
+    if used >= 0 && used <= 4096:
+        set result to ptr_to_str(data)
+    free_bytes(data)
+    return result
+
+define main:
+    set args to get_args()
+    set libc to native_system()
+    set output to ep_dlcall0(ep_dlsym(libc and "tmpfile"))
+    set errors to ep_dlcall0(ep_dlsym(libc and "tmpfile"))
+    stream_assert(output != 0 && errors != 0 and "private output handles")
+    set out_fd to ep_dlcall1(ep_dlsym(libc and "fileno") and output)
+    set err_fd to ep_dlcall1(ep_dlsym(libc and "fileno") and errors)
+    native_fcntl_int(out_fd and 2 and 1)
+    native_fcntl_int(err_fd and 2 and 1)
+    set literal to "$HOME; $(echo injected) 'quoted' café"
+    set pid to process_spawn_streams(get_list(args and 1) and [literal] and out_fd and err_fd and 1 and "/private/tmp" and 1)
+    stream_assert(pid > 0 and "native process launch")
+    stream_assert(stream_wait(pid) == 7 and "actual nonzero exit status with EOF stdin")
+    set stdout to stream_read(out_fd)
+    set stderr to stream_read(err_fd)
+    stream_assert(string_contains(stdout and "stdout: Café 🌱") and "Unicode stdout")
+    stream_assert(string_contains(stdout and literal) and "literal argv without shell expansion")
+    stream_assert(string_equals(stderr and "stderr: diagnostic\n") and "separate stderr capture")
+    ep_dlcall2(ep_dlsym(libc and "ftruncate") and out_fd and 0)
+    ep_dlcall3(ep_dlsym(libc and "lseek") and out_fd and 0 and 0)
+    set pid to process_spawn_streams("/bin/pwd" and [] and out_fd and err_fd and 1 and "/private/tmp" and 1)
+    stream_assert(pid > 0 && stream_wait(pid) == 0 and "child working directory launch")
+    stream_assert(string_trim(stream_read(out_fd)) == "/private/tmp" and "child working directory applied")
+    set pid to process_spawn_streams("/bin/pwd" and [] and out_fd and err_fd and 1 and "/echolite-missing-directory" and 1)
+    stream_assert(pid == 0 and "invalid child directory does not launch")
+    set pid to process_launch("/usr/bin/true" and [] and out_fd)
+    stream_assert(pid > 0 && stream_wait(pid) == 0 and "existing launch interface preserved")
+    ep_dlcall1(ep_dlsym(libc and "fclose") and output)
+    ep_dlcall1(ep_dlsym(libc and "fclose") and errors)
+    display concat("PASS: " and concat(int_to_string(checks) and " native process stream checks"))
+    return 0

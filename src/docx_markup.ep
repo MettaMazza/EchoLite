@@ -1,0 +1,102 @@
+# Strict, bounded WordprocessingML extraction. Never resolves external entities.
+import "markup"
+
+define docx_xml_error with db and message returning Str:
+    set values to [message]
+    return result_cache_scalar(db and "SELECT json_object('status','error','text',?)" and values)
+
+define docx_word_node with node and name:
+    if lease_integer(node and 8 and 4) != 1:
+        return 0
+    if string_equals(ptr_to_str(lease_integer(node and 16 and 8)) and name) == 0:
+        return 0
+    set namespace to lease_integer(node and 72 and 8)
+    if namespace == 0:
+        return 0
+    set href to lease_integer(namespace and 16 and 8)
+    if href == 0:
+        return 0
+    return string_equals(ptr_to_str(href) and "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+
+# Validate the entire tree, including omitted revisions, before extracting text.
+define docx_structure with node and state and depth:
+    if depth > 64:
+        set_list(state and 1 and 1)
+        return 0
+    repeat while node != 0 && get_list(state and 1) == 0:
+        set_list(state and 0 and get_list(state and 0) + 1)
+        if get_list(state and 0) > 50000:
+            set_list(state and 1 and 1)
+            return 0
+        docx_structure(lease_integer(node and 24 and 8) and state and depth + 1)
+        set node to lease_integer(node and 48 and 8)
+    return 0
+
+define docx_visible with node and state:
+    repeat while node != 0 && get_list(state and 2) == 0:
+        if docx_word_node(node and "del") == 0:
+            set text to ""
+            if docx_word_node(node and "t") == 1:
+                set content to ep_dlcall1(ep_dlsym(markup_library() and "xmlNodeGetContent") and node)
+                if content != 0:
+                    set text to ptr_to_str(content)
+                    markup_release(content)
+            else if docx_word_node(node and "tab") == 1:
+                set text to "\t"
+            else if docx_word_node(node and "p") == 1 || docx_word_node(node and "br") == 1 || docx_word_node(node and "cr") == 1:
+                set text to "\n"
+            set available to 20000 - get_list(state and 1)
+            if string_length(text) > available:
+                set end to available
+                repeat while end > 0 && get_character(text and end) >= 128 && get_character(text and end) < 192:
+                    set end to end - 1
+                set text to substring(text and 0 and end)
+                set_list(state and 2 and 1)
+            builder_append(get_list(state and 0) and text)
+            set_list(state and 1 and get_list(state and 1) + string_length(text))
+            if get_list(state and 2) == 0:
+                docx_visible(lease_integer(node and 24 and 8) and state)
+        set node to lease_integer(node and 48 and 8)
+    return 0
+
+define docx_xml with db and source returning Str:
+    if string_length(source) == 0 || string_length(source) > 2097152:
+        return docx_xml_error(db and "DOCX main XML exceeds the 2 MiB limit or is empty")
+    set upper to result_cache_scalar(db and "SELECT upper(?)" and [source])
+    if string_contains(upper and "<!DOCTYPE") || string_contains(upper and "<!ENTITY"):
+        return docx_xml_error(db and "DOCX DTDs and entities are unsupported")
+    # NONET, NOERROR, NOWARNING; no RECOVER, NOENT, DTDLOAD or HUGE.
+    set document to ep_dlcall5(ep_dlsym(markup_library() and "xmlReadMemory") and source and string_length(source) and 0 and "UTF-8" and 2144)
+    if document == 0:
+        return docx_xml_error(db and "Invalid UTF-8 Word XML")
+    set root to ep_dlcall1(ep_dlsym(markup_library() and "xmlDocGetRootElement") and document)
+    set body to 0
+    if root != 0:
+        if docx_word_node(root and "document") == 1:
+            set child to lease_integer(root and 24 and 8)
+            repeat while child != 0:
+                if docx_word_node(child and "body") == 1:
+                    if body != 0:
+                        markup_close(document)
+                        return docx_xml_error(db and "DOCX has multiple document bodies")
+                    set body to child
+                set child to lease_integer(child and 48 and 8)
+    if body == 0:
+        markup_close(document)
+        return docx_xml_error(db and "DOCX requires a WordprocessingML document body")
+    set budget to [0,0]
+    docx_structure(root and budget and 0)
+    if get_list(budget and 1) != 0:
+        markup_close(document)
+        return docx_xml_error(db and "DOCX XML exceeds structural limits")
+    set state to create_list()
+    append_list(state and create_builder())
+    append_list(state and 0)
+    append_list(state and 0)
+    docx_visible(body and state)
+    markup_close(document)
+    set text to builder_to_string(get_list(state and 0))
+    set params to create_list()
+    append_list(params and text)
+    append_list(params and get_list(state and 2))
+    return result_cache_scalar(db and "SELECT json_object('status','ok','text',trim(?,char(10)||char(13)||char(9)||' '),'capture_truncated',json(CASE WHEN CAST(? AS INTEGER)=1 THEN 'true' ELSE 'false' END),'scope','Main document body and table cells only. No page layout, images, OCR, headers, footers, comments or footnotes. Inserted revisions included; deleted text omitted. Hidden text may be included.')" and params)

@@ -1,0 +1,111 @@
+# PDFKit extraction through Objective-C's native runtime; no script interpreter.
+import "filesystem"
+import "snapshot_seal"
+set PDF_OBJC to 0
+
+define pdf_message with object and method:
+    set selector to ep_dlcall1(ep_dlsym(PDF_OBJC and "sel_registerName") and method)
+    return ep_dlcall2(ep_dlsym(PDF_OBJC and "objc_msgSend") and object and selector)
+
+define pdf_argument with object and method and value:
+    set selector to ep_dlcall1(ep_dlsym(PDF_OBJC and "sel_registerName") and method)
+    return ep_dlcall3(ep_dlsym(PDF_OBJC and "objc_msgSend") and object and selector and value)
+
+define pdf_error with db and text returning Str:
+    set params to [text]
+    return result_cache_scalar(db and "SELECT json_object('status','error','text',?)" and params)
+
+# Return a stable binary snapshot and digest; caller owns its allocated buffer.
+define pdf_snapshot with db and path:
+    set result to create_list()
+    append_list(result and 0)
+    append_list(result and 0)
+    append_list(result and "")
+    append_list(result and "")
+    set libc to native_system()
+    set fd to native_open(path and 16777220 and 0)
+    if fd < 0:
+        set_list(result and 3 and "Cannot open local PDF")
+        return result
+    set info to alloc_bytes(144)
+    set valid to ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) == 0 && lease_integer(info and 4 and 2) / 4096 == 8
+    set size to lease_integer(info and 96 and 8)
+    set signature to filesystem_signature(db and info)
+    if size < 5 || size > 8388608:
+        set valid to 0
+    set data to 0
+    if valid == 1:
+        set data to alloc_bytes(size + 1)
+        set used to 0
+        repeat while valid == 1 && used < size:
+            set count to ep_dlcall4(ep_dlsym(libc and "pread") and fd and data + used and size - used and used)
+            if count == 0:
+                set valid to 0
+            else if count < 0 || count > size - used:
+                if transport_errno(libc) != 4:
+                    set valid to 0
+            else:
+                set used to used + count
+        if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0 || string_equals(signature and filesystem_signature(db and info)) == 0:
+            set valid to 0
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    free_bytes(info)
+    if valid == 0:
+        if data != 0:
+            free_bytes(data)
+        set_list(result and 3 and "PDF must be a stable regular file of at most 8 MiB")
+        return result
+    set digest to alloc_bytes(32)
+    set crypto to ep_dlopen("/usr/lib/system/libcommonCrypto.dylib")
+    ep_dlcall3(ep_dlsym(crypto and "CC_SHA256") and data and size and digest)
+    set builder to create_builder()
+    set digits to "0123456789abcdef"
+    set i to 0
+    repeat while i < 32:
+        set byte to peek_byte(digest and i)
+        builder_append(builder and substring(digits and byte / 16 and 1))
+        builder_append(builder and substring(digits and byte % 16 and 1))
+        set i to i + 1
+    free_bytes(digest)
+    set_list(result and 0 and data)
+    set_list(result and 1 and size)
+    set_list(result and 2 and builder_to_string(builder))
+    return result
+
+define pdf_extract with db and path and page returning Str:
+    if page < 1 || page > 1000:
+        return pdf_error(db and "PDF page must be from 1 to 1000")
+    set snapshot to pdf_snapshot(db and path)
+    if get_list(snapshot and 0) == 0:
+        return pdf_error(db and get_list(snapshot and 3))
+    set PDF_OBJC to ep_dlopen("/usr/lib/libobjc.A.dylib")
+    set framework to ep_dlopen("/System/Library/Frameworks/PDFKit.framework/PDFKit")
+    if PDF_OBJC == 0 || framework == 0:
+        free_bytes(get_list(snapshot and 0))
+        return pdf_error(db and "Native PDFKit is unavailable")
+    set get_class to ep_dlsym(PDF_OBJC and "objc_getClass")
+    set pool to pdf_message(pdf_message(ep_dlcall1(get_class and "NSAutoreleasePool") and "alloc") and "init")
+    set selector to ep_dlcall1(ep_dlsym(PDF_OBJC and "sel_registerName") and "dataWithBytes:length:")
+    set data to ep_dlcall4(ep_dlsym(PDF_OBJC and "objc_msgSend") and ep_dlcall1(get_class and "NSData") and selector and get_list(snapshot and 0) and get_list(snapshot and 1))
+    free_bytes(get_list(snapshot and 0))
+    set document to pdf_argument(pdf_message(ep_dlcall1(get_class and "PDFDocument") and "alloc") and "initWithData:" and data)
+    set result to pdf_error(db and "Cannot parse PDF document")
+    if document != 0:
+        set pages to pdf_message(document and "pageCount")
+        if pdf_message(document and "isLocked") % 256 != 0:
+            set result to pdf_error(db and "PDF is encrypted and locked")
+        else if page > pages:
+            set result to pdf_error(db and "Requested page is beyond the PDF page count")
+        else:
+            set item to pdf_argument(document and "pageAtIndex:" and page - 1)
+            set text_object to pdf_message(item and "string")
+            set text to ""
+            if text_object != 0:
+                set bytes to pdf_message(text_object and "UTF8String")
+                if bytes != 0:
+                    set text to ptr_to_str(bytes)
+            set captured to result_cache_scalar(db and "SELECT substr(?,1,20000)" and [text])
+            set result to result_cache_scalar(db and "SELECT json_object('status','ok','page',CAST(? AS INTEGER),'pages',CAST(? AS INTEGER),'text',?,'capture_truncated',json(CASE WHEN length(?)>20000 THEN 'true' ELSE 'false' END),'text_status',CASE WHEN length(trim(?))=0 THEN 'no_extractable_text' ELSE 'text' END,'source_sha256',?,'parser_version','macOS PDFKit via EP')" and [int_to_string(page),int_to_string(pages),captured,text,captured,get_list(snapshot and 2)])
+        pdf_message(document and "release")
+    pdf_message(pool and "drain")
+    return result

@@ -1,0 +1,49 @@
+# Build authored EP entry points through the installed self-hosted EP compiler.
+import "application_paths"
+
+define main:
+    set args to get_args()
+    set root to application_root(get_list(args and 0))
+    if root == "":
+        display "Cannot resolve the EchoLite checkout."
+        return 1
+    set compiler to get_env("ERNOS_COMPILER")
+    if compiler == "":
+        set compiler to concat(get_env("HOME") and "/.local/bin/ernos")
+    if file_exists(compiler) == 0:
+        display "Set ERNOS_COMPILER to the installed Ernos Plain compiler executable."
+        return 1
+    if application_directory(concat(root and "/bin") and 0) == 0:
+        display "Cannot create the build output directory."
+        return 1
+    if ep_dlcall1(ep_dlsym(native_system() and "chdir") and root) != 0:
+        return 1
+    set sources to ["echolite","runtime_manager","interface","launcher","pdf_worker","docx_worker","process_supervisor","image_worker","browser"]
+    set outputs to ["echolite-core","echolite-runtime","echolite-ui","echolite-launch","echolite-pdf","echolite-docx","echolite-process","echolite-image","echolite-browser"]
+    set i to 0
+    repeat while i < length_list(sources):
+        set source to concat(root and concat("/src/" and get_list(sources and i)))
+        set code to application_wait(compiler and [concat(source and ".ep")])
+        if code != 0:
+            display concat("Build failed: " and get_list(sources and i))
+            return code
+        set destination to concat(root and concat("/bin/" and get_list(outputs and i)))
+        if ep_dlcall2(ep_dlsym(native_system() and "rename") and source and destination) != 0:
+            display "Cannot publish a compiled executable."
+            return 1
+        set i to i + 1
+    set bundle to concat(root and "/EchoLite.app/Contents/MacOS")
+    if is_directory(bundle):
+        set entry to concat(bundle and "/EchoLite")
+        ep_dlcall1(ep_dlsym(native_system() and "unlink") and entry)
+        if ep_dlcall2(ep_dlsym(native_system() and "symlink") and "../../../bin/echolite-launch" and entry) != 0:
+            display "Cannot connect the app bundle to the network-aware launcher."
+            return 1
+    # Bootstrap invocation is src/build; install the same executable for reuse.
+    set bootstrap to concat(root and "/src/build")
+    if file_exists(bootstrap):
+        if ep_dlcall2(ep_dlsym(native_system() and "rename") and bootstrap and concat(root and "/bin/echolite-build")) != 0:
+            display "Cannot install the native build entry point."
+            return 1
+    display "Built EchoLite core, runtime manager, chat UI, launcher document readers and process supervisor in Ernos Plain."
+    return 0

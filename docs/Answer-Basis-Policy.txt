@@ -1,0 +1,13 @@
+ECHOLITE ANSWER BASIS AND FALLBACK POLICY — user requirement, 2026-11-16
+
+Treat the model's learned weights as trained memory. This is distinct from recorded personal experiences and from fresh inference over available evidence. Trained memory can be useful without being verified or current.
+
+For factual questions, attempt tools and source lookup through multiple relevant approaches before falling back to trained memory or unsupported inference. Change the search formulation, inspect an original entry, try a complementary source, follow a reference, or use a different appropriate tool. Repeating an identical failed request does not satisfy this requirement. Do not manufacture sources or treat a cache hit as independent corroboration.
+
+Permit chained reasoning with recorded dependencies: retrieve an input from a source, calculate with it, compare a second source, and explain the result. Carry source dates, units and uncertainty through the chain. A successful tool call does not by itself establish that its result supports the final claim.
+
+Disclose the answer's basis in ordinary language: a verified tool calculation; a cited local or web source; a recorded personal experience; trained memory; or inference. Mixed answers should distinguish the supported facts from the agent's interpretation. If source attempts fail, use wording such as 'I could not verify this in the available sources. From my trained memory...' or 'My best inference is...'. Uncertainty must remain visible. The system may also say it cannot answer responsibly.
+
+Acceptance requires real-user workflows proving multiple distinct appropriate attempts, cross-tool chaining, final attribution, cache-aware provenance, and correct fallback labelling. Model instructions alone do not prove compliance; structured answer-basis metadata and runtime checks are required. A greeting or a request for original creative work does not need irrelevant research merely to fill an attempt counter; factual claims within those replies remain subject to evidence disclosure.
+
+Process execution has a separate execution basis: it reports the actual command, exit status and observed output. It does not convert arbitrary program output into verified external facts. The generation schema only offers answer bases that the core currently permits from its actual receipt/memory state; the core rechecks the selected basis when the answer returns. These structural checks still do not establish sentence-level support or tool relevance.

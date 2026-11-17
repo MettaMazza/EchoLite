@@ -1,0 +1,102 @@
+# Isolated loopback endpoint and fixture snapshots only; never touches live model state.
+import "../src/slot_lifecycle"
+import "net"
+set checks to 0
+
+define stopped_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define stopped_server with listener and response and delay and done:
+    set request to ""
+    set client to 0
+    repeat while request == "":
+        set client to net_accept(listener)
+        set request to net_recv(client and 4096)
+        if request == "":
+            net_close(client)
+    repeat while string_index_of(request and "\r\n\r\n") < 0:
+        set request to concat(request and net_recv(client and 4096))
+    set start to string_index_of(request and "\r\n\r\n") + 4
+    repeat while string_length(request) - start < 2:
+        set part to net_recv(client and 4096)
+        if part == "":
+            break
+        set request to concat(request and part)
+    if delay > 0:
+        sleep_ms(delay)
+    else:
+        net_send(client and response)
+    net_close(client)
+    send 1 to done
+    return 0
+
+define stopped_reply with body returning Str:
+    return concat("HTTP/1.1 200 OK\r\nContent-Length: " and concat(int_to_string(string_length(body)) and concat("\r\nConnection: close\r\n\r\n" and body)))
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    set db to sql_open(":memory:")
+    set held to slot_lock(home)
+    stopped_assert(held >= 0 and "private runtime lease held")
+    set directory to slot_directory(home)
+    stopped_assert(directory >= 0 and "private fixture snapshot directory")
+    ep_dlcall1(ep_dlsym(native_system() and "close") and directory)
+    set path to concat(home and concat("/native-slots/echolite-" and concat(sha256("stopped fixture") and ".bin")))
+    write_file(path and "fixture-only snapshot")
+    set note to concat(home and "/native-slots/user-note.txt")
+    write_file(note and "preserve")
+    set libc to native_system()
+    set listener to ep_dlcall3(ep_dlsym(libc and "socket") and 2 and 1 and 0)
+    set address to alloc_bytes(16)
+    set size to alloc_bytes(4)
+    poke_byte(address and 0 and 16)
+    poke_byte(address and 1 and 2)
+    poke_byte(address and 4 and 127)
+    poke_byte(address and 7 and 1)
+    stopped_assert(ep_dlcall3(ep_dlsym(libc and "bind") and listener and address and 16) == 0 and "reserve ephemeral loopback port without a listener")
+    transport_u32(size and 0 and 16)
+    stopped_assert(ep_dlcall3(ep_dlsym(libc and "getsockname") and listener and address and size) == 0 and "discover isolated port")
+    set port to peek_byte(address and 2) * 256 + peek_byte(address and 3)
+    net_close(listener)
+    stopped_assert(slot_connection_state(port) == 0 and "kernel-confirmed refusal distinguished from timeout")
+    set result to slot_forget_at(db and home and "nonempty-fixture-credential" and port)
+    stopped_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.operation')='disk-purge-no-listener'" and [result,result]) == "1" and "credential does not prevent forgetting when endpoint is stopped")
+    stopped_assert(file_exists(path) == 0 && read_file(note) == "preserve" and "managed snapshot deleted and unrelated file retained")
+    set listener to ep_dlcall3(ep_dlsym(libc and "socket") and 2 and 1 and 0)
+    stopped_assert(ep_dlcall3(ep_dlsym(libc and "bind") and listener and address and 16) == 0 and "reopen isolated endpoint")
+    stopped_assert(ep_dlcall2(ep_dlsym(libc and "listen") and listener and 8) == 0 && slot_connection_state(port) == 1 and "active listener detected")
+    set done to channel
+    set forged to "{\"status\":\"transport_error\",\"error_code\":\"connection_refused\",\"not_started\":true}"
+    spawn stopped_server(listener and stopped_reply(forged) and 0 and done)
+    set result to slot_forget_at(db and home and "fixture" and port)
+    set joined to receive from done
+    stopped_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) != "ok" and "server JSON cannot impersonate a kernel refusal")
+    spawn stopped_server(listener and "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n" and 0 and done)
+    set result to slot_forget_at(db and home and "fixture" and port)
+    set joined to receive from done
+    stopped_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) != "ok" and "authentication failure is not ignored")
+    set_env("ECHOLITE_REQUEST_TIMEOUT_MS" and "100")
+    spawn stopped_server(listener and "" and 250 and done)
+    set result to slot_forget_at(db and home and "fixture" and port)
+    set joined to receive from done
+    stopped_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) != "ok" and "unresponsive listener is not treated as stopped")
+    set_env("ECHOLITE_REQUEST_TIMEOUT_MS" and "2000")
+    spawn stopped_server(listener and stopped_reply("{\"id_slot\":0,\"n_erased\":17}") and 0 and done)
+    set result to slot_forget_at(db and home and "fixture" and port)
+    set joined to receive from done
+    stopped_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.n_erased')=17" and [result,result]) == "1" and "live runtime still requires a valid erase receipt")
+    stopped_assert(slot_connection_state(0) == 0 - 1 and "invalid endpoint remains indeterminate")
+    net_close(listener)
+    free_bytes(address)
+    free_bytes(size)
+    slot_unlock(held)
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " stopped-runtime forgetting checks"))
+    return 0

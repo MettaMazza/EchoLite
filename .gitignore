@@ -1,0 +1,41 @@
+# Local model downloads
+/models/
+*.safetensors
+*.gguf
+
+# Local environments and credentials
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Python and macOS generated files
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Machine-local standard library and generated compiler output
+/stdlib
+/hello
+*_compiled.c
+*.o
+*.dSYM/
+/data/
+/bin/
+/worker/.venv/
+__pycache__/
+
+# Downloaded and generated local reference library
+/library/
+# Isolated acceptance databases are local artifacts, never source evidence.
+evidence/user-journey-*/state/
+evidence/user-journey-*/component-state/
+
+# EP executables generated beside their source
+/src/*
+!/src/*.ep
+/tests/*
+!/tests/*.ep
+!/tests/*.sb
+!/tests/fixtures/

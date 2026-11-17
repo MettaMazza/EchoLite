@@ -1,0 +1,236 @@
+import "markup"
+import "dictionary"
+import "transport"
+import "native_process"
+import "fs"
+import "os"
+
+define wiki_error with db and message returning Str:
+    set params to [message]
+    return result_cache_scalar(db and "SELECT json_object('status','error','text',?)" and params)
+
+define wiki_hex with pointer and count returning Str:
+    set out to create_builder()
+    set digits to "0123456789abcdef"
+    set i to 0
+    repeat while i < count:
+        set byte to peek_byte(pointer and i)
+        builder_append(out and substring(digits and byte / 16 and 1))
+        builder_append(out and substring(digits and byte % 16 and 1))
+        set i to i + 1
+    return builder_to_string(out)
+
+define wiki_manifest with db and library returning Str:
+    set manifest to read_file(concat(library and "/wikipedia.json"))
+    if result_cache_scalar(db and "SELECT json_valid(?)" and [manifest]) != "1":
+        return wiki_error(db and "The installed Wikipedia manifest is missing or invalid")
+    set name to result_cache_scalar(db and "SELECT json_extract(?,'$.file')" and [manifest])
+    if name == "" || string_contains(name and "/") || string_contains(name and "..") || ends_with(name and ".zim") == 0:
+        return wiki_error(db and "Invalid Wikipedia archive filename")
+    set fd to native_open(concat(library and concat("/" and name)) and 16777220 and 0)
+    if fd < 0 || fd > 2147483647:
+        return wiki_error(db and "The installed Wikipedia archive cannot be opened")
+    set libc to native_system()
+    set info to alloc_bytes(144)
+    set header to alloc_bytes(80)
+    set digest to alloc_bytes(16)
+    set problem to ""
+    if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0 || lease_integer(info and 4 and 2) / 4096 != 8:
+        set problem to "Wikipedia archive is not a readable regular file"
+    else:
+        set size to lease_integer(info and 96 and 8)
+        set modified to lease_integer(info and 48 and 8) * 1000000000 + lease_integer(info and 56 and 8)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.bytes')=CAST(? AS INTEGER) AND json_extract(?,'$.mtime_ns')=CAST(? AS INTEGER)" and [manifest,int_to_string(size),manifest,int_to_string(modified)]) != "1":
+            set problem to "Wikipedia archive changed since installation; verify it before use"
+        else if ep_dlcall4(ep_dlsym(libc and "pread") and fd and header and 80 and 0) != 80:
+            set problem to "Cannot read the Wikipedia archive header"
+        else if peek_byte(header and 0) != 90 || peek_byte(header and 1) != 73 || peek_byte(header and 2) != 77 || peek_byte(header and 3) != 4:
+            set problem to "Wikipedia archive header is invalid"
+        else:
+            set uuid to wiki_hex(header + 8 and 16)
+            set uuid to concat(substring(uuid and 0 and 8) and concat("-" and concat(substring(uuid and 8 and 4) and concat("-" and concat(substring(uuid and 12 and 4) and concat("-" and concat(substring(uuid and 16 and 4) and concat("-" and substring(uuid and 20 and 12)))))))))
+            set checksum_position to lease_integer(header and 72 and 8)
+            if checksum_position < 80 || checksum_position > size - 16:
+                set problem to "Wikipedia checksum location is invalid"
+            else if ep_dlcall4(ep_dlsym(libc and "pread") and fd and digest and 16 and checksum_position) != 16:
+                set problem to "Cannot read Wikipedia archive identity"
+            else if result_cache_scalar(db and "SELECT json_extract(?,'$.uuid')=? AND json_extract(?,'$.checksum')=?" and [manifest,uuid,manifest,wiki_hex(digest and 16)]) != "1":
+                set problem to "Wikipedia archive identity differs from the installed manifest"
+    free_bytes(info)
+    free_bytes(header)
+    free_bytes(digest)
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    if problem != "":
+        return wiki_error(db and problem)
+    return result_cache_scalar(db and "SELECT json_set(?,'$.status','ok')" and [manifest])
+
+define wiki_decode_path with encoded returning Str:
+    set out to create_builder()
+    set i to 0
+    repeat while i < string_length(encoded):
+        if get_character(encoded and i) == 37 && i + 2 < string_length(encoded):
+            set byte to transport_number(substring(encoded and i + 1 and 2) and 16 and 255)
+            if byte <= 0:
+                return ""
+            builder_append(out and char_from_code(byte))
+            set i to i + 3
+        else:
+            builder_append(out and substring(encoded and i and 1))
+            set i to i + 1
+    return builder_to_string(out)
+
+define wiki_article with db and book and path and namespace and epoch returning Str:
+    set cached to result_cache_get(db and concat(namespace and ":article") and path and epoch)
+    if cached != "":
+        return cached
+    set current to path
+    set hops to 0
+    repeat while hops < 8:
+        set route to concat("/raw/" and concat(dictionary_quote(book) and concat("/content/" and dictionary_quote(current))))
+        set html to transport_get(8402 and route and "")
+        if starts_with(html and "{\"status\":\"transport_error\""):
+            return wiki_error(db and "Local Wikipedia article could not be read within transport limits")
+        set doc to markup_parse(html and 1)
+        if doc == 0:
+            return wiki_error(db and "Cannot parse local Wikipedia article")
+        set redirect to markup_xpath(doc and "string(//meta[translate(@http-equiv,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')='refresh']/@content)")
+        markup_close(doc)
+        if redirect == "":
+            set article to markup_article(db and html)
+            if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [article]) != "ok":
+                return article
+            set redirected to "false"
+            if hops > 0:
+                set redirected to "true"
+            set article to result_cache_scalar(db and "SELECT json_set(?,'$.resolved_path',?,'$.redirected',json(?))" and [article,current,redirected])
+            return result_cache_put(db and concat(namespace and ":article") and path and epoch and article)
+        set marker to string_index_of(string_to_lower(redirect) and "url=")
+        if marker < 0:
+            return wiki_error(db and "Unsupported local Wikipedia redirect")
+        set target to string_trim(substring(redirect and marker + 4 and string_length(redirect) - marker - 4))
+        if starts_with(target and "'") || starts_with(target and "\""):
+            if string_length(target) < 2:
+                return wiki_error(db and "Invalid local Wikipedia redirect")
+            set target to substring(target and 1 and string_length(target) - 2)
+        set fragment to string_index_of(target and "#")
+        if fragment >= 0:
+            set target to substring(target and 0 and fragment)
+        if target == "" || starts_with(target and "/") || string_contains(target and "://"):
+            return wiki_error(db and "Wikipedia redirect must remain inside the local archive")
+        set base to path_dirname(current)
+        repeat while starts_with(target and "../"):
+            if base == "." || base == "":
+                return wiki_error(db and "Wikipedia redirect escapes its archive")
+            set base to path_dirname(base)
+            set target to substring(target and 3 and string_length(target) - 3)
+        if starts_with(target and "./"):
+            set target to substring(target and 2 and string_length(target) - 2)
+        set target to wiki_decode_path(target)
+        if base != "." && base != "":
+            set target to concat(base and concat("/" and target))
+        if target == "" || string_length(target) > 1000 || string_equals(target and current):
+            return wiki_error(db and "Invalid or cyclic Wikipedia redirect")
+        set current to target
+        set hops to hops + 1
+    return wiki_error(db and "Wikipedia redirect chain exceeded eight hops")
+
+
+define wikipedia_lookup with db and library and input and epoch returning Str:
+    set query to string_trim(input)
+    if string_length(query) == 0 || string_length(query) > 4800 || result_cache_scalar(db and "SELECT length(?)<=1200 AND instr(?,char(0))=0" and [query,query]) != "1":
+        return wiki_error(db and "Wikipedia query must contain 1-1200 characters")
+    set manifest to wiki_manifest(db and library)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [manifest]) != "ok":
+        return result_cache_scalar(db and "SELECT json_object('status','ok','tool','wikipedia','outcome','failed','error_code','unavailable','text',json_extract(?,'$.text'),'cache_hit',json('false'))" and [manifest])
+    set uuid to result_cache_scalar(db and "SELECT json_extract(?,'$.uuid')" and [manifest])
+    set checksum to result_cache_scalar(db and "SELECT json_extract(?,'$.checksum')" and [manifest])
+    set namespace to concat("wikipedia-ep-kiwix382-v3:" and concat(uuid and concat(":" and checksum)))
+    set cached to result_cache_get(db and namespace and query and epoch)
+    if cached != "":
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [cached]) != "ok":
+            return cached
+        return result_cache_scalar(db and "SELECT json_set(?,'$.cache_hit',json('true'))" and [cached])
+    set filename to result_cache_scalar(db and "SELECT json_extract(?,'$.file')" and [manifest])
+    set book to substring(filename and 0 and string_length(filename) - 4)
+    set candidates to create_list()
+    set offset to 0
+    set mode to "search"
+    if starts_with(query and "open:"):
+        set mode to "open"
+        set remainder to substring(query and 5 and string_length(query) - 5)
+        set colon to string_index_of(remainder and ":")
+        if colon < 1 || colon > 8:
+            return wiki_error(db and "Use the returned open:OFFSET:ARCHIVE_PATH continuation")
+        set offset_text to substring(remainder and 0 and colon)
+        set offset to transport_number(offset_text and 10 and 99999999)
+        set path to substring(remainder and colon + 1 and string_length(remainder) - colon - 1)
+        if offset < 0 || path == "" || string_length(path) > 1000:
+            return wiki_error(db and "Invalid Wikipedia continuation")
+        append_list(candidates and [path,""])
+    else:
+        if result_cache_scalar(db and "SELECT length(?)<=200" and [query]) != "1":
+            return wiki_error(db and "Wikipedia search is limited to 200 characters")
+        # Try the exact archive title path first, then verify its returned title.
+        set direct_path to string_replace(query and " " and "_")
+        # Wikipedia capitalizes the initial ASCII letter of article titles.
+        set first to get_character(direct_path and 0)
+        if first >= 97 && first <= 122:
+            set direct_path to concat(char_from_code(first - 32) and substring(direct_path and 1 and string_length(direct_path) - 1))
+        set direct to wiki_article(db and book and direct_path and namespace and epoch)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [direct]) == "ok":
+            set direct_title to result_cache_scalar(db and "SELECT json_extract(?,'$.title')" and [direct])
+            if string_equals(dictionary_normalize(direct_title) and dictionary_normalize(query)) || result_cache_scalar(db and "SELECT json_extract(?,'$.redirected')" and [direct]) == "1":
+                append_list(candidates and [direct_path,direct_title])
+        if length_list(candidates) == 0:
+            set route to concat("/search?books.id=" and concat(dictionary_quote(uuid) and concat("&format=xml&pageLength=3&pattern=" and dictionary_quote(query))))
+            set search to transport_get(8402 and route and "")
+            if starts_with(search and "{\"status\":\"transport_error\""):
+                return wiki_error(db and "Local Wikipedia search service is unavailable")
+            set document to markup_parse(search and 0)
+            if document == 0:
+                return wiki_error(db and "Cannot parse local Wikipedia search results")
+            set count to string_to_int(markup_xpath(document and "count(/rss/channel/item)"))
+            set i to 1
+            set prefix to concat("/content/" and concat(book and "/"))
+            repeat while i <= count && i <= 3:
+                set item to concat("/rss/channel/item[" and concat(int_to_string(i) and "]"))
+                set title to markup_xpath(document and concat("string(" and concat(item and "/title)")))
+                set link to markup_xpath(document and concat("string(" and concat(item and "/link)")))
+                if starts_with(link and prefix):
+                    set path to wiki_decode_path(substring(link and string_length(prefix) and string_length(link) - string_length(prefix)))
+                    if path != "":
+                        append_list(candidates and [path,title])
+                set i to i + 1
+            markup_close(document)
+    set entries to "[]"
+    set skipped to 0
+    set i to 0
+    repeat while i < length_list(candidates):
+        set candidate to get_list(candidates and i)
+        set path to get_list(candidate and 0)
+        set article to wiki_article(db and book and path and namespace and epoch)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [article]) == "ok":
+            set path to result_cache_scalar(db and "SELECT json_extract(?,'$.resolved_path')" and [article])
+            set title to result_cache_scalar(db and "SELECT json_extract(?,'$.title')" and [article])
+            set text to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [article])
+            set total to result_cache_scalar(db and "SELECT length(?)" and [text])
+            if offset > string_to_int(total):
+                return wiki_error(db and "Wikipedia offset is beyond the retained article text")
+            set tail to result_cache_scalar(db and "SELECT substr(?,CAST(? AS INTEGER)+1)" and [text,int_to_string(offset)])
+            set excerpt to dictionary_excerpt(tail and 1800)
+            set next to offset + string_to_int(result_cache_scalar(db and "SELECT length(?)" and [excerpt]))
+            set continuation to concat("open:" and concat(int_to_string(next) and concat(":" and path)))
+            set url to concat("https://en.wikipedia.org/wiki/" and dictionary_quote(string_replace(title and " " and "_")))
+            set entry to result_cache_scalar(db and "SELECT json_object('title',?,'path',?,'excerpt',?,'offset',CAST(? AS INTEGER),'total_characters',CAST(? AS INTEGER),'truncated',json(CASE WHEN CAST(? AS INTEGER)<CAST(? AS INTEGER) THEN 'true' ELSE 'false' END),'next_query',CASE WHEN CAST(? AS INTEGER)<CAST(? AS INTEGER) THEN ? ELSE NULL END,'url',?)" and [title,path,excerpt,int_to_string(offset),total,int_to_string(next),total,int_to_string(next),total,continuation,url])
+            set entries to result_cache_scalar(db and "SELECT json_insert(?,'$[#]',json(?))" and [entries,entry])
+        else:
+            set skipped to skipped + 1
+        set i to i + 1
+    set date to result_cache_scalar(db and "SELECT json_extract(?,'$.source_date')" and [manifest])
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','tool','wikipedia','outcome',CASE WHEN json_array_length(?)>0 THEN 'completed' ELSE 'failed' END,'query',?,'mode',?,'entries',json(?),'source_date',?,'archive_uuid',?,'attribution','Wikipedia contributors; offline archive distributed by Kiwix','license','CC BY-SA 4.0; see article for additional terms','license_url','https://en.wikipedia.org/wiki/Wikipedia:Copyrights','cache_hit',json('false'),'text',CASE WHEN json_array_length(?)>0 THEN ? ELSE 'No usable article found in this local snapshot within lookup limits.' END)" and [entries,query,mode,entries,date,uuid,entries,entries])
+    if string_length(result) > 14000:
+        return wiki_error(db and "Wikipedia receipt exceeds its byte budget")
+    if skipped > 0:
+        # Do not freeze a partial or transiently failed lookup into the result cache.
+        return result_cache_scalar(db and "SELECT json_set(?,'$.omitted_articles',CAST(? AS INTEGER))" and [result,int_to_string(skipped)])
+    return result_cache_put(db and namespace and query and epoch and result)

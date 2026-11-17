@@ -1,0 +1,53 @@
+import "../src/wikipedia"
+set checks to 0
+
+define wiki_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: wikipedia LIBRARY NEW_DATABASE"
+        return 1
+    set library to get_list(args and 1)
+    set db to sql_open(get_list(args and 2))
+    wiki_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "isolated cache")
+    set manifest to wiki_manifest(db and library)
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [manifest]) == "ok" and concat("archive identity verified: " and manifest))
+    set result to wikipedia_lookup(db and library and "photosynthesis" and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "completed" and concat("actual offline search: " and result))
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.entries[0].title')" and [result]) == "Photosynthesis" and "matching article")
+    wiki_assert(string_contains(result and "light") and "actual article text")
+    wiki_assert(string_contains(result and "2026-06") and "snapshot attribution")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "0" and "initial miss")
+    set next to result_cache_scalar(db and "SELECT json_extract(?,'$.entries[0].next_query')" and [result])
+    wiki_assert(starts_with(next and "open:") and "article continuation offered")
+    set following to wikipedia_lookup(db and library and next and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.entries[0].offset')>0" and [following]) == "1" and "next article page")
+    set result to wikipedia_lookup(db and library and "photosynthesis" and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "persistent result reuse")
+    sql_close(db)
+    set db to sql_open(get_list(args and 2))
+    set result to wikipedia_lookup(db and library and "photosynthesis" and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "cache survives reopen")
+    set result to wikipedia_lookup(db and library and "open:-1:Photosynthesis" and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "error" and "invalid cursor rejected")
+    set result to wikipedia_lookup(db and library and "café au lait" and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.entries[0].title')" and [result]) == "Café au lait" and "lowercase Unicode query resolves exact article")
+    set result to wikipedia_lookup(db and library and "Café au lait" and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.entries[0].title')" and [result]) == "Café au lait" and concat("exact Unicode title resolved: " and result))
+    wiki_assert(string_contains(result and "coffee") && string_contains(result and "milk") and "Unicode article content")
+    set result to wikipedia_lookup(db and library and "open:0:Café_au_Lait" and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.entries[0].path')" and [result]) == "Coffee_(color)" and concat("local archive redirect resolved: " and result))
+    set result to wikipedia_lookup(db and library and "open:99999999:Photosynthesis" and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "error" and "out of range continuation rejected")
+    sql_execute(db and "UPDATE metadata SET value='1'")
+    set result to wikipedia_lookup(db and library and "photosynthesis" and "0")
+    wiki_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "error" and "forgotten epoch rejected")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native offline Wikipedia checks"))
+    return 0

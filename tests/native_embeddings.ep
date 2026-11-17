@@ -1,0 +1,55 @@
+import "../src/native_embeddings"
+import "fs"
+set checks to 0
+
+define assert_embedding with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: native_embeddings <token file> <new database>"
+        return 1
+    set token to string_trim(read_file(get_list(args and 1)))
+    set db to sql_open(get_list(args and 2))
+    assert_embedding(sql_execute(db and "PRAGMA synchronous=FULL; CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "fixture initialized")
+    set first to embedding_vector(db and token and "The bicycle is stored in the garage." and "0")
+    set related to embedding_vector(db and token and "Where do I keep my bike?" and "0")
+    set unrelated to embedding_vector(db and token and "A pineapple is a tropical fruit." and "0")
+    set vector to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.vector'),'')" and [first])
+    assert_embedding(embedding_valid(db and vector) and concat("384-dimensional model vector: " and first))
+    set similar to result_cache_scalar(db and "SELECT sum(a.value*b.value) FROM json_each(?,'$.vector') a JOIN json_each(?,'$.vector') b ON a.key=b.key" and [first,related])
+    set distant to result_cache_scalar(db and "SELECT sum(a.value*b.value) FROM json_each(?,'$.vector') a JOIN json_each(?,'$.vector') b ON a.key=b.key" and [first,unrelated])
+    assert_embedding(result_cache_scalar(db and "SELECT CAST(? AS REAL)>CAST(? AS REAL) AND CAST(? AS REAL)>0.35" and [similar,distant,similar]) == "1" and "semantic paraphrase outranks unrelated text")
+    display concat("Paraphrase similarity: " and similar)
+    display concat("Unrelated similarity: " and distant)
+    sql_close(db)
+    set db to sql_open(get_list(args and 2))
+    set repeated to embedding_vector(db and "invalid-credential" and "The bicycle is stored in the garage." and "0")
+    assert_embedding(string_equals(first and repeated) and "persistent vector replay without model access")
+    set text to "A remembered fact. 🌱 "
+    set doubling to 0
+    repeat while doubling < 8:
+        set text to concat(text and text)
+        set doubling to doubling + 1
+    set windows to embedding_windows(db and token and text and "0")
+    assert_embedding(length_list(windows) > 1 and "long memory split into windows")
+    set end to 0
+    set i to 0
+    repeat while i < length_list(windows):
+        set window to get_list(windows and i)
+        assert_embedding(string_to_int(get_list(window and 0)) <= end and "no gaps between windows")
+        set end to string_to_int(get_list(window and 1))
+        set counted to embedding_tokens(db and "invalid-credential" and get_list(window and 2) and "0")
+        assert_embedding(string_to_int(result_cache_scalar(db and "SELECT json_extract(?,'$.count')" and [counted])) <= 256 and "token-bounded window from persistent tokenizer cache")
+        set i to i + 1
+    assert_embedding(end == string_length(text) and "entire memory covered")
+    sql_execute(db and "UPDATE metadata SET value='1'")
+    assert_embedding(string_contains(embedding_vector(db and token and "The bicycle is stored in the garage." and "0") and "forgetting") and "forgotten epoch cannot replay vector")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native embedding checks in Ernos Plain"))
+    return 0

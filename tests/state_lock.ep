@@ -1,0 +1,62 @@
+import "../src/state_lock"
+import "os"
+import "string"
+set checks to 0
+
+define assert_lease with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: state_lock <new temporary directory> <shared|maintenance>"
+        return 1
+    set home to get_list(args and 1)
+    set mode to get_list(args and 2)
+    assert_lease(file_exists(concat(home and "/state.lock")) == 0 and "isolated fixture")
+    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set close_fn to ep_dlsym(libc and "close")
+    set lock to private_lock(home and "state.lock")
+    assert_lease(lock >= 0 and "private regular lock opened")
+    set info to alloc_bytes(144)
+    ep_dlcall2(ep_dlsym(libc and "fstat") and lock and info)
+    assert_lease(lease_integer(info and 4 and 2) % 4096 == 384 and "0600 permissions")
+    free_bytes(info)
+    assert_lease(ep_dlcall2(ep_dlsym(libc and "flock") and lock and 6) == 0 and "exclusive lock held")
+    assert_lease(string_contains(state_lease(home and "shared") and "busy") and "exclusive lock blocks normal access")
+    ep_dlcall1(close_fn and lock)
+    set target to concat(home and "/state.lock")
+    set alias to concat(home and "/alias.lock")
+    assert_lease(ep_dlcall2(ep_dlsym(libc and "symlink") and target and alias) == 0 and "symlink fixture")
+    assert_lease(private_lock(home and "alias.lock") < 0 and "symlink lock rejected")
+    remove_file(alias)
+    assert_lease(ep_dlcall2(ep_dlsym(libc and "link") and target and alias) == 0 and "hardlink fixture")
+    assert_lease(private_lock(home and "state.lock") < 0 and "multiply linked lock rejected")
+    remove_file(alias)
+    write_file(concat(home and "/.restore.pending") and "pending")
+    assert_lease(string_contains(state_lease(home and "shared") and "Interrupted restore") and "restore marker blocks state access")
+    remove_file(concat(home and "/.restore.pending"))
+    set worker to private_lock(home and "worker.lock")
+    assert_lease(worker >= 0 and "worker lock opened")
+    assert_lease(ep_dlcall2(ep_dlsym(libc and "flock") and worker and 6) == 0 and "worker lock acquired")
+    assert_lease(string_contains(state_lease(home and "maintenance") and "Stop the model worker") and "maintenance excludes live worker")
+    ep_dlcall1(close_fn and worker)
+    assert_lease(string_contains(state_lease(home and "invalid") and "Invalid state lease") and "invalid mode rejected")
+    assert_lease(state_lease(home and mode) == "{\"status\":\"ok\"}" and "requested state access acquired")
+    assert_lease(string_contains(state_lease(home and "shared") and "already acquired") and "duplicate lease rejected")
+    set lock to private_lock(home and "state.lock")
+    assert_lease(ep_dlcall2(ep_dlsym(libc and "flock") and lock and 6) != 0 and "process lease remains held")
+    ep_dlcall1(close_fn and lock)
+    set worker to private_lock(home and "worker.lock")
+    set worker_result to ep_dlcall2(ep_dlsym(libc and "flock") and worker and 6)
+    if mode == "maintenance":
+        assert_lease(worker_result != 0 and "maintenance holds worker exclusion")
+    else:
+        assert_lease(worker_result == 0 and "normal access permits worker")
+    ep_dlcall1(close_fn and worker)
+    display concat("PASS: " and concat(int_to_string(checks) and " state-lock checks in Ernos Plain"))
+    return 0

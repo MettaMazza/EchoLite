@@ -1,0 +1,44 @@
+import "../src/slot_lifecycle"
+import "os"
+set checks to 0
+
+define lifecycle_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    set directory to slot_directory(home)
+    lifecycle_assert(directory >= 0 and "private slot directory created")
+    set folder to concat(home and "/native-slots/")
+    set keep to concat("echolite-" and concat(sha256("keep") and ".bin"))
+    set stale to concat("echolite-" and concat(sha256("stale") and ".bin"))
+    write_file(concat(folder and keep) and "new")
+    write_file(concat(folder and stale) and "old")
+    write_file(concat(folder and "user-note.txt") and "unmanaged")
+    lifecycle_assert(slot_prune(directory and keep) and "stale snapshot cleanup")
+    lifecycle_assert(file_exists(concat(folder and keep)) && file_exists(concat(folder and stale)) == 0 and "only selected snapshot retained")
+    lifecycle_assert(file_exists(concat(folder and "user-note.txt")) and "unmanaged file preserved")
+    set target to concat(home and "/outside.txt")
+    write_file(target and "preserve")
+    ep_dlcall2(ep_dlsym(native_system() and "symlink") and target and concat(folder and stale))
+    lifecycle_assert(slot_prune(directory and keep) == 0 and "managed symlink refused")
+    lifecycle_assert(read_file(target) == "preserve" and "symlink target untouched")
+    ep_dlcall1(ep_dlsym(native_system() and "unlink") and concat(folder and stale))
+    set db to sql_open(":memory:")
+    set purged to slot_forget(db and home and "")
+    lifecycle_assert(string_contains(purged and "\"status\":\"ok\"") && file_exists(concat(folder and keep)) == 0 and "offline purge removes retained snapshot")
+    lifecycle_assert(file_exists(concat(folder and "user-note.txt")) and "purge retains unmanaged files")
+    ep_dlcall1(ep_dlsym(native_system() and "close") and directory)
+    ep_dlcall2(ep_dlsym(native_system() and "chmod") and concat(home and "/native-slots") and 493)
+    lifecycle_assert(slot_directory(home) < 0 and "non-private snapshot directory rejected")
+    ep_dlcall2(ep_dlsym(native_system() and "chmod") and concat(home and "/native-slots") and 448)
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native cache lifecycle checks"))
+    return 0

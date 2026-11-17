@@ -1,0 +1,44 @@
+ECHOLITE — BOUNDED TOOL DISCOVERY
+
+Every chat begins with core lookup/recall, file reading, task lookup and Me
+editing tools, plus tool_select. A compact catalog advertises four additional
+families: system, documents, memory and tasks. Selecting a family exposes its
+detailed schemas and instructions for the rest of the turn. The selection is
+reconstructed from successful durable tool receipts, not a global mutable flag.
+A new turn chooses its own relevant families. Missing/deferred is not unavailable.
+
+Lightweight request hints expose clearly relevant families without an extra
+model call: application/command/coding requests, PDF/DOCX/directory requests,
+corrections/recall and tracked/scheduled work. These hints only change which
+actions the model may request; they never execute a command or grant permission.
+Unmatched work can still use tool_select. Successful memory searches expose
+deeper memory tools; active working records and task lookups expose task tools.
+Dispatched scheduled work and pending temporary browser cleanup retain their
+required capabilities regardless of ordinary discovery.
+
+Detailed manuals are included only for enabled families. Core evidence rules,
+Me identity and network policy remain in every main-model invocation. The host
+facts include verified absolute paths for installed native commands, including
+open, osascript, git, sh, say, shortcuts and curl. Only existing executables are
+advertised. No environment dump, credentials or installed manual corpus is
+inserted into context.
+
+Tool selection is bookkeeping. It cannot count as a factual lookup attempt,
+source evidence, process execution or successful task work. Failed selection
+does not enable anything. OS permissions, command supervision, receipt replay,
+explicit retry and source/basis validation remain in force.
+
+Application control uses native OS commands through the normal process tool.
+The verified TextEdit journey demonstrates requesting a document launch and
+reporting the actual command result. Native UI observation separately confirmed
+the correct window/content. It does not imply arbitrary desktop AX controls,
+permission bypass or universal application scripting support. Safari has its
+separate tested browser client. Other application behavior depends on the app's
+supported commands/scripts and the normal macOS permissions.
+
+Representative default request measurement (bytes, not model tokens):
+All tool schemas: 7901; selected core schemas: 2505.
+All manuals/messages: 11193; compact default messages: 7071.
+Actual sizes vary with host paths, request, identity, history and enabled tools.
+This reduces irrelevant prompt material; it is not a new context limit or a
+promise of zero latency. The model capacity remains 262144.

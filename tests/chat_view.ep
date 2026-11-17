@@ -1,0 +1,37 @@
+import "../src/native_font"
+import "../src/chat_view"
+import "os"
+set checks to 0
+
+define view_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    view_assert(string_equals(chat_character(127793) and "🌱") and "four-byte input")
+    view_assert(string_equals(chat_character(233) and "é") and "two-byte input")
+    view_assert(string_equals(chat_character(20013) and "中") and "three-byte input")
+    view_assert(string_equals(chat_backspace("hello🌱") and "hello") and "delete whole four-byte codepoint")
+    view_assert(string_equals(chat_backspace("café") and "caf") and "delete whole two-byte codepoint")
+    view_assert(chat_backspace("") == "" and "empty backspace")
+    set db to sql_open(get_list(args and 1))
+    sql_execute(db and "PRAGMA query_only=ON;")
+    set sessions to chat_sessions(db and "native-ui-journey")
+    view_assert(length_list(sessions) > 0 and "session survives window exit")
+    set turns to chat_turns(db and get_list(get_list(sessions and 0) and 0))
+    view_assert(length_list(turns) > 0 and "chat survives window exit")
+    set turn to get_list(turns and length_list(turns) - 1)
+    view_assert(string_contains(get_list(turn and 2) and "713") and "actual answer loaded")
+    view_assert(get_list(turn and 3) == "completed" and "completed turn loaded")
+    view_assert(string_length(get_list(turn and 4)) > 0 and "actual thinking loaded")
+    view_assert(string_to_int(get_list(turn and 5)) > 0 and "actual output token count loaded")
+    view_assert(string_contains(get_list(turn and 6) and "calculator") and "tool activity loaded")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " composer and persisted chat view checks"))
+    return 0

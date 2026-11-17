@@ -1,0 +1,27 @@
+import "../src/wikipedia"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 4:
+        return 1
+    set db to sql_open(get_list(args and 2))
+    set mode to get_list(args and 3)
+    if mode == "prime":
+        if sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") != 0:
+            return 1
+    set started to transport_now(native_system())
+    set result to wikipedia_lookup(db and get_list(args and 1) and "photosynthesis" and "0")
+    set elapsed to transport_now(native_system()) - started
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) != "completed":
+        display result
+        return 1
+    if mode == "replay" && result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) != "1":
+        display "Expected persistent cache replay"
+        return 1
+    set content to result_cache_scalar(db and "SELECT json_remove(?,'$.cache_hit')" and [result])
+    display concat("Mode: " and mode)
+    display concat("Elapsed milliseconds: " and int_to_string(elapsed))
+    display concat("Result SHA-256: " and sha256(content))
+    display "PASS: local Wikipedia result retained with source attribution"
+    sql_close(db)
+    return 0

@@ -1,0 +1,40 @@
+import "../src/web_headers"
+import "os"
+set checks to 0
+
+define headers_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    set result to web_headers(db and "HTTP/1.1 100 Continue\r\nCache-Control: no-store\r\n\r\nHTTP/2 200 \r\nContent-Type: text/html; charset=utf-8\r\nETag: \"v1\"\r\nCache-Control: public\r\nCache-Control: max-age=120\r\nAge: 20\r\n\r\n")
+    headers_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.headers.etag')" and [result]) == "\"v1\"" and "ETag preserved")
+    set headers to result_cache_scalar(db and "SELECT json_extract(?,'$.headers')" and [result])
+    set policy to web_freshness(db and headers)
+    headers_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.ttl_seconds')" and [policy]) == "100" and "max-age reduced by Age")
+    headers_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.store')" and [policy]) == "1" and "final response replaces interim metadata")
+    set invalid to ["ETag: x\r\n\r\n","HTTP/2 200\r\nETag: a\r\nETag: b\r\n\r\n","HTTP/2 200\r\nLocation: /a\r\nLocation: /b\r\n\r\n","HTTP/2 200\r\n folded: value\r\n\r\n","HTTP/2 200\r\nETag: a"]
+    set i to 0
+    repeat while i < length_list(invalid):
+        headers_assert(string_contains(web_headers(db and get_list(invalid and i)) and "\"status\":\"error\"") and "malformed or ambiguous metadata rejected")
+        set i to i + 1
+    set policies to ["{\"cache-control\":\"max-age=9999\"}","{\"cache-control\":\"max-age=\\\"90\\\"\"}","{\"cache-control\":\"max-age=120,max-age=40\"}","{\"cache-control\":\"no-cache, max-age=120\"}","{\"cache-control\":\"max-age=invalid\"}","{\"age\":\"500\"}","{\"pragma\":\"no-cache\"}"]
+    set expected to ["300","90","40","0","0","0","0"]
+    set i to 0
+    repeat while i < length_list(policies):
+        set policy to web_freshness(db and get_list(policies and i))
+        headers_assert(string_equals(result_cache_scalar(db and "SELECT json_extract(?,'$.ttl_seconds')" and [policy]) and get_list(expected and i)) and "conservative freshness")
+        set i to i + 1
+    set policies to ["{\"cache-control\":\"no-store\"}","{\"vary\":\"*\"}","{\"vary\":\"Cookie\"}"]
+    set i to 0
+    repeat while i < length_list(policies):
+        set policy to web_freshness(db and get_list(policies and i))
+        headers_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.store')" and [policy]) == "0" and "unreusable representations not stored")
+        set i to i + 1
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native HTTP metadata/cache-policy checks"))
+    return 0

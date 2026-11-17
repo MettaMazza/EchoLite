@@ -1,0 +1,20 @@
+# Per-request generation settings are part of the exact persistent cache key.
+import "transport"
+import "result_cache"
+
+define generation_settings with db returning Str:
+    set maximum to get_env("ECHOLITE_MAX_OUTPUT_TOKENS")
+    if maximum == "":
+        set maximum to "8192"
+    set count to transport_number(maximum and 10 and 32768)
+    if count < 128:
+        return "{\"status\":\"error\",\"text\":\"ECHOLITE_MAX_OUTPUT_TOKENS must be an integer from 128 to 32768\"}"
+    set thinking to get_env("ECHOLITE_REASONING_BUDGET")
+    if thinking == "":
+        set thinking to "-1"
+    set budget to 0 - 1
+    if thinking != "-1":
+        set budget to transport_number(thinking and 10 and count - 128)
+        if budget < 0:
+            return "{\"status\":\"error\",\"text\":\"ECHOLITE_REASONING_BUDGET must be -1 or a nonnegative integer leaving at least 128 output tokens\"}"
+    return result_cache_scalar(db and "SELECT json_object('status','ok','max_tokens',CAST(? AS INTEGER),'reasoning_budget_tokens',CAST(? AS INTEGER))" and [int_to_string(count),int_to_string(budget)])

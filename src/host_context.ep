@@ -1,0 +1,31 @@
+# Compact runtime facts; do not copy the environment, credentials or manuals
+# into the prompt. Full local reference text remains available through file_read.
+import "application_paths"
+import "result_cache"
+
+define host_context with db returning Str:
+    set args to get_args()
+    set root to application_root(get_list(args and 0))
+    set compiler to get_env("ERNOS_COMPILER")
+    if compiler == "":
+        set compiler to concat(get_env("HOME") and "/.local/bin/ernos")
+    set reference to concat(root and "/library/technical/ernos/LANGUAGE_REFERENCE.md")
+    set guide to concat(root and "/docs/Local-Toolchain.txt")
+    set home to get_env("ECHOLITE_HOME")
+    if home == "":
+        set home to concat(root and "/data")
+    set executable to "false"
+    if file_exists(compiler) && ep_dlcall2(ep_dlsym(native_system() and "access") and compiler and 1) == 0:
+        set executable to "true"
+    set installed to "false"
+    if file_exists(reference):
+        set installed to "true"
+    set commands to "{}"
+    set candidates to ["/usr/bin/open","/usr/bin/osascript","/usr/bin/git","/bin/sh","/usr/bin/say","/usr/bin/shortcuts","/usr/bin/curl"]
+    set command_index to 0
+    repeat while command_index < length_list(candidates):
+        set candidate to get_list(candidates and command_index)
+        if file_exists(candidate) && ep_dlcall2(ep_dlsym(native_system() and "access") and candidate and 1) == 0:
+            set commands to result_cache_scalar(db and "SELECT json_set(?,'$.'||?,?)" and [commands,path_basename(candidate),candidate])
+        set command_index to command_index + 1
+    return result_cache_scalar(db and "SELECT json_object('platform','macOS','architecture','arm64','application_language','Ernos Plain','working_directory',?,'installation_directory',?,'state_directory',?,'compiler',?,'compiler_available',json(?),'language_reference',?,'reference_available',json(?),'local_toolchain_guide',?,'system_commands',json(?))" and [get_cwd(),root,home,compiler,executable,reference,installed,guide,commands])

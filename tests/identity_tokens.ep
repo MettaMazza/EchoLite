@@ -1,0 +1,60 @@
+import "../src/identity_tokens"
+import "fs"
+set checks to 0
+
+define budget_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set home to get_list(args and 1)
+    set token to string_trim(read_file(get_list(args and 2)))
+    set database to concat(home and "/tokens.sqlite3")
+    set db to sql_open(database)
+    budget_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "fresh private tokenizer cache")
+    set body to "I am EchoLite. "
+    set i to 0
+    repeat while i < 30:
+        set body to concat(body and "我重视清晰、证据和本地记忆。 ")
+        set i to i + 1
+    budget_assert(string_length(body) > 1200 and "multilingual fixture exceeds old byte limit")
+    set checked to identity_budget(db and token and body and "0")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [checked]) == "completed" and "actual Qwen tokenizer accepts multilingual identity")
+    write_file(concat(home and "/multilingual.txt") and body)
+    write_file(concat(home and "/multilingual-result.json") and checked)
+    set exact to ""
+    set i to 0
+    repeat while i < 1200:
+        set exact to concat(exact and " word")
+        set i to i + 1
+    set checked to identity_budget(db and token and exact and "0")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.tokens')" and [checked]) == "1200" and "boundary measured as exactly 1200 tokens")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [checked]) == "completed" and "1200 tokens accepted")
+    write_file(concat(home and "/exact.txt") and exact)
+    set over to concat(exact and " word")
+    set checked to identity_budget(db and token and over and "0")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.tokens')" and [checked]) == "1201" and "over-boundary measured as 1201 tokens")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [checked]) == "failed" and "1201 tokens rejected")
+    write_file(concat(home and "/over.txt") and over)
+    sql_close(db)
+    set db to sql_open(database)
+    set replay to identity_budget(db and "deliberately-invalid-credential" and exact and "0")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')=1 AND json_extract(?,'$.outcome')='completed'" and [replay,replay]) == "1" and "reopened cache avoids tokenizer request entirely")
+    set rejected to identity_budget(db and "" and "  \n\t" and "0")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [rejected]) == "failed" and "blank identity rejected before tokenizer")
+    set rejected to identity_budget(db and "" and concat(exact and concat(exact and exact)) and "0")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [rejected]) == "failed" and "storage byte bound enforced independently")
+    sql_execute(db and "UPDATE metadata SET value='1' WHERE key='cache_epoch'")
+    set stale to identity_budget(db and "" and exact and "0")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [stale]) == "failed" and "forgotten epoch cannot reuse cached validation")
+    set unavailable to identity_budget(db and "deliberately-invalid-credential" and exact and "1")
+    budget_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [unavailable]) == "failed" and "missing tokenizer validation cannot save a revision")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " actual Qwen identity token checks"))
+    return 0

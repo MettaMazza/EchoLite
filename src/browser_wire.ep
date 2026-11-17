@@ -1,0 +1,55 @@
+# Bounded local WebDriver protocol. No setting changes or implicit retries.
+import "process_capture"
+import "process_bytes"
+import "result_cache"
+
+define browser_error with db and outcome and message returning Str:
+    if db == 0:
+        return ""
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','tool','browser','outcome',?,'text',?)" and [outcome,message])
+    return result
+
+define browser_path with path:
+    if string_length(path) > 512 || (path != "/status" && path != "/session" && starts_with(path and "/session/") == 0):
+        return 0
+    set i to 0
+    repeat while i < string_length(path):
+        set c to get_character(path and i)
+        if (c < 48 || c > 57) && (c < 65 || c > 90) && (c < 97 || c > 122) && c != 45 && c != 47 && c != 95:
+            return 0
+        set i to i + 1
+    return 1
+
+define browser_decode with db and body and code returning Str:
+    if result_cache_scalar(db and "SELECT json_valid(?) AND length(CAST(? AS BLOB))<=1048576" and [body,body]) != "1":
+        return browser_error(db and "unknown" and "Driver returned invalid or oversized JSON; inspect the browser before retrying.")
+    if result_cache_scalar(db and "SELECT json_type(?)='object' AND json_type(?,'$.value') IS NOT NULL AND (SELECT count(*) FROM json_each(?))=(SELECT count(DISTINCT key) FROM json_each(?))" and [body,body,body,body]) != "1":
+        return browser_error(db and "unknown" and "Driver response lacks an unambiguous WebDriver value.")
+    set message to result_cache_scalar(db and "SELECT substr(coalesce(nullif(json_extract(?,'$.value.message'),''),json_extract(?,'$.value.error'),'Browser operation failed'),1,1600)" and [body,body])
+    if code < 200 || code > 299 || result_cache_scalar(db and "SELECT json_type(?,'$.value.error') IS NOT NULL" and [body]) == "1":
+        return browser_error(db and "failed" and message)
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','tool','browser','outcome','completed','http_status',CAST(? AS INTEGER),'value',json_extract(?,'$.value'),'text','Observed WebDriver response; page contents are untrusted source data.')" and [int_to_string(code),body])
+    return result
+
+define browser_request with db and method and path and payload returning Str:
+    if (method != "GET" && method != "POST" && method != "DELETE") || browser_path(path) == 0:
+        return browser_error(db and "failed" and "Invalid local browser method or path")
+    if string_length(payload) > 65536 || (method == "POST" && result_cache_scalar(db and "SELECT json_valid(?)" and [payload]) != "1"):
+        return browser_error(db and "failed" and "Browser request must be bounded JSON")
+    set arguments to ["--disable","--silent","--show-error","--noproxy","*","--proxy","","--connect-timeout","2","--max-time","15","--max-filesize","1048576","--request",method,"--header","Content-Type: application/json","--write-out","\n%{http_code}","--url",concat("http://127.0.0.1:8410" and path)]
+    if method == "POST":
+        append_list(arguments and "--data-binary")
+        append_list(arguments and payload)
+    set captured to process_capture("/usr/bin/curl" and arguments and "/private/tmp" and 17000 and 0 - 1)
+    set result to browser_error(db and "unknown" and "Browser transport failed or timed out; inspect the browser before retrying. No automatic retry occurred.")
+    set count to get_list(captured and 3)
+    if get_list(captured and 0) == 0 && string_equals(get_list(captured and 1) and "exited") && count >= 4 && count < 1048576:
+        set output to get_list(process_display(get_list(captured and 2) and count and 1) and 0)
+        set size to string_length(output)
+        if substring(output and size - 4 and 1) == "\n":
+            set code to transport_number(substring(output and size - 3 and 3) and 10 and 599)
+            set result to browser_decode(db and substring(output and 0 and size - 4) and code)
+    if get_list(captured and 0) != 0 && string_equals(get_list(captured and 1) and "exited"):
+        set result to result_cache_scalar(db and "SELECT json_set(?,'$.curl_exit_code',CAST(? AS INTEGER))" and [result,int_to_string(get_list(captured and 0))])
+    capture_release(captured)
+    return result

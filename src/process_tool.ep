@@ -1,0 +1,89 @@
+# Core-side bridge to the independent EP supervisor; never repeats an uncertain command.
+import "process_capture"
+import "process_journal"
+import "process_output"
+
+define process_run with db and home and helper and expression and epoch and operation and cancel_path returning Str:
+    if process_arguments(db and expression) == 0:
+        return process_journal_error(process_arguments_problem(db and expression))
+    if result_cache_epoch(db and epoch) == 0:
+        return process_journal_error("Memory changed before command supervision")
+    set matching to result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN turns t ON t.id=r.turn_id WHERE r.id=? AND r.name IN ('process_run','process_retry') AND r.arguments=? AND r.status='running' AND t.status='pending'" and [operation,expression])
+    if matching != "1":
+        return process_journal_error("Command requires its matching pending journal entry")
+    set previous to sql_query_params(db and "SELECT status,result,epoch FROM process_operations WHERE operation_id=?" and [operation])
+    if length_list(previous) > 0:
+        set saved to get_list(previous and 0)
+        if string_equals(get_list(saved and 2) and epoch) == 0:
+            return process_journal_error("Saved command belongs to a different memory epoch")
+        if string_equals(get_list(saved and 0) and "completed"):
+            set receipt to get_list(saved and 1)
+            return result_cache_scalar(db and "SELECT json_set(?,'$.replayed_receipt',json('true'))" and [receipt])
+        return process_uncertain()
+    if cancel_path != "" && file_exists(cancel_path):
+        return "{\"status\":\"ok\",\"tool\":\"process_run\",\"outcome\":\"failed\",\"not_started\":true,\"cache_hit\":false,\"text\":\"Turn cancelled before command launch.\"}"
+    set libc to native_system()
+    set file to ep_dlcall0(ep_dlsym(libc and "tmpfile"))
+    if file == 0:
+        return process_journal_error("Cannot allocate supervisor receipt storage")
+    set output to ep_dlcall1(ep_dlsym(libc and "fileno") and file)
+    native_fcntl_int(output and 2 and 1)
+    set pipe to capture_pipe()
+    set inherited to 0 - 1
+    set pid to 0
+    if get_list(pipe and 0) >= 0:
+        set inherited to ep_dlcall1(ep_dlsym(libc and "dup") and get_list(pipe and 0))
+        if inherited >= 0 && inherited < 2147483648:
+            set arguments to [concat(home and "/memory.sqlite3"),expression,epoch,operation,int_to_string(inherited)]
+            set pid to process_detached(helper and arguments and output)
+            ep_dlcall1(ep_dlsym(libc and "close") and inherited)
+        ep_dlcall1(ep_dlsym(libc and "close") and get_list(pipe and 0))
+    set writer to get_list(pipe and 1)
+    if pid == 0:
+        if writer >= 0:
+            ep_dlcall1(ep_dlsym(libc and "close") and writer)
+        ep_dlcall1(ep_dlsym(libc and "fclose") and file)
+        return process_journal_error("Cannot launch native process supervisor; no command started")
+    set timeout to string_to_int(result_cache_scalar(db and "SELECT json_extract(?,'$.timeout_seconds')" and [expression]))
+    set deadline to transport_now(libc) + timeout * 1000 + 10000
+    set info to alloc_bytes(144)
+    set code to 0 - 1
+    set problem to ""
+    repeat while code == 0 - 1 && transport_now(libc) < deadline:
+        set code to process_poll(pid)
+        if code == 0 - 1:
+            set active to result_cache_scalar(db and "SELECT count(*) FROM tool_runs r JOIN turns t ON t.id=r.turn_id WHERE r.id=? AND r.status='running' AND t.status='pending'" and [operation])
+            if active != "1" || result_cache_epoch(db and epoch) == 0 || (cancel_path != "" && file_exists(cancel_path)):
+                if writer >= 0:
+                    ep_dlcall1(ep_dlsym(libc and "close") and writer)
+                    set writer to 0 - 1
+            if ep_dlcall2(ep_dlsym(libc and "fstat") and output and info) != 0 || lease_integer(info and 96 and 8) > 32768:
+                set problem to "Supervisor receipt exceeds its byte budget"
+                if writer >= 0:
+                    ep_dlcall1(ep_dlsym(libc and "close") and writer)
+                    set writer to 0 - 1
+            ep_dlcall1(ep_dlsym(libc and "usleep") and 50000)
+    if writer >= 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and writer)
+    free_bytes(info)
+    # A stuck supervisor retains its lease and cancellation lifeline is now closed.
+    # Do not kill it and strand its command, nor start another copy.
+    if code == 0 - 1:
+        set problem to "Supervisor is still cleaning up; inspect the journal before another operation"
+    set result to ""
+    if result_cache_epoch(db and epoch) == 0:
+        set result to process_journal_error("Memory forgotten; process receipt discarded, effects are not undone")
+    else:
+        set result to result_cache_scalar(db and "SELECT result FROM process_operations WHERE operation_id=? AND epoch=? AND status='completed'" and [operation,epoch])
+        if result == "" && problem == "" && code == 0:
+            set data to alloc_bytes(32770)
+            set size to ep_dlcall4(ep_dlsym(libc and "pread") and output and data and 32769 and 0)
+            if size > 0 && size <= 32768:
+                set candidate to string_trim(ptr_to_str(data))
+                if result_cache_scalar(db and "SELECT json_valid(?)" and [candidate]) == "1":
+                    set result to candidate
+            free_bytes(data)
+    ep_dlcall1(ep_dlsym(libc and "fclose") and file)
+    if result == "":
+        return "{\"status\":\"ok\",\"tool\":\"process_run\",\"outcome\":\"failed\",\"uncertain_effects\":true,\"cache_hit\":false,\"text\":\"Supervisor completion is not available. Inspect the command journal before retrying; no automatic repeat was started.\"}"
+    return result

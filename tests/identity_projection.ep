@@ -1,0 +1,80 @@
+import "../src/identity_projection"
+import "os"
+import "fs"
+import "string"
+set checks to 0
+
+define assert_identity with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define identity_ok with result:
+    return string_contains(result and "\"status\":\"ok\"")
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: identity_projection <new temporary directory>"
+        return 1
+    set home to get_list(args and 1)
+    set path to concat(home and "/Me.txt")
+    set pending to concat(home and "/Me.txt.pending")
+    set target to concat(home and "/protected.txt")
+    set libc to native_system()
+    set info to alloc_bytes(144)
+    set fd to native_open(target and 514 and 384)
+    assert_identity(fd >= 0 and "typed variadic file creation")
+    ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info)
+    assert_identity(lease_integer(info and 4 and 2) % 4096 == 384 and "private mode at creation before chmod")
+    assert_identity(native_fcntl_int(fd and 4 and 4) == 0 and "nonblocking flag set")
+    set flags to native_fcntl_int(fd and 3 and 0)
+    assert_identity(flags / 4 % 2 == 1 and "nonblocking flag actually applied")
+    assert_identity(native_fcntl_int(fd and 2 and 1) == 0 and "close-on-exec flag set")
+    assert_identity(native_fcntl_int(fd and 1 and 0) == 1 and "close-on-exec flag actually applied")
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    write_file(target and "untouched")
+    assert_identity(identity_ok(publish_identity(home and "I remember café and 🌱.\n")) and "initial publication")
+    assert_identity(read_file(path) == "I remember café and 🌱.\n" and "UTF-8 identity exact")
+    assert_identity(file_exists(pending) == 0 and "staging name removed by rename")
+    set fd to native_open(path and 0 and 0)
+    ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info)
+    assert_identity(lease_integer(info and 4 and 2) % 4096 == 384 and "published identity is private")
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    write_file(pending and "stale partial text")
+    assert_identity(identity_ok(publish_identity(home and "New Me.")) and "stale staging file recovered")
+    assert_identity(read_file(path) == "New Me." and "short replacement has no stale tail")
+    remove_file(path)
+    assert_identity(ep_dlcall2(ep_dlsym(libc and "symlink") and target and path) == 0 and "destination symlink fixture")
+    assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "destination symlink rejected")
+    assert_identity(read_file(target) == "untouched" and "symlink target unchanged")
+    remove_file(path)
+    assert_identity(identity_ok(publish_identity(home and "Preserve me.")) and "normal destination restored")
+    ep_dlcall2(ep_dlsym(libc and "symlink") and target and pending)
+    assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "staging symlink rejected")
+    assert_identity(read_file(path) == "Preserve me." && read_file(target) == "untouched" and "failed publication preserves both files")
+    remove_file(pending)
+    ep_dlcall2(ep_dlsym(libc and "link") and target and pending)
+    assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "multiply linked staging rejected")
+    assert_identity(read_file(target) == "untouched" and "hardlink target unchanged")
+    remove_file(pending)
+    remove_file(path)
+    ep_dlcall2(ep_dlsym(libc and "link") and target and path)
+    assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "multiply linked destination rejected")
+    remove_file(path)
+    create_directory(path)
+    assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "destination directory rejected")
+    remove_directory(path)
+    set huge to "x"
+    set i to 0
+    repeat while i < 14:
+        set huge to concat(huge and huge)
+        set i to i + 1
+    assert_identity(identity_ok(publish_identity(home and huge)) == 0 and "identity length bounded")
+    assert_identity(identity_ok(publish_identity(home and "")) and "empty projection supported")
+    assert_identity(read_file(path) == "" and "empty projection exact")
+    free_bytes(info)
+    display concat("PASS: " and concat(int_to_string(checks) and " identity publication checks in Ernos Plain"))
+    return 0

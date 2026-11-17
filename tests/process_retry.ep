@@ -1,0 +1,93 @@
+# Real supervised cat commands verify failed-result replay and explicit retry.
+import "../src/process_tool"
+import "fs"
+import "os"
+set checks to 0
+
+define retry_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define retry_run with db and home and helper and expression and operation:
+    set name to "process_run"
+    if result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.retry_of'),'')!=''" and [expression]) == "1":
+        set name to "process_retry"
+    sql_execute_params(db and "INSERT INTO tool_runs(id,turn_id,name,arguments,status) VALUES(?,1,?,?,'running')" and [operation,name,expression])
+    return process_run(db and home and helper and expression and "0" and operation and "")
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set home to get_list(args and 1)
+    set helper to get_list(args and 2)
+    retry_assert(ep_dlcall2(ep_dlsym(native_system() and "mkdir") and home and 448) == 0 and "exclusive private retry fixture")
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(db and "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE turns(id INTEGER PRIMARY KEY,status TEXT,project TEXT); INSERT INTO turns VALUES(1,'pending','retry'),(2,'pending','other'); CREATE TABLE tool_runs(id INTEGER PRIMARY KEY,turn_id INTEGER REFERENCES turns(id),name TEXT,arguments TEXT,status TEXT,observation INTEGER,request_memory INTEGER); CREATE TABLE process_operations(operation_id INTEGER PRIMARY KEY REFERENCES tool_runs(id),epoch TEXT,status TEXT,result TEXT,stdout BLOB,stderr BLOB); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);")
+    set path to concat(home and "/input.txt")
+    set expression to result_cache_scalar(db and "SELECT json_object('argv',json_array('/bin/cat',?),'cwd',?,'timeout_seconds',5)" and [path,home])
+    set failed to retry_run(db and home and helper and expression and "1")
+    retry_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.exit_code')" and [failed]) == "1" and "real missing-file command fails")
+    write_file(path and "REPAIRED-731\n")
+    set replay to retry_run(db and home and helper and expression and "2")
+    retry_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.replayed_receipt')=1 AND json_extract(?,'$.exit_code')=1" and [replay,replay]) == "1" and "plain duplicate still replays known failure")
+    set retry to result_cache_scalar(db and "SELECT json_set(?,'$.retry_of','1','$.retry_reason','Created the previously missing input file')" and [expression])
+    retry_assert(process_arguments(db and retry) and "explicit retry arguments accepted")
+    set request to "{\"operation_id\":\"1\",\"reason\":\"Created the previously missing input file\"}"
+    retry_assert(process_retry_request_valid(db and request) and "simple retry request accepted")
+    retry_assert(string_equals(process_retry_expression(db and "retry" and request) and retry) and "runtime copies exact original command and applies retry intent")
+    retry_assert(process_retry_expression(db and "other" and request) == "" and "retry resolution cannot read another project's command")
+    set invalid_request to result_cache_scalar(db and "SELECT json_set(?,'$.argv',json_array('/usr/bin/true'))" and [request])
+    retry_assert(process_retry_request_valid(db and invalid_request) == 0 and "retry request cannot override command arguments")
+    set success to retry_run(db and home and helper and retry and "3")
+    retry_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.exit_code')=0 AND json_extract(?,'$.output_ref')='3' AND json_extract(?,'$.retry_of')='1'" and [success,success,success]) == "1" and "repaired input actually re-executes with a fresh receipt")
+    retry_assert(result_cache_scalar(db and "SELECT CAST(stdout AS TEXT) FROM process_operations WHERE operation_id=3" and []) == "REPAIRED-731\n" and "fresh output retained exactly")
+    write_file(path and "CHANGED-482\n")
+    set repeated to retry_run(db and home and helper and retry and "4")
+    retry_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.replayed_receipt')=1 AND json_extract(?,'$.output_ref')='3'" and [repeated,repeated]) == "1" and "same retry intent cannot execute twice")
+    retry_assert(result_cache_scalar(db and "SELECT length(stdout) FROM process_operations WHERE operation_id=4" and []) == "0" and "duplicate aliases original output instead of a second process capture")
+    set chained to result_cache_scalar(db and "SELECT json_set(?,'$.retry_of','3','$.retry_reason','Input changed again after the first retry')" and [retry])
+    set fresh to retry_run(db and home and helper and chained and "5")
+    retry_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.exit_code')=0 AND instr(json_extract(?,'$.stdout_excerpt'),'CHANGED-482')>0" and [fresh,fresh]) == "1" and "new explicit intent can target last actual execution")
+    set invalid to result_cache_scalar(db and "SELECT json_set(?,'$.retry_of','2')" and [retry])
+    retry_assert(string_contains(retry_run(db and home and helper and invalid and "6") and "actual output_ref") and "alias receipt cannot mint a new retry intent")
+    set invalid to result_cache_scalar(db and "SELECT json_set(?,'$.argv[0]','/usr/bin/true')" and [retry])
+    retry_assert(string_contains(retry_run(db and home and helper and invalid and "7") and "identical argv/cwd") and "retry cannot substitute another command")
+    sql_execute(db and "UPDATE turns SET project='other' WHERE id=1; INSERT INTO turns VALUES(3,'pending','retry'); UPDATE tool_runs SET turn_id=3 WHERE id=1")
+    retry_assert(string_contains(retry_run(db and home and helper and retry and "8") and "this project") and "cross-project source rejected")
+    sql_execute(db and "UPDATE turns SET project='retry' WHERE id=1; UPDATE process_operations SET status='claimed' WHERE operation_id=1")
+    retry_assert(string_contains(retry_run(db and home and helper and retry and "9") and "uncertain") and "unfinished source cannot be re-executed")
+    sql_execute(db and "UPDATE process_operations SET status='completed',result=json_set(result,'$.termination','timeout') WHERE operation_id=1")
+    retry_assert(string_contains(retry_run(db and home and helper and retry and "10") and "timed-out") and "timed-out source cannot be re-executed")
+    sql_execute(db and "UPDATE process_operations SET result=json_set(result,'$.termination','exited'),epoch='older' WHERE operation_id=1")
+    retry_assert(string_contains(retry_run(db and home and helper and retry and "11") and "epoch") and "forgotten source epoch rejected")
+    set invalid to result_cache_scalar(db and "SELECT json_set(?,'$.retry_reason','')" and [retry])
+    retry_assert(process_arguments(db and invalid) == 0 and "retry requires a reason")
+    set invalid to result_cache_scalar(db and "SELECT json_set(?,'$.retry_of','01')" and [retry])
+    retry_assert(process_arguments(db and invalid) == 0 and "retry ID has a canonical numeric form")
+    set invalid to result_cache_scalar(db and "SELECT json_remove(?,'$.retry_reason')" and [retry])
+    retry_assert(process_arguments(db and invalid) == 0 and "partial retry fields rejected")
+    retry_assert(result_cache_scalar(db and "SELECT count(*) FROM process_operations WHERE operation_id>=6" and []) == "0" and "rejected intents never acquire runnable operations")
+    set pending to result_cache_scalar(db and "SELECT json_set(?,'$.retry_of','5','$.retry_reason','A new observed input change')" and [retry])
+    sql_execute_params(db and "INSERT INTO tool_runs(id,turn_id,name,arguments,status) VALUES(20,1,'process_run',?,'running')" and [pending])
+    retry_assert(string_contains(process_claim(db and pending and "0" and "20") and "claimed") and "new retry intent durably claims before execution")
+    retry_assert(string_contains(retry_run(db and home and helper and pending and "21") and "uncertain_effects") and "duplicate of unfinished retry cannot execute")
+    retry_assert(result_cache_scalar(db and "SELECT count(*) FROM process_operations WHERE operation_id=21" and []) == "0" and "unfinished retry duplicate leaves no second claim")
+    sql_execute(db and "UPDATE process_operations SET epoch='0',result=json_set(result,'$.termination','abandoned') WHERE operation_id=1")
+    retry_assert(string_contains(retry_run(db and home and helper and retry and "22") and "cancelled") and "cancelled source cannot be retried through this path")
+    sql_execute(db and "INSERT INTO tool_runs(id,turn_id,name,arguments,status) VALUES(30,1,'process_output','3:stdout:0','running')")
+    set opened to process_output(db and "3:stdout:0" and "0" and "30")
+    retry_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.original_command.argv[0]')='/bin/cat' AND json_extract(?,'$.original_command.cwd')=?" and [opened,opened,home]) == "1" and "saved output exposes exact original argv and cwd")
+    retry_assert(result_cache_scalar(db and "SELECT json_type(?,'$.original_command.retry_of') IS NULL" and [opened]) == "1" and "retry metadata excludes previous retry intent")
+    set saved_arguments to result_cache_scalar(db and "SELECT arguments FROM tool_runs WHERE id=3" and [])
+    sql_execute(db and "UPDATE tool_runs SET arguments=json_object('argv',json_array('/bin/cat',printf('%.*c',2100,'x'),printf('%.*c',2100,'y')),'cwd','/tmp','timeout_seconds',5) WHERE id=3")
+    set bounded to process_output(db and "3:stdout:0" and "0" and "30")
+    retry_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.command_metadata_omitted')=1 AND json_type(?,'$.original_command')='null'" and [bounded,bounded]) == "1" and "oversized original command metadata omitted")
+    retry_assert(string_length(bounded) < 8192 and "output plus metadata stays bounded")
+    sql_execute_params(db and "UPDATE tool_runs SET arguments=? WHERE id=3" and [saved_arguments])
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " explicit supervised retry checks"))
+    return 0

@@ -1,0 +1,53 @@
+import "../src/web_tool"
+import "os"
+set checks to 0
+
+define web_tool_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set_env("ECHOLITE_NETWORK_MODE" and "connected")
+    set args to get_args()
+    set database to get_list(args and 1)
+    set db to sql_open(database)
+    web_tool_assert(sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);") == 0 and "isolated source cache")
+    set url to "https://echolite-cache-test.invalid/source"
+    set builder to create_builder()
+    set i to 0
+    repeat while i < 500:
+        builder_append(builder and "Café MAPLE-173. ")
+        set i to i + 1
+    set source_text to builder_to_string(builder)
+    set snapshot to result_cache_scalar(db and "SELECT json_object('status','ok','store',json('true'),'text',?,'url',?,'title','Fixture','expires_at',CAST(strftime('%s','now') AS INTEGER)+300,'fetched_at','2026-11-17T00:00:00Z','validated_at','2026-11-17T00:00:00Z','links',json('[]'),'links_truncated',json('false'),'capture_truncated',json('false'),'content_sha256',?)" and [source_text,url,sha256(source_text)])
+    web_snapshot_store(db and web_namespace() and url and "0" and snapshot)
+    sql_close(db)
+    set db to sql_open(database)
+    set request to result_cache_scalar(db and "SELECT json_object('url',?,'offset',0,'refresh',json('false'))" and [url])
+    set result to web_lookup(db and request and "0")
+    web_tool_assert(string_contains(result and "MAPLE-173") and concat("saved text replay: " and result))
+    web_tool_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "reopened cache succeeds for unresolvable hostname")
+    web_tool_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.entries[0].url')" and [result]) == url and "final source citation")
+    set next to result_cache_scalar(db and "SELECT json_extract(?,'$.next_offset')" and [result])
+    web_tool_assert(string_to_int(next) > 0 and "source continuation")
+    set following to result_cache_scalar(db and "SELECT json_set(?,'$.offset',CAST(? AS INTEGER))" and [request,next])
+    set result to web_lookup(db and following and "0")
+    web_tool_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) == "1" and "continuation uses persistent source")
+    set bad_offset to result_cache_scalar(db and "SELECT json_set(?,'$.offset',20000)" and [request])
+    web_tool_assert(string_contains(web_lookup(db and bad_offset and "0") and "beyond") and "out-of-range continuation rejected")
+    set nul_url to "{\"url\":\"https://example.org/\u0000ignored\",\"offset\":0,\"refresh\":false}"
+    web_tool_assert(string_contains(web_lookup(db and nul_url and "0") and "error") and "NUL URL rejected before string extraction")
+    set malformed to result_cache_scalar(db and "SELECT json_set(?,'$.refresh','false')" and [request])
+    web_tool_assert(string_contains(web_lookup(db and malformed and "0") and "error") and "string refresh rejected")
+    set response to result_cache_scalar(db and "SELECT json_object('headers',?)" and ["HTTP/2 302\r\nLocation: ../target#fragment\r\n\r\n"])
+    web_tool_assert(web_redirect(db and "https://example.org/start/page" and response) == "https://example.org/target" and "relative redirect normalized")
+    set response to result_cache_scalar(db and "SELECT json_object('headers',?)" and ["HTTP/2 302\r\nLocation: http://example.org/\r\n\r\n"])
+    web_tool_assert(web_redirect(db and url and response) == "" and "HTTPS downgrade rejected")
+    sql_execute(db and "UPDATE metadata SET value='1'")
+    web_tool_assert(string_contains(web_lookup(db and request and "0") and "error") and "forgetting boundary enforced")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " native web tool checks"))
+    return 0

@@ -1,0 +1,81 @@
+# Atomic database-derived Me.txt publication, implemented in Ernos Plain.
+import "native_calls"
+import "state_lock"
+
+define identity_error with directory and descriptor and message returning Str:
+    set close_fn to ep_dlsym(native_system() and "close")
+    if descriptor >= 0:
+        ep_dlcall1(close_fn and descriptor)
+    if directory >= 0:
+        ep_dlcall1(close_fn and directory)
+    return lease_error(concat(message and "; database remains authoritative"))
+
+define identity_regular with info:
+    set mode to lease_integer(info and 4 and 2)
+    set links to lease_integer(info and 6 and 2)
+    set owner to lease_integer(info and 16 and 4)
+    return mode / 4096 == 8 && links == 1 && owner == ep_dlcall0(ep_dlsym(native_system() and "getuid"))
+
+define identity_existing with directory and name:
+    set info to alloc_bytes(144)
+    set result to ep_dlcall4(ep_dlsym(native_system() and "fstatat") and directory and name and info and 32)
+    set valid to 0
+    if result == 0:
+        set valid to identity_regular(info)
+    else:
+        set error_pointer to ep_dlcall0(ep_dlsym(native_system() and "__error"))
+        if lease_integer(error_pointer and 0 and 4) == 2:
+            set valid to 1
+    free_bytes(info)
+    return valid
+
+define publish_identity with home and body returning Str:
+    if string_length(body) > 16000:
+        return identity_error(-1 and -1 and "Invalid identity projection")
+    set libc to native_system()
+    set directory to native_open(home and 17825792 and 0)
+    if directory < 0:
+        return identity_error(-1 and -1 and "Cannot open identity directory")
+    if identity_existing(directory and "Me.txt") == 0 || identity_existing(directory and "Me.txt.pending") == 0:
+        return identity_error(directory and -1 and "Identity paths must be owned regular single-link files")
+    set descriptor to native_openat(directory and "Me.txt.pending" and 16777989 and 384)
+    if descriptor < 0:
+        return identity_error(directory and -1 and "Cannot open identity staging file")
+    set opened to alloc_bytes(144)
+    set rc to ep_dlcall2(ep_dlsym(libc and "fstat") and descriptor and opened)
+    if rc != 0 || identity_regular(opened) == 0:
+        free_bytes(opened)
+        return identity_error(directory and descriptor and "Cannot validate private identity staging file")
+    if ep_dlcall2(ep_dlsym(libc and "fchmod") and descriptor and 384) != 0 || ep_dlcall2(ep_dlsym(libc and "ftruncate") and descriptor and 0) != 0:
+        free_bytes(opened)
+        return identity_error(directory and descriptor and "Cannot prepare private identity staging file")
+    set offset to 0
+    set problem to ""
+    repeat while offset < string_length(body) && problem == "":
+        set count to ep_dlcall3(ep_dlsym(libc and "write") and descriptor and str_to_ptr(body) + offset and string_length(body) - offset)
+        if count < 0:
+            set error_pointer to ep_dlcall0(ep_dlsym(libc and "__error"))
+            if lease_integer(error_pointer and 0 and 4) != 4:
+                set problem to "Cannot finish writing identity staging file"
+        else if count == 0:
+            set problem to "Cannot finish writing identity staging file"
+        else:
+            set offset to offset + count
+    if problem == "" && ep_dlcall1(ep_dlsym(libc and "fsync") and descriptor) != 0:
+        set problem to "Cannot synchronize identity staging file"
+    if problem == "":
+        set current to alloc_bytes(144)
+        set rc to ep_dlcall4(ep_dlsym(libc and "fstatat") and directory and "Me.txt.pending" and current and 32)
+        if rc != 0 || identity_regular(current) == 0 || lease_integer(opened and 0 and 4) != lease_integer(current and 0 and 4) || lease_integer(opened and 8 and 8) != lease_integer(current and 8 and 8) || identity_existing(directory and "Me.txt") == 0:
+            set problem to "Identity path changed during publication"
+        free_bytes(current)
+    free_bytes(opened)
+    if problem != "":
+        return identity_error(directory and descriptor and problem)
+    if ep_dlcall4(ep_dlsym(libc and "renameat") and directory and "Me.txt.pending" and directory and "Me.txt") != 0:
+        return identity_error(directory and descriptor and "Cannot atomically publish identity projection")
+    ep_dlcall1(ep_dlsym(libc and "close") and descriptor)
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and directory) != 0:
+        return identity_error(directory and -1 and "Identity published but directory synchronization failed")
+    ep_dlcall1(ep_dlsym(libc and "close") and directory)
+    return "{\"status\":\"ok\"}"

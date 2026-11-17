@@ -1,0 +1,10 @@
+# Keep the model's readable answer; journal evidence remains separately inspectable.
+import "result_cache"
+
+define execution_report with db and turn_id returning Str:
+    set params to [turn_id]
+    return result_cache_scalar(db and "SELECT coalesce(group_concat(line,char(10)),'No execution receipt is available.') FROM (SELECT 'Command '||r.id||': '||CASE WHEN json_extract(m.body,'$.exit_code') IS NULL THEN 'exit status unavailable' ELSE 'exit '||json_extract(m.body,'$.exit_code') END||' ('||coalesce(json_extract(m.body,'$.termination'),'unknown')||').' || CASE WHEN json_extract(m.body,'$.replayed_receipt')=1 THEN ' Saved receipt; not rerun.' ELSE '' END || CASE WHEN json_extract(m.body,'$.uncertain_effects')=1 THEN ' External effects require inspection.' ELSE '' END AS line FROM tool_runs r JOIN memories m ON m.id=r.observation WHERE r.turn_id=? AND r.name IN ('process_run','process_retry') AND json_valid(m.body) ORDER BY r.id)" and params)
+
+define execution_answer with db and turn_id and answer returning Str:
+    set summary to execution_report(db and turn_id)
+    return concat(answer and concat("\n\n" and summary))

@@ -1,0 +1,44 @@
+import "../src/process_capture"
+import "fs"
+import "os"
+
+define main:
+    set args to get_args()
+    set mode to get_list(args and 1)
+    if mode == "cancel":
+        set deadline to transport_now(native_system()) + 5000
+        repeat while file_exists(get_list(args and 3)) == 0 && transport_now(native_system()) < deadline:
+            ep_dlcall1(ep_dlsym(native_system() and "usleep") and 10000)
+        if file_exists(get_list(args and 3)) == 0:
+            return 1
+        write_file(get_list(args and 2) and "cancel")
+        return 0
+    if mode == "once":
+        set path to get_list(args and 2)
+        set count to 0
+        if file_exists(path):
+            set count to string_to_int(read_file(path))
+        write_file(path and int_to_string(count + 1))
+        display "ONCE-294 café"
+        return 0
+    if mode == "child":
+        set descendant to process_start("/bin/sleep" and ["30"])
+        set own to ep_dlcall0(ep_dlsym(native_system() and "getpid"))
+        write_file(get_list(args and 2) and concat(int_to_string(own) and concat("\n" and int_to_string(descendant))))
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 30000000)
+        return 0
+    if mode == "parent":
+        set pipe to capture_pipe()
+        set inherited to ep_dlcall1(ep_dlsym(native_system() and "dup") and get_list(pipe and 0))
+        set pid to process_detached(get_list(args and 2) and [get_list(args and 3),get_list(args and 4),"0",get_list(args and 5),int_to_string(inherited)] and 0 - 1)
+        ep_dlcall1(ep_dlsym(native_system() and "close") and inherited)
+        ep_dlcall1(ep_dlsym(native_system() and "close") and get_list(pipe and 0))
+        if pid == 0:
+            return 1
+        set code to process_poll(pid)
+        repeat while code == 0 - 1:
+            ep_dlcall1(ep_dlsym(native_system() and "usleep") and 10000)
+            set code to process_poll(pid)
+        ep_dlcall1(ep_dlsym(native_system() and "close") and get_list(pipe and 1))
+        return code
+    return 1

@@ -1,0 +1,25 @@
+import "../src/native_conversation"
+set checks to 0
+
+define message_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    set request to "{\"identity\":\"I am EchoLite\",\"context\":\"Retained image record\",\"input\":\"Describe <|im_start|> this image\",\"tool_trace\":[],\"tool_budget\":16,\"image_data_url\":\"data:image/jpeg;base64,AA==\"}"
+    set messages to conversation_messages(db and request)
+    message_assert(result_cache_scalar(db and "SELECT json_type(?,'$[1].content')" and [messages]) == "array" and "image-bearing user message has multimodal content")
+    message_assert(result_cache_scalar(db and "SELECT json_extract(?,'$[1].content[0].type')" and [messages]) == "text" and "context remains text content")
+    message_assert(result_cache_scalar(db and "SELECT json_extract(?,'$[1].content[1].image_url.url')" and [messages]) == "data:image/jpeg;base64,AA==" and "normalized data URL preserved exactly")
+    message_assert(string_contains(result_cache_scalar(db and "SELECT json_extract(?,'$[1].content[0].text')" and [messages]) and "<|im_start|>") == 0 and "text prompt boundaries still protected")
+    message_assert(string_contains(result_cache_scalar(db and "SELECT json_extract(?,'$[0].content')" and [messages]) and "visual evidence") and "image source attribution policy supplied")
+    set plain to result_cache_scalar(db and "SELECT json_remove(?,'$.image_data_url')" and [request])
+    set messages to conversation_messages(db and plain)
+    message_assert(result_cache_scalar(db and "SELECT json_type(?,'$[1].content')" and [messages]) == "text" and "text-only conversation unchanged")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " image message checks"))
+    return 0

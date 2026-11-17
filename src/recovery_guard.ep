@@ -1,0 +1,125 @@
+# Recovery authority is independent of the memory database. Call under its lock.
+import "snapshot_seal"
+
+define recovery_cleanup with dir:
+    set libc to native_system()
+    set duplicate to ep_dlcall1(ep_dlsym(libc and "dup") and dir)
+    if duplicate < 0 || duplicate > 2147483647:
+        return 0
+    set stream to ep_dlcall1(ep_dlsym(libc and "fdopendir") and duplicate)
+    if stream == 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and duplicate)
+        return 0
+    ep_dlcall1(ep_dlsym(libc and "rewinddir") and stream)
+    set info to alloc_bytes(144)
+    set error_pointer to ep_dlcall0(ep_dlsym(libc and "__error"))
+    set valid to 1
+    set finished to 0
+    set count to 0
+    repeat while valid == 1 && finished == 0:
+        native_bytes_write(error_pointer and 0 and 0 and 4)
+        set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and stream)
+        if entry == 0:
+            set finished to 1
+            if transport_errno(libc) != 0:
+                set valid to 0
+        else:
+            set count to count + 1
+            if count > 10000:
+                set valid to 0
+            set name to ptr_to_str(entry + 21)
+            if string_length(name) == 81 && starts_with(name and "recovery-") && ends_with(name and ".pending"):
+                if snapshot_hex(substring(name and 9 and 64) and 64):
+                    if ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and 32) != 0 || lease_integer(info and 4 and 2) / 4096 != 8 || lease_integer(info and 16 and 4) != ep_dlcall0(ep_dlsym(libc and "getuid")) || lease_integer(info and 6 and 2) != 1:
+                        set valid to 0
+                    else if ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and name and 0) != 0:
+                        set valid to 0
+    free_bytes(info)
+    ep_dlcall1(ep_dlsym(libc and "closedir") and stream)
+    if valid == 1 && ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        set valid to 0
+    return valid
+
+define recovery_publish with dir and rotate returning Str:
+    set libc to native_system()
+    set current to snapshot_read_hex(dir and "recovery.guard")
+    if current == "":
+        set info to alloc_bytes(144)
+        set present to ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and "recovery.guard" and info and 32)
+        set missing to present != 0 && transport_errno(libc) == 2
+        free_bytes(info)
+        if missing == 0:
+            return ""
+    if recovery_cleanup(dir) == 0:
+        return ""
+    if rotate == 0 && current != "":
+        return current
+    set random to alloc_bytes(32)
+    ep_dlcall2(ep_dlsym(libc and "arc4random_buf") and random and 32)
+    set digits to "0123456789abcdef"
+    set output to create_builder()
+    set i to 0
+    repeat while i < 32:
+        set byte to peek_byte(random and i)
+        builder_append(output and substring(digits and byte / 16 and 1))
+        builder_append(output and substring(digits and byte % 16 and 1))
+        set i to i + 1
+    free_bytes(random)
+    set token to builder_to_string(output)
+    set staging to concat("recovery-" and concat(token and ".pending"))
+    set fd to native_openat(dir and staging and 16780033 and 384)
+    if fd < 0:
+        return ""
+    set data to concat(token and "\n")
+    set used to 0
+    set valid to 1
+    repeat while valid == 1 && used < 65:
+        set count to ep_dlcall3(ep_dlsym(libc and "write") and fd and str_to_ptr(data) + used and 65 - used)
+        if count == 0:
+            set valid to 0
+        else if count < 0 || count > 65 - used:
+            if transport_errno(libc) != 4:
+                set valid to 0
+        else:
+            set used to used + count
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and fd) != 0:
+        set valid to 0
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    if valid == 1 && get_env("ECHOLITE_TEST_FAULT") == "recovery_before_publish":
+        ep_dlcall1(ep_dlsym(libc and "_exit") and 81)
+    if valid == 1:
+        if rotate == 1:
+            set valid to ep_dlcall4(ep_dlsym(libc and "renameat") and dir and staging and dir and "recovery.guard") == 0
+        else:
+            set valid to ep_dlcall5(ep_dlsym(libc and "renameatx_np") and dir and staging and dir and "recovery.guard" and 4) == 0
+    if ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        set valid to 0
+    if valid == 1 && get_env("ECHOLITE_TEST_FAULT") == "recovery_after_publish":
+        ep_dlcall1(ep_dlsym(libc and "_exit") and 82)
+    if valid == 0:
+        ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and staging and 0)
+        ep_dlcall1(ep_dlsym(libc and "fsync") and dir)
+        return ""
+    return token
+
+define recovery_guard with home and rotate returning Str:
+    if rotate != 0 && rotate != 1:
+        return ""
+    set libc to native_system()
+    set resolved to alloc_bytes(1024)
+    set code to ep_dlcall2(ep_dlsym(libc and "realpath") and home and resolved)
+    set canonical to ptr_to_str(resolved)
+    free_bytes(resolved)
+    if code == 0 || string_length(canonical) > 900:
+        return ""
+    set dir to native_open(canonical and 17826048 and 0)
+    if dir < 0:
+        return ""
+    set info to alloc_bytes(144)
+    set owned to ep_dlcall2(ep_dlsym(libc and "fstat") and dir and info) == 0 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid"))
+    free_bytes(info)
+    set result to ""
+    if owned == 1:
+        set result to recovery_publish(dir and rotate)
+    ep_dlcall1(ep_dlsym(libc and "close") and dir)
+    return result

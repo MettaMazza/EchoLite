@@ -1,0 +1,63 @@
+import "../src/memory_beliefs"
+import "../src/memory_correction"
+import "os"
+set checks to 0
+
+define belief_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define assess_fixture with db and note and revision and state and start_date and end_date and evidence returning Str:
+    set params to [note,revision,state,start_date,end_date,evidence]
+    return result_cache_scalar(db and "SELECT json_object('note_id',?,'revision',CAST(? AS INTEGER),'state',?,'valid_from',?,'valid_until',?,'evidence_id',?,'reason','Recorded assessment fixture')" and params)
+
+define assessment_ok with db and expression:
+    set result to belief_update(db and "a" and expression and "2")
+    return result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) == "completed"
+
+define main:
+    set db to sql_open(":memory:")
+    belief_assert(sql_execute(db and "PRAGMA foreign_keys=ON; CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('memory_revision','1'); CREATE TABLE memories(id INTEGER PRIMARY KEY AUTOINCREMENT,layer TEXT,project TEXT,source TEXT,body TEXT,status TEXT DEFAULT 'active',created TEXT DEFAULT '2026-01-01T00:00:00Z'); CREATE TABLE derivations(parent INTEGER REFERENCES memories(id) ON DELETE CASCADE,child INTEGER REFERENCES memories(id) ON DELETE CASCADE,PRIMARY KEY(parent,child)); CREATE TABLE tool_runs(name TEXT,status TEXT,observation INTEGER); INSERT INTO memories(layer,project,source,body) VALUES('semantic','a','agent-note-unverified','Original claim'),('episodic','a','user-message','Original request'),('episodic','a','tool-observation','{\"outcome\":\"completed\"}'),('semantic','b','user','Foreign claim'),('procedural','a','agent-note-unverified','Procedure'),('episodic','a','agent','Unsupported prose'); INSERT INTO tool_runs VALUES('calculator','completed',3);") == 0 and "fixture schema")
+    belief_assert(belief_schema(db) == 0 and "schema and migration")
+    belief_assert(result_cache_scalar(db and "SELECT count(*) FROM memory_beliefs WHERE state='tentative'" and []) == "3" and "existing claims start tentative")
+    belief_assert(result_cache_scalar(db and "SELECT body FROM memories WHERE id=1" and []) == "Original claim" and "migration preserves original body and ID")
+    belief_assert(belief_date(db and "2026-02-30T00:00:00Z") == 0 && belief_date(db and "2028-02-29T00:00:00Z") == 1 && belief_date(db and "") == 1 && belief_date(db and "2026-01-01") == 0 and "canonical real dates or unknown")
+    belief_assert(assessment_ok(db and assess_fixture(db and "1" and "1" and "supported" and "" and "" and "6")) == 0 and "prose cannot independently support claim")
+    belief_assert(assessment_ok(db and assess_fixture(db and "1" and "1" and "supported" and "" and "" and "3")) and "successful calculation receipt supports attributed claim")
+    belief_assert(result_cache_scalar(db and "SELECT revision||':'||origin FROM memory_beliefs WHERE memory=1" and []) == "2:direct_observation" and "support provenance and revision")
+    belief_assert(assessment_ok(db and assess_fixture(db and "1" and "1" and "tentative" and "" and "" and "")) == 0 and "stale revision rejected")
+    belief_assert(assessment_ok(db and assess_fixture(db and "4" and "1" and "tentative" and "" and "" and "")) == 0 and "cross-project claim rejected")
+    belief_assert(assessment_ok(db and assess_fixture(db and "1" and "2" and "supported" and "" and "" and "1")) == 0 and "self support rejected")
+    sql_execute(db and "INSERT INTO derivations VALUES(1,6)")
+    belief_assert(assessment_ok(db and assess_fixture(db and "1" and "2" and "tentative" and "" and "" and "6")) == 0 and "descendant evidence rejected")
+    belief_assert(assessment_ok(db and assess_fixture(db and "1" and "2" and "disputed" and "" and "2020-01-01T00:00:00Z" and "2")) and "bounded claim assessment")
+    belief_assert(result_cache_scalar(db and "SELECT effective_state||':'||available FROM belief_details WHERE memory=1" and []) == "expired:0" and "expired claim unavailable to current recall")
+    set revision to result_cache_scalar(db and "SELECT value FROM metadata WHERE key='memory_revision'" and [])
+    belief_refresh(db)
+    belief_assert(string_equals(revision and result_cache_scalar(db and "SELECT value FROM metadata WHERE key='memory_revision'" and [])) and "unchanged clock preserves cache revision")
+    belief_assert(assessment_ok(db and assess_fixture(db and "1" and "3" and "supported" and "2099-01-01T00:00:00Z" and "" and "2")) and "future claim can retain attributed evidence")
+    belief_assert(result_cache_scalar(db and "SELECT origin||':'||available FROM memory_beliefs WHERE memory=1" and []) == "user_statement:0" and "user testimony attributed and future applicability excluded")
+    sql_execute(db and "UPDATE memory_beliefs SET valid_from='2000-01-01T00:00:00Z' WHERE memory=1")
+    set revision to result_cache_scalar(db and "SELECT value FROM metadata WHERE key='memory_revision'" and [])
+    belief_refresh(db)
+    belief_assert(result_cache_scalar(db and "SELECT available FROM memory_beliefs WHERE memory=1" and []) == "1" && string_equals(revision and result_cache_scalar(db and "SELECT value FROM metadata WHERE key='memory_revision'" and [])) == 0 and "clock boundary invalidates recall revision")
+    belief_assert(assessment_ok(db and assess_fixture(db and "5" and "1" and "supported" and "" and "" and "3")) and "procedural claim supported")
+    sql_execute(db and "DELETE FROM memories WHERE id=3")
+    belief_assert(result_cache_scalar(db and "SELECT state||':'||origin||':'||revision FROM memory_beliefs WHERE memory=5" and []) == "tentative:unspecified:3" and "removed evidence withdraws support")
+    belief_assert(result_cache_scalar(db and "SELECT count(*) FROM belief_history WHERE memory=5" and []) == "3" and "withdrawal recorded in history")
+    belief_assert(correction_schema(db) == 0 and "correction schema")
+    sql_execute(db and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','a','tool-request','Correction request')")
+    set correction_actor to result_cache_scalar(db and "SELECT last_insert_rowid()" and [])
+    set corrected to memory_correct(db and "a" and "{\"note_id\":\"1\",\"text\":\"Corrected claim\",\"reason\":\"User corrected the claim\"}" and correction_actor)
+    belief_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [corrected]) == "completed" and "normal correction still works")
+    belief_assert(result_cache_scalar(db and "SELECT effective_state FROM belief_details WHERE memory=1" and []) == "superseded" && result_cache_scalar(db and "SELECT body FROM memories WHERE id=1" and []) == "Original claim" and "correction retains historical claim and assessment")
+    belief_assert(result_cache_scalar(db and "SELECT b.state FROM memory_beliefs b JOIN memories m ON m.id=b.memory WHERE m.body LIKE '%Corrected claim'" and []) == "tentative" and "replacement does not inherit unsupported certainty")
+    sql_execute(db and "DELETE FROM memories WHERE id=5")
+    belief_assert(result_cache_scalar(db and "SELECT count(*) FROM belief_history WHERE memory=5" and []) == "0" && result_cache_scalar(db and "SELECT count(*) FROM memory_beliefs WHERE memory=5" and []) == "0" and "forgetting removes belief metadata and history")
+    belief_assert(result_cache_scalar(db and "PRAGMA integrity_check" and []) == "ok" && length_list(sql_query(db and "PRAGMA foreign_key_check")) == 0 and "database integrity")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " belief memory checks"))
+    return 0

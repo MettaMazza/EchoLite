@@ -1,0 +1,40 @@
+import "../src/native_model"
+import "fs"
+import "os"
+define main:
+    set args to get_args()
+    if length_list(args) != 4:
+        return 1
+    set home to get_list(args and 1)
+    set credential to get_list(args and 2)
+    set mode to get_list(args and 3)
+    set_env("ECHOLITE_HOME" and home)
+    set_env("ECHOLITE_NATIVE_TOKEN_FILE" and credential)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(db and "PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;")
+    set token to string_trim(read_file(credential))
+    set payload to "{\"messages\":[{\"role\":\"user\",\"content\":\"Return the required local cache test object.\"}],\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"cache_test\",\"strict\":true,\"schema\":{\"type\":\"object\",\"properties\":{\"receipt\":{\"const\":\"CACHE-LOCAL\"}},\"required\":[\"receipt\"],\"additionalProperties\":false}}},\"max_tokens\":64,\"reasoning_budget_tokens\":0,\"temperature\":0,\"stream\":true,\"stream_options\":{\"include_usage\":true},\"cache_prompt\":true}"
+    if mode == "replay":
+        set token to "invalid-credential-proves-exact-response-cache"
+    if mode == "restore":
+        set lock to slot_lock(slot_runtime_home())
+        if lock < 0:
+            return 1
+        set erased to slot_control(db and token and "erase" and "")
+        slot_unlock(lock)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [erased]) != "ok":
+            display erased
+            return 1
+        set payload to result_cache_scalar(db and "SELECT json_set(?,'$.seed',1)" and [payload])
+    set result to native_model_cached(db and token and payload and "native-slot-integration-b12359-qwen4b-v1" and "0" and 0)
+    display result
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.slot_save.status')='ok' AND json_extract(?,'$.text') LIKE '%CACHE-LOCAL%'" and [result,result,result]) != "1":
+        return 1
+    if mode == "replay" && result_cache_scalar(db and "SELECT json_extract(?,'$.cache_hit')" and [result]) != "1":
+        return 1
+    if mode == "restore":
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.slot_restore.operation')='restore' AND json_extract(?,'$.slot_restore.n_restored')>0" and [result,result]) != "1":
+            return 1
+    sql_close(db)
+    display concat("PASS: automatic native cache " and mode)
+    return 0

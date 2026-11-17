@@ -1,0 +1,182 @@
+# Local Wiktionary lookup, Unicode normalization and bounded decompression in EP.
+import "result_cache"
+import "native_calls"
+import "fs"
+import "os"
+
+define dictionary_uint with pointer and offset and count:
+    set value to 0
+    set i to count - 1
+    repeat while i >= 0:
+        set value to value * 256 + peek_byte(pointer and offset + i)
+        set i to i - 1
+    return value
+
+define dictionary_normalize with text returning Str:
+    set cf to ep_dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    set create_fn to ep_dlsym(cf and "CFStringCreateWithCString")
+    set release to ep_dlsym(cf and "CFRelease")
+    set original to ep_dlcall3(create_fn and 0 and text and 134217984)
+    if original == 0:
+        return ""
+    set value to ep_dlcall3(ep_dlsym(cf and "CFStringCreateMutableCopy") and 0 and 0 and original)
+    ep_dlcall1(release and original)
+    if value == 0:
+        return ""
+    ep_dlcall1(ep_dlsym(cf and "CFStringTrimWhitespace") and value)
+    ep_dlcall2(ep_dlsym(cf and "CFStringNormalize") and value and 3)
+    set locale_name to ep_dlcall3(create_fn and 0 and "en_US_POSIX" and 134217984)
+    set locale to ep_dlcall2(ep_dlsym(cf and "CFLocaleCreate") and 0 and locale_name)
+    ep_dlcall3(ep_dlsym(cf and "CFStringFold") and value and 1 and locale)
+    ep_dlcall1(release and locale)
+    ep_dlcall1(release and locale_name)
+    set count to ep_dlcall1(ep_dlsym(cf and "CFStringGetLength") and value)
+    set capacity to ep_dlcall2(ep_dlsym(cf and "CFStringGetMaximumSizeForEncoding") and count and 134217984) + 1
+    set output to ""
+    if capacity > 0 && capacity <= 8192:
+        set data to alloc_bytes(capacity)
+        if ep_dlcall4(ep_dlsym(cf and "CFStringGetCString") and value and data and capacity and 134217984) != 0:
+            set output to ptr_to_str(data)
+        free_bytes(data)
+    ep_dlcall1(release and value)
+    return output
+
+define dictionary_quote with text returning Str:
+    set output to create_builder()
+    set hex to "0123456789ABCDEF"
+    set i to 0
+    repeat while i < string_length(text):
+        set c to get_character(text and i)
+        if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 45 || c == 46 || c == 95 || c == 126:
+            builder_append(output and substring(text and i and 1))
+        else:
+            builder_append(output and "%")
+            builder_append(output and substring(hex and c / 16 and 1))
+            builder_append(output and substring(hex and c % 16 and 1))
+        set i to i + 1
+    return builder_to_string(output)
+
+define dictionary_excerpt with text and limit returning Str:
+    set count to string_length(text)
+    if count <= limit:
+        return text
+    set count to limit
+    repeat while count > 0 && get_character(text and count) >= 128 && get_character(text and count) <= 191:
+        set count to count - 1
+    return substring(text and 0 and count)
+
+define dictionary_record with sqlite and statement returning Str:
+    set size to ep_dlcall2(ep_dlsym(sqlite and "sqlite3_column_bytes") and statement and 3)
+    if size < 1 || size > 2097152:
+        return ""
+    set compressed to ep_dlcall2(ep_dlsym(sqlite and "sqlite3_column_blob") and statement and 3)
+    set output to alloc_bytes(2097153)
+    set length_pointer to alloc_bytes(8)
+    native_bytes_write(length_pointer and 0 and 2097152 and 8)
+    set zlib to ep_dlopen("/usr/lib/libz.1.dylib")
+    set rc to ep_dlcall4(ep_dlsym(zlib and "uncompress") and output and length_pointer and compressed and size)
+    set result to ""
+    if rc == 0:
+        set length to dictionary_uint(length_pointer and 0 and 8)
+        if ep_dlcall3(ep_dlsym(native_system() and "memchr") and output and 0 and length) == 0:
+            poke_byte(output and length and 0)
+            set result to ptr_to_str(output)
+    free_bytes(length_pointer)
+    free_bytes(output)
+    return result
+
+define dictionary_characters with text:
+    set count to 0
+    set i to 0
+    repeat while i < string_length(text):
+        set c to get_character(text and i)
+        if c < 128 || c >= 192:
+            set count to count + 1
+        set i to i + 1
+    return count
+
+define dictionary_lookup with db and library and word and epoch returning Str:
+    if string_length(word) == 0 || string_length(word) > 640 || dictionary_characters(word) > 160:
+        return result_cache_error("Dictionary query must contain 1-160 characters")
+    set normalized to dictionary_normalize(word)
+    if normalized == "":
+        return result_cache_error("Invalid dictionary query")
+    set path to concat(library and "/dictionary.sqlite3")
+    if file_exists(path) == 0:
+        return "{\"status\":\"ok\",\"tool\":\"dictionary\",\"outcome\":\"failed\",\"error_code\":\"unavailable\",\"text\":\"The local dictionary has not been installed.\"}"
+    set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+    set handle to alloc_bytes(8)
+    set rc to ep_dlcall4(ep_dlsym(sqlite and "sqlite3_open_v2") and path and handle and 1 and 0)
+    set reference to dictionary_uint(handle and 0 and 8)
+    free_bytes(handle)
+    if rc != 0:
+        if reference != 0:
+            sql_close(reference)
+        return result_cache_error("Cannot open the local dictionary read-only")
+    sql_execute(reference and "PRAGMA query_only=ON; PRAGMA cache_size=-4096;")
+    set ready to result_cache_scalar(reference and "SELECT value FROM metadata WHERE key='status'" and [])
+    set schema to result_cache_scalar(reference and "SELECT value FROM metadata WHERE key='schema'" and [])
+    set source to result_cache_scalar(reference and "SELECT value FROM metadata WHERE key='source_sha256'" and [])
+    set builder to result_cache_scalar(reference and "SELECT value FROM metadata WHERE key='builder_sha256'" and [])
+    if ready != "ready" || schema != "1" || source == "" || builder == "":
+        sql_close(reference)
+        return result_cache_error("Dictionary is not ready or uses an unsupported schema")
+    set namespace to concat("dictionary-ep-v1:" and concat(source and concat(":" and builder)))
+    set cached to result_cache_get(db and namespace and normalized and epoch)
+    if cached != "":
+        sql_close(reference)
+        return cached
+    set statement to ep_sqlite3_prepare_v2(reference and str_to_ptr("SELECT id,word,pos,payload FROM entries WHERE normalized=? ORDER BY word COLLATE BINARY,id LIMIT 6"))
+    if statement == 0:
+        sql_close(reference)
+        return result_cache_error("Cannot query local dictionary")
+    sql_bind_params(statement and [normalized])
+    set entries to "[]"
+    set remaining to 2000
+    set error to ""
+    set step to ep_sqlite3_step(statement)
+    repeat while step == 100 && remaining > 0 && error == "":
+        set identifier to ep_sqlite3_column_text(statement and 0)
+        set entry_word to ep_sqlite3_column_text(statement and 1)
+        set pos to ep_sqlite3_column_text(statement and 2)
+        set record to dictionary_record(sqlite and statement)
+        if result_cache_scalar(db and "SELECT json_valid(?)" and [record]) != "1":
+            set error to "Local dictionary entry failed bounded decompression or JSON validation"
+        else:
+            set glosses to sql_query_params(db and "SELECT g.value FROM json_each(?,'$.senses') s JOIN json_each(s.value,'$.glosses') g WHERE g.type='text' LIMIT 64" and [record])
+            set definitions to "[]"
+            set i to 0
+            repeat while i < length_list(glosses) && remaining > 0:
+                set limit to remaining
+                if limit > 1000:
+                    set limit to 1000
+                set gloss to dictionary_excerpt(get_list(get_list(glosses and i) and 0) and limit)
+                set remaining to remaining - string_length(gloss)
+                set definitions to result_cache_scalar(db and "SELECT json_insert(?,'$[#]',?)" and [definitions,gloss])
+                set i to i + 1
+            set url to concat("https://en.wiktionary.org/wiki/" and concat(dictionary_quote(entry_word) and "#English"))
+            set entry to result_cache_scalar(db and "SELECT json_object('id',CAST(? AS INTEGER),'word',?,'part_of_speech',?,'definitions',json(?),'url',?)" and [identifier,entry_word,pos,definitions,url])
+            set candidate to result_cache_scalar(db and "SELECT json_insert(?,'$[#]',json(?))" and [entries,entry])
+            if string_length(candidate) <= 5000:
+                set entries to candidate
+            else:
+                set remaining to 0
+        if remaining > 0 && error == "":
+            set step to ep_sqlite3_step(statement)
+    ep_sqlite3_finalize(statement)
+    if step != 100 && step != 101:
+        set error to "Local dictionary read failed"
+    set date to result_cache_scalar(reference and "SELECT value FROM metadata WHERE key='source_date'" and [])
+    set attribution to result_cache_scalar(reference and "SELECT value FROM metadata WHERE key='attribution'" and [])
+    set license to result_cache_scalar(reference and "SELECT value FROM metadata WHERE key='license'" and [])
+    set license_url to result_cache_scalar(reference and "SELECT value FROM metadata WHERE key='license_url'" and [])
+    sql_close(reference)
+    if error != "":
+        return result_cache_error(error)
+    set outcome to "completed"
+    set text to entries
+    if entries == "[]":
+        set outcome to "failed"
+        set text to "No matching English entry in the installed dictionary. This is a coverage gap, not evidence that the word does not exist."
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','tool','dictionary','outcome',?,'query',?,'entries',json(?),'source_date',?,'source_sha256',?,'attribution',?,'license',?,'license_url',?,'text',?)" and [outcome,word,entries,date,source,attribution,license,license_url,text])
+    return result_cache_put(db and namespace and normalized and epoch and result)

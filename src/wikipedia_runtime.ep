@@ -1,0 +1,70 @@
+import "wikipedia"
+
+define wikipedia_ready with db and uuid:
+    set catalog to transport_get(8402 and "/catalog/v2/entries?count=1" and "")
+    if starts_with(catalog and "{\"status\":\"transport_error\""):
+        if string_contains(catalog and "Local connection failed"):
+            return 0
+        return 0 - 1
+    set document to markup_parse(catalog and 0)
+    if document == 0:
+        return 0 - 1
+    set identifier to markup_xpath(document and "string(/*[local-name()='feed']/*[local-name()='entry'][1]/*[local-name()='id'])")
+    markup_close(document)
+    if string_equals(identifier and concat("urn:uuid:" and uuid)):
+        return 1
+    return 0 - 1
+
+define wikipedia_start with root and home and library returning Str:
+    set db to sql_open(":memory:")
+    set manifest to wiki_manifest(db and library)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [manifest]) != "ok":
+        set problem to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [manifest])
+        sql_close(db)
+        return problem
+    set uuid to result_cache_scalar(db and "SELECT json_extract(?,'$.uuid')" and [manifest])
+    set ready to wikipedia_ready(db and uuid)
+    if ready == 1:
+        sql_close(db)
+        display "Reused verified local Wikipedia service on port 8402"
+        return ""
+    if ready < 0:
+        sql_close(db)
+        return "Port 8402 is occupied by a service that does not expose the installed Wikipedia archive"
+    set executable to concat(root and "/models/runtime/kiwix-tools_macos-arm64-3.8.2/kiwix-serve")
+    if file_exists(executable) == 0:
+        sql_close(db)
+        return "The pinned native Wikipedia reader is missing"
+    set name to result_cache_scalar(db and "SELECT json_extract(?,'$.file')" and [manifest])
+    set archive to concat(library and concat("/" and name))
+    set libc to native_system()
+    ep_dlcall3(ep_dlsym(libc and "setenv") and "KIWIX_ARCHIVE_CACHE_SIZE" and "1" and 1)
+    ep_dlcall3(ep_dlsym(libc and "setenv") and "KIWIX_SEARCHER_CACHE_SIZE" and "1" and 1)
+    ep_dlcall3(ep_dlsym(libc and "setenv") and "KIWIX_SEARCH_CACHE_SIZE" and "8" and 1)
+    ep_dlcall3(ep_dlsym(libc and "setenv") and "KIWIX_SUGGESTION_SEARCHER_CACHE_SIZE" and "1" and 1)
+    set log to private_lock(home and "wikipedia-runtime.log")
+    if log < 0:
+        sql_close(db)
+        return "Cannot open the private Wikipedia runtime log"
+    native_fcntl_int(log and 4 and 8)
+    set arguments to ["--address=127.0.0.1","--port=8402","--threads=2","--searchLimit=1","--nosearchbar",archive]
+    set pid to process_detached(executable and arguments and log)
+    ep_dlcall1(ep_dlsym(libc and "close") and log)
+    set problem to ""
+    if pid == 0:
+        set problem to "Cannot start the native Wikipedia service"
+    else:
+        set deadline to transport_now(libc) + 60000
+        repeat while problem == "" && ready != 1:
+            set exited to process_poll(pid)
+            if exited != 0 - 1:
+                set problem to concat("Wikipedia service exited during startup: " and int_to_string(exited))
+            else:
+                set ready to wikipedia_ready(db and uuid)
+                if ready != 1:
+                    if transport_now(libc) >= deadline:
+                        set problem to "Wikipedia is still loading; reopen to check without restarting it"
+                    else:
+                        ep_dlcall1(ep_dlsym(libc and "usleep") and 250000)
+    sql_close(db)
+    return problem

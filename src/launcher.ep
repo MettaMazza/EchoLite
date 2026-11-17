@@ -1,0 +1,69 @@
+# Native entry point for desktop chat and the EP command interface.
+import "application_paths"
+import "network_policy"
+
+define main:
+    set args to get_args()
+    set root to application_root(get_list(args and 0))
+    if root == "":
+        display "Cannot resolve the EchoLite installation."
+        return 1
+    ep_dlcall1(ep_dlsym(native_system() and "umask") and 63)
+    set command to "ui"
+    if length_list(args) > 1:
+        set command to get_list(args and 1)
+    if command == "build":
+        return application_exec(concat(root and "/bin/echolite-build") and [])
+    set home to get_env("ECHOLITE_HOME")
+    if home == "":
+        set home to concat(root and "/data")
+    if application_directory(home and 0) == 0:
+        display "Cannot create the local state directory."
+        return 1
+    set_env("ECHOLITE_HOME" and home)
+    if command == "network-mode":
+        if length_list(args) == 3:
+            if network_save(home and get_list(args and 2)) == 0:
+                display "Mode must be offline or connected, and the setting must be writable."
+                return 1
+            display "Network mode saved. Relaunch EchoLite to apply it to the whole application."
+        else if length_list(args) != 2:
+            display "Usage: echolite network-mode [offline|connected]"
+            return 1
+        display network_mode(home)
+        return 0
+    set mode to network_mode(home)
+    if mode == "":
+        display "Invalid network-mode setting. Set offline or connected before launching."
+        return 1
+    set_env("ECHOLITE_NETWORK_MODE" and mode)
+    set token_path to get_env("ECHOLITE_NATIVE_TOKEN_FILE")
+    if token_path == "":
+        if application_directory(concat(root and "/data") and 0) == 0:
+            display "Cannot create the local runtime credential directory."
+            return 1
+        set token_path to concat(root and "/data/native-runtime.token")
+        set_env("ECHOLITE_NATIVE_TOKEN_FILE" and token_path)
+    set forwarded to create_list()
+    set start to 1
+    set executable to concat(root and "/bin/echolite-core")
+    if command == "ui":
+        set executable to concat(root and "/bin/echolite-ui")
+        set start to 2
+    if command == "browser":
+        set executable to concat(root and "/bin/echolite-browser")
+        set start to 2
+    set i to start
+    repeat while i < length_list(args):
+        set value to get_list(args and i)
+        if i == 1 && value == "--help":
+            set value to "help"
+        append_list(forwarded and value)
+        set i to i + 1
+    if command == "me-set" || command == "chat" || command == "chat-document" || command == "chat-image" || command == "reflect" || command == "recall" || command == "context" || command == "memory-tool":
+        set code to application_wait(concat(root and "/bin/echolite-runtime") and [root,home,token_path])
+        if code != 0:
+            return code
+    if mode == "offline":
+        return application_exec("/usr/bin/sandbox-exec" and network_sandbox_args(executable and forwarded))
+    return application_exec(executable and forwarded)
