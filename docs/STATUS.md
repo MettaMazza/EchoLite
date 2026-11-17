@@ -15,7 +15,7 @@
 
 The last full deterministic offline regression before the latest editor work passed **35 suites**. Focused editor work added **20 native editor checks** and **27 font-layout checks**, including real clipboard round trips, Unicode byte boundaries, insertion/selection replacement, bounded undo/redo and visible selection rendering. These tests do not certify complete macOS accessibility or every physical input sequence. The interface had a hidden-window launch bug and lacked normal editing controls; those reports prompted fixes. UI polish remains ongoing.
 
-The public screenshot comes from an actual local Qwen turn that called the calculator and returned `47 × 19 = 893`. It is an illustration of that path, not a benchmark.
+The public screenshot shows an actual local Qwen greeting, with the visible reply exactly matching the model output. Its preview is limited to that verified turn. Earlier calculator journeys returned `47 × 19 = 893` using tool receipts; those are separate checks, not claims about the greeting screenshot.
 
 ## Performance evidence has a scope
 

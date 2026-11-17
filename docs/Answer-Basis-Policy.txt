@@ -11,3 +11,8 @@ Disclose the answer's basis in ordinary language: a verified tool calculation; a
 Acceptance requires real-user workflows proving multiple distinct appropriate attempts, cross-tool chaining, final attribution, cache-aware provenance, and correct fallback labelling. Model instructions alone do not prove compliance; structured answer-basis metadata and runtime checks are required. A greeting or a request for original creative work does not need irrelevant research merely to fill an attempt counter; factual claims within those replies remain subject to evidence disclosure.
 
 Process execution has a separate execution basis: it reports the actual command, exit status and observed output. It does not convert arbitrary program output into verified external facts. The generation schema only offers answer bases that the core currently permits from its actual receipt/memory state; the core rechecks the selected basis when the answer returns. These structural checks still do not establish sentence-level support or tool relevance.
+
+Visible wording is authored by the model, not prefixed with a hardcoded basis label.
+The structured answer_basis stays in stored metadata and runtime validation.
+Greetings and ordinary conversation need no provenance preamble. Relevant factual
+answers still require natural attribution/disclosure, citations and honest uncertainty.

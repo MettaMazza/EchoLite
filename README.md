@@ -22,7 +22,7 @@ The model supplies language and inference. The surrounding system supplies a tim
 
 The ambition is a locally hosted agent with continuity and room to revise its own understanding. Persistence and self-description are engineering features here—not claims of consciousness or general intelligence.
 
-<p align="center"><img src="docs/assets/chat.png" alt="Actual EchoLite chat showing a local calculator-backed answer in the dark mint interface" width="100%"><br><sub>Actual native UI and local-model conversation. No cloud model used for this demo.</sub></p>
+<p align="center"><img src="docs/assets/chat.png" alt="Actual EchoLite chat showing a naturally worded local-model greeting in the dark mint interface" width="100%"><br><sub>Actual native UI and local-model conversation. No cloud model used for this demo.</sub></p>
 
 ## Remember. Check. Act. Reconsider.
 
