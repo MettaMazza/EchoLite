@@ -12,8 +12,6 @@ define main:
         return 1
     set action to get_list(args and 1)
     if action == "--serve-driver" && length_list(args) == 2:
-        if network_mode(get_env("ECHOLITE_HOME")) != "connected":
-            return 1
         return browser_serve(db and application_root(get_list(args and 0)))
     if action == "sessions" && length_list(args) == 2:
         set recorded to browser_recorded(application_root(get_list(args and 0)) and get_env("ECHOLITE_HOME"))
@@ -36,8 +34,6 @@ define main:
             set args to [executable,"close",current]
     if action == "status" && length_list(args) == 2:
         set response to browser_request(db and "GET" and "/status" and "")
-    else if action != "close" && network_mode(get_env("ECHOLITE_HOME")) != "connected":
-        set response to browser_error(db and "failed" and "Browser control requires Connected mode: Safari is an external application and its network activity is outside EchoLite's child-process sandbox. Local memory and reference tools remain available offline.")
     else if (action == "new" || action == "new-persistent") && length_list(args) == 2:
         set problem to browser_ensure(db and application_root(get_list(args and 0)))
         if problem != "":

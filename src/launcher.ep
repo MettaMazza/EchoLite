@@ -22,21 +22,9 @@ define main:
         return 1
     set_env("ECHOLITE_HOME" and home)
     if command == "network-mode":
-        if length_list(args) == 3:
-            if network_save(home and get_list(args and 2)) == 0:
-                display "Mode must be offline or connected, and the setting must be writable."
-                return 1
-            display "Network mode saved. Relaunch EchoLite to apply it to the whole application."
-        else if length_list(args) != 2:
-            display "Usage: echolite network-mode [offline|connected]"
-            return 1
-        display network_mode(home)
+        display "Automatic connectivity: web tools attempt requests when needed; local tools and saved sources remain available without internet. Manual modes are no longer used."
         return 0
-    set mode to network_mode(home)
-    if mode == "":
-        display "Invalid network-mode setting. Set offline or connected before launching."
-        return 1
-    set_env("ECHOLITE_NETWORK_MODE" and mode)
+    set_env("ECHOLITE_NETWORK_MODE" and "automatic")
     set token_path to get_env("ECHOLITE_NATIVE_TOKEN_FILE")
     if token_path == "":
         if application_directory(concat(root and "/data") and 0) == 0:
@@ -64,6 +52,4 @@ define main:
         set code to application_wait(concat(root and "/bin/echolite-runtime") and [root,home,token_path])
         if code != 0:
             return code
-    if mode == "offline":
-        return application_exec("/usr/bin/sandbox-exec" and network_sandbox_args(executable and forwarded))
     return application_exec(executable and forwarded)

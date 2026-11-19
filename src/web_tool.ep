@@ -66,25 +66,28 @@ define web_lookup with db and expression and epoch returning Str:
     set snapshot to result_cache_get(db and namespace and url and epoch)
     if snapshot != "" && result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
         return snapshot
-    set mode to network_mode(get_env("ECHOLITE_HOME"))
-    if mode == "":
-        return web_markup_error(db and "Invalid network mode; web access is disabled")
-    if mode == "offline" && snapshot == "":
-        return result_cache_scalar(db and "SELECT json_object('status','ok','tool','web_read','outcome','failed','error_code','offline','text','Offline mode: no saved copy of this URL. Use local knowledge or enable connected mode. No web request was sent.')" and [])
     set fresh to "0"
     if snapshot != "":
         set fresh to result_cache_scalar(db and "SELECT json_extract(?,'$.expires_at')>CAST(strftime('%s','now') AS INTEGER) AND json_extract(?,'$.refresh')=0" and [snapshot,expression])
     set hit to "true"
     set revalidated to "false"
-    if fresh != "1" && mode == "connected":
-        set hit to "false"
-        set snapshot to web_fetch(db and url and snapshot)
-        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
-            return snapshot
-        set revalidated to result_cache_scalar(db and "SELECT CASE WHEN json_extract(?,'$.revalidated')=1 THEN 'true' ELSE 'false' END" and [snapshot])
-        set snapshot to web_snapshot_store(db and namespace and url and epoch and snapshot)
-        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
-            return snapshot
+    set attempted to "false"
+    set fallback to "false"
+    set network_error to ""
+    if fresh != "1":
+        set attempted to "true"
+        set fetched to web_fetch(db and url and snapshot)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [fetched]) != "ok":
+            set network_error to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.text'),'Online source unavailable')" and [fetched])
+            if snapshot == "":
+                return result_cache_scalar(db and "SELECT json_object('status','ok','tool','web_read','outcome','failed','error_code','source_unavailable','network_attempted',json('true'),'network_error',?,'text','Online request failed and no saved copy is available. Try another source or local references. '||?)" and [network_error,network_error])
+            set fallback to "true"
+        else:
+            set hit to "false"
+            set revalidated to result_cache_scalar(db and "SELECT CASE WHEN json_extract(?,'$.revalidated')=1 THEN 'true' ELSE 'false' END" and [fetched])
+            set snapshot to web_snapshot_store(db and namespace and url and epoch and fetched)
+            if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
+                return snapshot
     set text to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [snapshot])
     set offset to result_cache_scalar(db and "SELECT json_extract(?,'$.offset')" and [expression])
     if result_cache_scalar(db and "SELECT CAST(? AS INTEGER)<=length(?)" and [offset,text]) != "1":
@@ -96,10 +99,7 @@ define web_lookup with db and expression and epoch returning Str:
         return web_markup_error(db and "Memory forgotten during web read; result discarded")
     set params to [snapshot,snapshot,snapshot,excerpt,offset,next,text,next,next,text,snapshot,snapshot,snapshot,snapshot,snapshot,snapshot,hit,revalidated]
     set result to result_cache_scalar(db and "SELECT json_object('status','ok','tool','web_read','outcome','completed','url',json_extract(?,'$.url'),'entries',json_array(json_object('url',json_extract(?,'$.url'))),'title',json_extract(?,'$.title'),'text',?,'offset',CAST(? AS INTEGER),'next_offset',CASE WHEN CAST(? AS INTEGER)<length(?) THEN CAST(? AS INTEGER) ELSE NULL END,'more',json(CASE WHEN CAST(? AS INTEGER)<length(?) THEN 'true' ELSE 'false' END),'capture_truncated',json_extract(?,'$.capture_truncated'),'content_sha256',json_extract(?,'$.content_sha256'),'fetched_at',json_extract(?,'$.fetched_at'),'validated_at',json_extract(?,'$.validated_at'),'links',json_extract(?,'$.links'),'links_truncated',json_extract(?,'$.links_truncated'),'cache_hit',json(?),'revalidated',json(?))" and params)
-    set offline to "false"
     set stale to "false"
-    if mode == "offline":
-        set offline to "true"
-        if result_cache_scalar(db and "SELECT json_extract(?,'$.expires_at')>CAST(strftime('%s','now') AS INTEGER)" and [snapshot]) != "1":
-            set stale to "true"
-    return result_cache_scalar(db and "SELECT json_set(?,'$.network_mode',?,'$.offline_snapshot',json(?),'$.stale',json(?))" and [result,mode,offline,stale])
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.expires_at')>CAST(strftime('%s','now') AS INTEGER)" and [snapshot]) != "1":
+        set stale to "true"
+    return result_cache_scalar(db and "SELECT json_set(?,'$.network_policy','automatic','$.network_attempted',json(?),'$.offline_snapshot',json(?),'$.fallback',json(?),'$.network_error',?,'$.stale',json(?))" and [result,attempted,fallback,fallback,network_error,stale])

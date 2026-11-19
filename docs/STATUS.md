@@ -48,3 +48,11 @@ A retained full-context experiment processed **262,112 prompt tokens plus a 32-t
 ### Source presentation
 
 Consulted references appear in a collapsed Sources panel with readable titles, publisher labels, available snapshot dates, original-source links and Copy actions. New responses no longer receive a hardcoded URL appendix. Existing matching appendices are cleaned for display without rewriting saved history. The panel lists consulted references, not sentence-level support judgments. Original online pages may differ from the local snapshot used to answer. Focused validation passed 20 source-presentation/opening checks and 57 response-protocol checks.
+
+### Automatic connectivity
+
+Web and browser tools no longer require a mode switch. Existing offline settings are ignored, and the normal launcher no longer imposes an outbound-network sandbox on EchoLite or its child tools. This leaves macOS and browser permissions in place. Local inference, embeddings, memory, dictionary and installed Wikipedia remain independent of internet access.
+
+Web requests reuse eligible cached content, attempt retrieval when needed, and fall back to saved pages on failure. Receipts expose the attempted request, failure, fallback and staleness without inventing a new validation time. Each later refresh may recover online automatically; an unreachable site does not establish that the whole machine is offline. Validation includes real HTTPS retrieval, test-process network denial with saved-page recovery, and successful retrieval after restoring access.
+
+The automatic-connectivity change passed 95 focused checks. Two actual local-model conversations verified live web retrieval and saved-page fallback plus calculator use under test-process network denial. Managed Safari navigation/read/close also completed without a mode switch.

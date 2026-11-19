@@ -42,7 +42,7 @@ The ambition is a locally hosted agent with continuity and room to revise its ow
 - **Knowledge:** installed Wikipedia archive, dictionary and an exact-rational calculator.
 - **Documents and images:** bounded text/file reads, PDF and DOCX extraction, image attachments and local vision.
 - **Action:** file operations, literal-argument process execution, coding/build workflows, Git and saved process output.
-- **Connected work:** web reads and managed Safari sessions when Connected mode and the required macOS permissions are enabled.
+- **Connected work:** web reads and managed Safari sessions when a connection and the required macOS permissions are available.
 - **Continuity:** session search, timelines, provenance, note correction, consolidation, forgetting, tasks and scheduling.
 
 Tools are exposed as needed. Their receipts record what happened; a proposed command or a model's confident answer is not treated as evidence that work succeeded.
@@ -99,14 +99,7 @@ For a fresh checkout, start with the [setup guide](docs/SETUP.md). It lists the 
 ./echolite
 ```
 
-Offline is the default launch mode. Connected mode is an explicit setting:
-
-```sh
-./echolite network-mode connected
-./echolite
-```
-
-Offline mode restricts direct outbound network traffic from the launched application and child commands; it is not a machine-wide firewall. Existing source snapshots retain their dates. Native process and browser tools still operate with the permissions granted on the host.
+Web and browser tools are available automatically. EchoLite uses its persistent cache where appropriate, attempts live requests when needed, and falls back to saved sources and local references when online access fails. Local generation, recall, memory and reference tools require no internet once provisioned. Cached fallbacks retain their original dates; a failed request does not disable later online attempts. Host permissions still apply to browser and system tools.
 
 ## Help shape it
 

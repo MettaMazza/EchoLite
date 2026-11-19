@@ -1,0 +1,35 @@
+# Run live, then denied under a test-only network sandbox, then live again.
+import "../src/web_tool"
+import "os"
+set checks to 0
+
+define recovery_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    set db to sql_open(get_list(args and 1))
+    set phase to get_list(args and 2)
+    sql_execute(db and "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT); INSERT OR IGNORE INTO metadata VALUES('cache_epoch','0'); CREATE TABLE IF NOT EXISTS response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);")
+    set_env("ECHOLITE_NETWORK_MODE" and "offline")
+    set url to "https://example.com/"
+    set prior to result_cache_get(db and web_namespace() and url and "0")
+    set request to "{\"url\":\"https://example.com/\",\"offset\":0,\"refresh\":true}"
+    set response to web_lookup(db and request and "0")
+    recovery_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [response]) == "completed" and concat("source available: " and response))
+    recovery_assert(string_contains(response and "Example Domain") and "actual saved or live source text")
+    recovery_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.network_attempted')" and [response]) == "1" and "refresh always attempts retrieval")
+    if phase == "denied":
+        recovery_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.fallback')=1 AND json_extract(?,'$.cache_hit')=1 AND json_extract(?,'$.revalidated')=0" and [response,response,response]) == "1" and "network loss falls back to persistent source")
+        recovery_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.validated_at')=json_extract(?,'$.validated_at')" and [response,prior]) == "1" and "failed refresh preserves original validation timestamp")
+        recovery_assert(result_cache_scalar(db and "SELECT length(json_extract(?,'$.network_error'))>0" and [response]) == "1" and "fallback discloses request failure")
+    else:
+        recovery_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.fallback')=0 AND json_extract(?,'$.cache_hit')=0" and [response,response]) == "1" and "online retrieval succeeds without a mode switch")
+        recovery_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.network_error')" and [response]) == "" and "recovery clears per-request failure")
+    sql_close(db)
+    display concat("PASS " and concat(phase and concat(": " and concat(int_to_string(checks) and " connectivity recovery checks"))))
+    return 0

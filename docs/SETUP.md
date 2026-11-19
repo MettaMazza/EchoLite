@@ -68,15 +68,11 @@ The bootstrap installs the EP build entry point and compiles the native applicat
 
 Local services bind to loopback: generation `8400`, embeddings `8401`, Wikipedia `8402`, and the optional managed Safari driver `8410`. The runtime verifies existing services before reusing them. It does not terminate arbitrary processes occupying these ports.
 
-## Network mode
+## Automatic connectivity
 
-```sh
-./echolite network-mode          # inspect the stored selection
-./echolite network-mode offline
-./echolite network-mode connected
-```
+There is no manual mode switch. Web and browser tools are enabled at launch. Requests use eligible persistent cache entries or attempt online retrieval; failed requests fall back to retained snapshots when available, with stale dates and retrieval failures disclosed. With no cached page, the agent can use installed Wikipedia, dictionary, calculations and memory. Local model and embedding services remain on this machine.
 
-Close and reopen the UI after changing the mode. Offline restricts direct outbound traffic from the application and its child processes, while allowing loopback services. This does not disable the machine's network or constrain unrelated external apps. Connected web/browser work requires the relevant host permissions; Safari automation needs Safari's remote-automation setting.
+Legacy `network-mode` files and `ECHOLITE_NETWORK_MODE` values no longer disable web access. The old CLI command only explains this migration. Restart an older running app once after upgrading to remove its inherited network restriction. Safari automation still requires Safari's remote-automation setting; connectivity recovery does not change OS permissions.
 
 ## Check the local state
 
