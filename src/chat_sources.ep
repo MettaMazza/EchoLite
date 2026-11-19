@@ -1,0 +1,72 @@
+import "result_cache"
+import "native_process"
+
+# Source metadata remains in the persisted receipts, never appended to reply prose.
+define chat_sources with db and turn_id returning Str:
+    set params to [turn_id]
+    return result_cache_scalar(db and "WITH entries AS (SELECT r.id,j.key,json_extract(j.value,'$.url') url,coalesce(nullif(json_extract(j.value,'$.title'),''),nullif(json_extract(j.value,'$.word'),''),nullif(json_extract(m.body,'$.title'),''),'') title,coalesce(json_extract(m.body,'$.source_date'),'') snapshot,r.name tool FROM tool_runs r JOIN memories m ON m.id=r.observation JOIN json_each(CASE WHEN json_valid(m.body) THEN m.body ELSE '{}' END,'$.entries') j WHERE r.turn_id=? AND r.status='completed' AND json_valid(j.value) AND json_type(j.value,'$.url')='text'), unique_sources AS (SELECT url,max(title) title,max(snapshot) snapshot,min(id) receipt FROM entries GROUP BY url ORDER BY min(id),url) SELECT coalesce(json_group_array(json_object('url',url,'title',title,'snapshot',snapshot)),'[]') FROM unique_sources" and params)
+
+define source_rows with db and sources:
+    return sql_query_params(db and "SELECT json_extract(value,'$.url'),json_extract(value,'$.title'),json_extract(value,'$.snapshot') FROM json_each(?)" and [sources])
+
+# Only remove exact legacy suffix lines backed by this turn's receipts.
+define source_reply with db and answer and sources returning Str:
+    set rows to source_rows(db and sources)
+    set clean to answer
+    set i to 0
+    repeat while i < length_list(rows):
+        set row to get_list(rows and i)
+        set citation to get_list(row and 0)
+        if get_list(row and 2) != "":
+            set citation to concat(citation and concat(" (local snapshot " and concat(get_list(row and 2) and ")")))
+        set line to concat("\nConsulted source: " and citation)
+        set clean to string_replace(clean and concat(line and "\n") and "\n")
+        if ends_with(clean and line):
+            set clean to substring(clean and 0 and string_length(clean) - string_length(line))
+        set i to i + 1
+    return clean
+
+# OS opener accepts only explicitly readable source schemes, passed as one argv value.
+define source_target with url returning Str:
+    if string_length(url) > 8192:
+        return ""
+    if starts_with(url and "https://") == 0 && starts_with(url and "http://") == 0 && starts_with(url and "file:///") == 0:
+        return ""
+    set i to 0
+    repeat while i < string_length(url):
+        if get_character(url and i) < 32 || get_character(url and i) == 127:
+            return ""
+        set i to i + 1
+    return url
+
+define source_host with url returning Str:
+    if starts_with(url and "file:///"):
+        return "Local file"
+    set pieces to string_split(url and "/")
+    if length_list(pieces) > 2:
+        return get_list(pieces and 2)
+    return "Source"
+
+define source_title with url and title returning Str:
+    if string_trim(title) != "":
+        return string_replace(string_replace(title and "\n" and " ") and "\r" and " ")
+    set pieces to string_split(url and "/")
+    set name to get_list(pieces and length_list(pieces) - 1)
+    set name to get_list(string_split(name and "#") and 0)
+    set name to get_list(string_split(name and "?") and 0)
+    set name to string_replace(string_replace(string_replace(name and "%20" and " ") and "%28" and "(") and "%29" and ")")
+    set name to string_replace(name and "_" and " ")
+    if name == "":
+        return source_host(url)
+    return name
+
+define source_open with url:
+    set target to source_target(url)
+    if target == "":
+        return 0
+    if starts_with(target and "file:///"):
+        set path to get_list(string_split(target and "#") and 0)
+        if ends_with(path and ".pdf") || ends_with(path and ".docx") || ends_with(path and ".png") || ends_with(path and ".jpg") || ends_with(path and ".jpeg"):
+            return process_start("/usr/bin/open" and [target])
+        return process_start("/usr/bin/open" and ["-a","TextEdit",target])
+    return process_start("/usr/bin/open" and [target])

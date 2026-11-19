@@ -44,3 +44,7 @@ A retained full-context experiment processed **262,112 prompt tokens plus a 32-t
 3. Improve recovery feedback and inspectable provenance in the UI.
 4. Measure performance across representative native workloads and more machines.
 5. Add optional adapters only with an actual execution path and validation.
+
+### Source presentation
+
+Consulted references appear in a collapsed Sources panel with readable titles, publisher labels, available snapshot dates, original-source links and Copy actions. New responses no longer receive a hardcoded URL appendix. Existing matching appendices are cleaned for display without rewriting saved history. The panel lists consulted references, not sentence-level support judgments. Original online pages may differ from the local snapshot used to answer. Focused validation passed 20 source-presentation/opening checks and 57 response-protocol checks.

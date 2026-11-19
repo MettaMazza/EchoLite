@@ -5,7 +5,7 @@ import "sql"
 import "../stdlib/bridge/raylib"
 import "text_layout"
 import "chat_view"
-import "ui_style"
+import "ui_sources"
 import "ui_attachment"
 import "ui_schedule"
 import "network_policy"
@@ -170,6 +170,8 @@ define main:
         set capture to get_list(args and 2)
     if length_list(args) == 3 && (get_list(args and 1) == "--memory" || get_list(args and 1) == "--identity"):
         set section to substring(get_list(args and 1) and 2 and string_length(get_list(args and 1)) - 2)
+        set capture to get_list(args and 2)
+    if length_list(args) == 3 && get_list(args and 1) == "--sources":
         set capture to get_list(args and 2)
     set runtime_ready to 0
     set runtime_child to 0
@@ -428,6 +430,8 @@ define main:
                         set follow_bottom to 1
                         set notice to "Running a due task locally. Type or click Stop to interrupt."
                         display "UI dispatched one due task through the normal conversation core"
+        if capture != "" && length_list(args) == 3 && get_list(args and 1) == "--sources" && length_list(turns) > 0:
+            set SOURCES_OPEN to get_list(get_list(turns and length_list(turns) - 1) and 0)
         raylib_begin_drawing()
 
         raylib_clear_background(bg)
@@ -581,6 +585,10 @@ define main:
                         if get_list(turn and 8) == "scheduled-event":
                             set pending_text to "Scheduled work stopped. Completed effects remain."
                     set row_y to wrap_text(pending_text and left + 24 and row_y and content_width - 60 and 17 and muted)
+                set prior_sources_open to SOURCES_OPEN
+                set row_y to ui_sources(db and get_list(turn and 0) and get_list(turn and 9) and left + 24 and row_y and content_width - 48)
+                if string_equals(prior_sources_open and SOURCES_OPEN) == 0:
+                    set follow_bottom to 0
                 set row_y to row_y + 40
                 set ti to ti + 1
             set body_height to row_y + scroll - 125

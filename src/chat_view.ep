@@ -1,3 +1,4 @@
+import "chat_sources"
 import "native_process"
 import "result_cache"
 import "native_progress"
@@ -54,6 +55,9 @@ define chat_turns with db and session:
         set input_source to get_list(row and 7)
         set_list(row and 7 and "0")
         append_list(row and input_source)
+        set sources to chat_sources(db and get_list(row and 0))
+        append_list(row and sources)
+        set_list(row and 2 and source_reply(db and get_list(row and 2) and sources))
         if has_progress == "1" && get_list(row and 3) == "pending":
             set snapshot to result_cache_scalar(db and "SELECT p.response FROM model_progress p JOIN turns t ON t.id=p.turn_id WHERE p.turn_id=? AND t.status='pending' AND p.epoch=(SELECT value FROM metadata WHERE key='cache_epoch')" and [get_list(row and 0)])
             if snapshot != "":

@@ -1359,15 +1359,6 @@ define main:
                 set answer to scalar(db and "SELECT group_concat(name || \": \" || COALESCE(json_extract(CASE WHEN json_valid(m.body) THEN m.body ELSE '{}' END,'$.text'),'Lookup failed'),char(10)) FROM tool_runs r JOIN memories m ON m.id=r.observation WHERE r.turn_id=? AND r.status='failed'" and [turn_id])
                 if scalar(db and "SELECT count(*)>0 AND count(*)=sum(name IN ('process_run','process_retry')) FROM tool_runs WHERE turn_id=?" and [turn_id]) == "1":
                     set answer to execution_report(db and turn_id)
-            set source_rows to query(db and "SELECT DISTINCT json_extract(CASE WHEN json_valid(j.value) THEN j.value ELSE '{}' END,'$.url'),COALESCE(json_extract(m.body,'$.source_date'),'') FROM tool_runs r JOIN memories m ON m.id=r.observation JOIN json_each(CASE WHEN json_valid(m.body) THEN m.body ELSE '{}' END,'$.entries') j WHERE r.turn_id=? AND r.status='completed' AND r.name IN ('dictionary','wikipedia','web_read','docx_read','pdf_read','file_read','file_list','process_run','process_retry','process_output') AND json_extract(CASE WHEN json_valid(j.value) THEN j.value ELSE '{}' END,'$.url') IS NOT NULL AND ?!='execution'" and [turn_id,basis])
-            set si to 0
-            repeat while si < length_list(source_rows):
-                set source_row to get_list(source_rows and si)
-                set citation to get_list(source_row and 0)
-                if get_list(source_row and 1) != "":
-                    set citation to concat(citation and concat(" (local snapshot " and concat(get_list(source_row and 1) and ")")))
-                set answer to concat(answer and concat("\nConsulted source: " and citation))
-                set si to si + 1
         execute(db and "UPDATE turns SET answer_basis=? WHERE id=?" and [basis,turn_id])
         if document_id != "":
             set answer to concat(answer and concat("\nRetained document snapshot: " and concat(document_path and concat(" [SHA-256 " and concat(document_digest and "]")))))

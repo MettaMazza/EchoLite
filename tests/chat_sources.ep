@@ -1,0 +1,51 @@
+import "../src/chat_sources"
+import "os"
+set checks to 0
+
+define source_assert with valid and message:
+    if valid == 0:
+        display concat("FAIL: " and message)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    sql_execute(db and "CREATE TABLE memories(id INTEGER,body TEXT); CREATE TABLE tool_runs(id INTEGER,turn_id INTEGER,status TEXT,observation INTEGER,name TEXT);")
+    sql_execute(db and "INSERT INTO memories VALUES(1,'{\"entries\":[{\"title\":\"Sandworm (hacker group)\",\"url\":\"https://en.wikipedia.org/wiki/Sandworm_%28hacker_group%29\"}],\"source_date\":\"2026-06\"}'); INSERT INTO memories VALUES(2,'{\"entries\":[{\"url\":\"https://example.org/report\"}],\"title\":\"A readable report title\"}'); INSERT INTO tool_runs VALUES(1,10,'completed',1,'wikipedia'),(2,10,'completed',1,'wikipedia'),(3,10,'completed',2,'web_read'),(4,11,'completed',2,'web_read'),(5,12,'failed',1,'wikipedia');")
+    set sources to chat_sources(db and "10")
+    set rows to source_rows(db and sources)
+    source_assert(length_list(rows) == 2 and "duplicate URLs collapse across receipt rounds")
+    source_assert(get_list(get_list(rows and 0) and 1) == "Sandworm (hacker group)" and "article title retained")
+    source_assert(get_list(get_list(rows and 0) and 2) == "2026-06" and "snapshot month retained exactly")
+    source_assert(get_list(get_list(rows and 1) and 1) == "A readable report title" and "web receipt title fallback")
+    source_assert(length_list(source_rows(db and chat_sources(db and "11"))) == 1 and "turn isolation")
+    source_assert(chat_sources(db and "12") == "[]" and "failed receipts not presented as consulted evidence")
+    set old to "A normal answer.\nConsulted source: https://en.wikipedia.org/wiki/Sandworm_%28hacker_group%29 (local snapshot 2026-06)\nConsulted source: https://example.org/report"
+    source_assert(source_reply(db and old and sources) == "A normal answer." and "legacy citation appendix removed only from display")
+    source_assert(string_contains(old and "Consulted source:") and "original answer unchanged")
+    set unrelated to "A quote.\nConsulted source: https://example.net/unverified"
+    source_assert(string_equals(source_reply(db and unrelated and sources) and unrelated) and "unmatched prose preserved")
+    source_assert(source_reply(db and "Hello" and "[]") == "Hello" and "greeting remains unchanged")
+    source_assert(source_title("https://example.org/Readable_title%20here" and "") == "Readable title here" and "readable URL fallback")
+    source_assert(source_host("https://en.wikipedia.org/wiki/A") == "en.wikipedia.org" and "publisher host label")
+    source_assert(source_host("file:///tmp/paper.pdf#page=2") == "Local file" and "local source label")
+    source_assert(source_target("javascript:alert(1)") == "" and "executable URL scheme rejected")
+    source_assert(source_target("https://example.org/a\n-b") == "" and "control characters rejected")
+    source_assert(source_target("--args") == "" and "opener option rejected")
+    source_assert(source_target("https://example.org/report#section") == "https://example.org/report#section" and "original URL fragment preserved")
+    source_assert(source_target("file:///tmp/paper.pdf#page=2") == "file:///tmp/paper.pdf#page=2" and "local file URL retained")
+    set args to get_args()
+    if length_list(args) == 2:
+        set child to source_open(get_list(args and 1))
+        source_assert(child > 0 and "source link starts native OS opener")
+        set outcome to 0 - 1
+        set attempts to 0
+        repeat while outcome == 0 - 1 && attempts < 100:
+            set outcome to process_poll(child)
+            ep_dlcall1(ep_dlsym(native_system() and "usleep") and 100000)
+            set attempts to attempts + 1
+        source_assert(outcome == 0 and "OS accepted source URL")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " source presentation checks"))
+    return 0
