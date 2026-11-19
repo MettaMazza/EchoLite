@@ -110,6 +110,14 @@ For a fresh checkout, start with the [setup guide](docs/SETUP.md). Open the incl
 
 Web and browser tools are available automatically. EchoLite uses its persistent cache where appropriate, attempts live requests when needed, and falls back to saved sources and local references when online access fails. Local generation, recall, memory and reference tools require no internet once provisioned. Cached fallbacks retain their original dates; a failed request does not disable later online attempts. Host permissions still apply to browser and system tools.
 
+## Next planned update: EchoOffGrid integration
+
+EchoLite is part of the wider EchoOffGrid ecosystem. The next update will begin connecting EchoLite to that workstation through dedicated tools, starting with finding, reading, citing and opening library items. A new **EchoOffGrid** tab will help users download, open and connect the wider ecosystem.
+
+The integration roadmap then covers references, History, OpenGov, news, downloads, media, maps and supported device operations. These are planned capabilities, not features delivered by this release. EchoLite remains independently usable; interfaces needed from EchoOffGrid will be coordinated with its maintainers.
+
+[Read the integration plan](integration%20plan.txt).
+
 ## Help shape it
 
 Useful next work includes broader installation coverage, richer native text/accessibility support, broader language rendering, better performance measurements and more reproducible end-to-end journeys.

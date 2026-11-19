@@ -1,0 +1,252 @@
+EchoLite / EchoOffGrid Integration Plan
+Prepared: 19 November 2026
+Status: Proposed next development phase
+
+PURPOSE AND OWNERSHIP
+
+EchoOffGrid is the wider local workstation. EchoLite will provide the reasoning,
+memory and agentic action layer across its systems while remaining independently
+usable.
+
+This work belongs to EchoLite. Do not modify EchoOffGrid. Implement EchoLite's
+integration client, tools, interface and Android intent handling in Ernos Plain.
+Where a required interface does not exist in OffGrid, document the precise
+contract needed by its maintainers. Do not patch its code or bundled copies.
+
+CURRENT CONNECTION — OBSERVED IN SOURCE
+
+On Mac, OffGrid loads a bundled EchoLite interface into a native tab. A fallback
+calls EchoLite's CLI using the echooffgrid project. OffGrid bundles a pinned
+EchoLite snapshot, so changes to the standalone application do not automatically
+update its embedded Mac interface.
+
+On Android, OffGrid launches the independently installed EchoLite application.
+That launch does not currently pass a selected passage, document or structured
+task. OffGrid's workstation requires an app-held cookie, and its file provider
+grants read access to individually selected files. The apps have separate private
+storage. Full cross-app integration requires an authorized interface; it must not
+depend on extracting OffGrid's private credentials or storage.
+
+OffGrid synchronizes its library and archived content. EchoLite synchronizes its
+conversations, identity and memories. These remain separate responsibilities.
+
+Most existing OffGrid routes return rendered pages rather than a comprehensive,
+versioned agent API. Some capabilities below therefore require a documented
+OffGrid-side interface supplied by that project's maintainers.
+
+Source references in the inspected OffGrid checkout:
+- macos/OffGridHome.swift: native EchoLite hosting and installation selection.
+- dashboard.py: workstation routes, CLI chat bridge, downloads and request checks.
+- android/Main.java: launch of the EchoLite Android package.
+- android/mobile.py: authenticated Android workstation access.
+- android/SharedFile.java: selected-file read grants.
+- android/peer.py and android/merge.py: library transport and merge responsibilities.
+- docs/roadmap.md: peer-to-peer and mesh networking remain planned work.
+
+1. TOOL FAMILIES
+
+Expose clear, separate families corresponding to real OffGrid systems. Do not use
+an ambiguous catch-all category for unrelated functions.
+
+Library and documents
+- Find saved items, inspect metadata, read passages or chapters, import supported
+  files and open the original item.
+- Distinguish a catalogue entry from a file actually available on the device.
+
+Wikipedia and dictionary
+- Discover installed collections, search them and retrieve articles or definitions.
+- Return precise source references and snapshot dates.
+
+History
+- Search events and periods, inspect the supplied interpretations and open their
+  supporting articles. Preserve the distinction between observations and claims.
+
+News and saved sources
+- Search retained reporting, refresh available feeds and compare dated snapshots.
+- Clearly identify live results, cached results and offline coverage gaps.
+
+OpenGov
+- Browse jurisdictions and supported official catalogues, retrieve publications
+  and save them into the Documents library.
+
+Maps
+- Inspect installed coverage and open available maps or locations.
+- Do not claim navigation or route calculation from the current atlas alone.
+  Routing requires a separate supported capability.
+
+Media
+- Find and open books, audio and video.
+- Expose playback controls where the host provides them. Do not infer that an
+  item has a transcript or machine-readable content merely because it can play.
+
+Games and software
+- Discover compatible items, inspect downloads and open installed applications
+  or games through supported host actions.
+
+Downloads
+- Queue acquisitions, inspect progress, resume supported transfers and report
+  verified completion.
+
+Devices and sync
+- Inspect paired or connected peers, content availability and transfer status.
+- Request supported synchronization operations without replacing either app's
+  existing sync ownership.
+
+Radio observations
+- Search imported receiver logs, compare observations with public ScotMesh
+  reports and capture supported receiver status.
+- Do not present planned mesh transport or multi-hop networking as implemented.
+
+Private Browser
+- Explicitly use the Tor-backed browsing session when requested.
+- Do not silently turn private browsing history into permanent passive recall.
+
+Example chained workflow:
+“Find the official publication behind this saved news story, download it,
+compare it with last month's version, and open the relevant pages.”
+
+EchoLite should search, retrieve, compare and save through tools, retain useful
+findings and provide clickable sources. Each action must have an actual result
+or completion receipt before being described as successful.
+
+2. STABLE CONNECTION CONTRACT
+
+Define a small, versioned interface covering:
+- Capability discovery, availability and supported versions.
+- Structured requests and bounded, paginated results.
+- Stable item identifiers, revisions and source links.
+- Background job identifiers, progress, cancellation and completion receipts.
+- Explicit connection authorization and clear disconnected/error states.
+
+EchoLite implements the client and model-facing tool schemas in EP. Missing
+server-side capabilities become precise interface requirements for OffGrid's
+maintainers. Available capabilities should be discoverable independently so one
+missing integration does not disable the others.
+
+For Android, support authorized document/file handoff and structured task
+handoff where the host exposes them. Preserve Android's cross-app access grants.
+For Mac, account for both standalone EchoLite and OffGrid's pinned embedded
+interface; compatibility must be checked rather than assuming matching builds.
+
+3. LAYERED MEMORY, RECALL AND PROVENANCE
+
+OffGrid remains the owner of the library. EchoLite retains references, useful
+excerpts, findings and records of the work performed rather than duplicating
+whole collections into its memory database.
+
+A retained finding should include:
+- Original item identifier and revision or content hash.
+- Publisher and original source URL when available.
+- Publication/snapshot date and retrieval time, kept distinct.
+- Passage, page or chapter location when available.
+- Supporting tool receipt and a link to open the original item.
+
+Passive recall should retrieve previous reasoning together with supporting
+material. Changed or removed content invalidates affected cached results.
+Historical findings remain identifiable as historical; they must not silently
+become current evidence.
+
+Keep the two sync systems' responsibilities intact. Connect records through
+stable references instead of merging the apps' databases or treating a synced
+reference as proof that its underlying file is present on the current device.
+
+4. MEMORY AND PERSISTENT CACHE DESIGN
+
+Retain Qwen3.5-4B as the default and preserve the configured full context capacity.
+The 8 GB Mac remains a design constraint.
+
+Extend EchoLite's existing on-demand tool catalogue rather than loading every
+integration schema into every turn.
+
+- Search metadata first, then retrieve relevant passages.
+- Embed changed content incrementally using the existing recall model.
+- Stream large documents and media instead of loading entire collections.
+- Persist eligible results by item revision, query and tool version.
+- Coordinate expensive inference and narration work to avoid unnecessary
+  simultaneous memory demand.
+- Keep full context available without filling it with unrelated library content.
+
+Cache invalidation must follow source revision, relevant configuration and
+memory-forgetting changes. Dynamic progress/status requests must not replay an
+old state as a fresh observation.
+
+Persist action receipts and operation identifiers. A cached receipt must never
+masquerade as a newly executed download, playback command or synchronization.
+A deliberate repeated action is a new intent. After an interrupted or uncertain
+operation, inspect its status before retrying so recovery does not duplicate
+side effects. Cross-app idempotency requires support in the connection contract.
+
+5. ECHOOFFGRID TAB IN ECHOLITE
+
+Add a clearly named EchoOffGrid tab on Mac and Android using EchoLite's existing
+dark theme, mint accents, spacing and typography.
+
+Not installed:
+- Explain the wider ecosystem concisely.
+- Provide a Download EchoOffGrid button for the appropriate platform.
+- Keep EchoLite independently usable.
+
+Installed but not connected:
+- Provide Open EchoOffGrid and Connect actions.
+- Explain the actual connection state without claiming tool access prematurely.
+
+Connected:
+- Show available systems and connection status.
+- Offer clear shortcuts: Library, Maps, History, OpenGov, News, Downloads and
+  Devices, plus other supported families.
+- Open the relevant original item from a tool result or citation.
+
+Use a confirmed official release/download URL. The inspected OffGrid checkout
+had no Git remote configured; do not guess a public release address or display
+an unpublished download as available.
+
+6. DELIVERY ORDER
+
+Milestone 1 — Ecosystem entry and useful library access
+- Add the EchoOffGrid tab and install/open/connect states.
+- Implement connection discovery and capability/version handling.
+- Implement library search, bounded reading and opening the original item.
+- Connect retrieved content to source-linked recall and the Sources dropdown.
+
+Success: “EchoLite can find, understand, cite and open something in my EchoOffGrid
+library.” Demonstrate this on both platforms through authorized interfaces.
+
+Milestone 2 — Research and acquisition
+- Add Wikipedia/dictionary collections, History, saved news/sources and OpenGov.
+- Add download jobs, progress and verified completion.
+- Validate chained search, acquisition, comparison and source-opening journeys.
+
+Milestone 3 — Wider workstation actions
+- Add supported media controls, map operations, software/game launching and
+  device/sync operations.
+- Add radio-observation tools and explicit Private Browser integration.
+- Expose only capabilities actually supplied by the host.
+
+Throughout, complete independent EchoLite work while documenting any required
+OffGrid-side interface. Do not modify OffGrid to satisfy those dependencies.
+
+7. VALIDATION MARKERS
+
+Validate real user journeys on Mac and Android, including:
+- Find a saved item, read it, answer with its provenance and open the exact cited
+  item or location supported by the host.
+- Distinguish installed content from a catalogue result requiring download.
+- Continue using installed references and retained results without internet.
+- Preserve connection settings, useful recall and eligible caches across restart.
+- Detect source revisions and stop treating stale results as current evidence.
+- Resume interrupted downloads or jobs without duplicate actions.
+- Show an honest unavailable/disconnected result when a capability is missing.
+- Preserve existing EchoLite chat, editing, identity, model selection and sync.
+- Exercise Android cross-app grants and returning to the originating app.
+- Measure integration overhead on the 8 GB Mac, with bounded retrieval and no
+  whole-library loading into RAM or context.
+- Verify the ecosystem download button reaches the confirmed public destination.
+
+These markers validate the integration change. Do not repeat an unchanged
+full-context model test merely because new tools or navigation were added.
+
+NEXT IMPLEMENTATION TARGET
+
+Start with the EchoOffGrid tab, capability discovery and source-linked library
+search/read/open. This establishes the shared contract and provenance model
+needed for the remaining ecosystem tools.

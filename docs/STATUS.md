@@ -60,3 +60,7 @@ The automatic-connectivity change passed 95 focused checks. Two actual local-mod
 ## Native installation and Android distribution
 
 Two native EP setup apps now provision a Mac or a USB-connected Android phone. The APK has a mint adaptive icon, launcher entry and first-launch home-screen pin request. See [installer validation](INSTALLER-VALIDATION.md) for the actual checks and [setup](SETUP.md) for first-time OS approvals and disk requirements. Automatic USB/Wi-Fi sync and Android foreground-service restart checks are recorded in [background sync](android/BACKGROUND.txt).
+
+## Next update
+
+EchoOffGrid integration is the next planned development phase, beginning with the ecosystem tab and source-linked library search, reading and opening. Broader workstation tools follow in stages. This release does not yet provide those integrations. See the [integration plan](../integration%20plan.txt).
