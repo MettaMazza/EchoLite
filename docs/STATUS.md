@@ -61,9 +61,9 @@ The automatic-connectivity change passed 95 focused checks. Two actual local-mod
 
 Two native EP setup apps now provision a Mac or a USB-connected Android phone. The APK has a mint adaptive icon, launcher entry and first-launch home-screen pin request. See [installer validation](INSTALLER-VALIDATION.md) for the actual checks and [setup](SETUP.md) for first-time OS approvals and disk requirements. Automatic USB/Wi-Fi sync and Android foreground-service restart checks are recorded in [background sync](android/BACKGROUND.txt).
 
-## Prepared performance and storage update
+## Performance and storage update — v0.2.1-dev.20261119
 
-The source now includes optional Android Adreno acceleration, persistent compiled GPU caching, queued sentence-safe neural speech, and protected cache maintenance. See [acceleration measurements](android/ACCELERATION.md), [storage retention](STORAGE.md) and [voice playback](VOICE.md). These are development-build results; the existing published release assets have not been replaced.
+The source now includes optional Android Adreno acceleration, persistent compiled GPU caching, queued sentence-safe neural speech, and protected cache maintenance. See [acceleration measurements](android/ACCELERATION.md), [storage retention](STORAGE.md) and [voice playback](VOICE.md). The matching development release packages these changes for the Mac and Android installers.
 
 ## Next update
 

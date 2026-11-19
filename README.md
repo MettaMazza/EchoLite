@@ -14,7 +14,9 @@
 
 > **Active development.** EchoLite runs locally on Apple Silicon Macs and ARM64 Android phones. Native EP installers provision its models, voice and offline references automatically. Expect rough edges; this is an evolving development release, not a finished consumer product.
 
-Latest prepared work: [Android acceleration and measured latency](docs/android/ACCELERATION.md), [bounded local storage](docs/STORAGE.md), and smoother [neural read-aloud](docs/VOICE.md). See [release notes](docs/RELEASE-NOTES.md) for what is published versus prepared.
+Latest development update: [Android acceleration and measured latency](docs/android/ACCELERATION.md), [bounded local storage](docs/STORAGE.md), and smoother [neural read-aloud](docs/VOICE.md). See [release notes](docs/RELEASE-NOTES.md) for the release details.
+
+[Download v0.2.1-dev.20261119](https://github.com/MettaMazza/EchoLite/releases/tag/v0.2.1-dev.20261119) — updated Mac and Android installers, app runtime and APK.
 
 ## Open. Install. Start a conversation.
 

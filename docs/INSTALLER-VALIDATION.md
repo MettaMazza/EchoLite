@@ -17,3 +17,9 @@ Completed checks:
 - Installer app signatures were checked locally (ad-hoc signing). These checks do not constitute Apple notarization.
 
 This validation used the development Mac and connected Android phone. It separates fresh asset/state installation from the final launch test on an already configured machine. The phone had already approved USB debugging and background permissions. Those first-time OS approvals remain user-controlled on another device. The previously completed full-context model validation was not rerun for this packaging change.
+
+## v0.2.1-dev.20261119 package check
+
+The updated Mac installer completed into a separate fresh directory using the final manifest and a local release-asset mirror. It reused verified unchanged model/reference downloads, installed the new runtime, registered the full offline library and initialized fresh state. The installed app entrypoint reported database integrity and foreign keys OK, zero memories, zero pending turns and one identity version; Storage reported an empty generated cache. Background registration and app launch were suppressed for this isolated check to preserve the user's active installation.
+
+Both final installer bundles passed strict signature verification and contain the exact final release manifest. All release-hosted manifest entries matched their artifact sizes and SHA-256 hashes. The APK is versionCode 2 / versionName 0.2.1-dev and retains the prior signing certificate. Its functional app build was tested on the REDMAGIC during acceleration, storage and left-menu validation; the release rebuild adds the version metadata. Published URLs are verified separately after upload. Full-context capacity testing was not repeated for packaging.
