@@ -2,25 +2,36 @@
 # macOS ARM64 places variadic arguments differently from fixed arguments.
 external define get_list_data_ptr with list returning Int
 set NATIVE_SYSTEM to 0
+set NATIVE_ANDROID to 0
 set NATIVE_VARIADIC_FFI to 0
 
 define native_system:
     if NATIVE_SYSTEM == 0:
         set NATIVE_SYSTEM to ep_dlopen("/usr/lib/libSystem.B.dylib")
+        if NATIVE_SYSTEM == 0:
+            set NATIVE_SYSTEM to ep_dlopen("libc.so")
+            if NATIVE_SYSTEM != 0:
+                set NATIVE_ANDROID to 1
     return NATIVE_SYSTEM
 
 define native_bytes_write with pointer and offset and value and count:
     set number to value
     set i to 0
     repeat while i < count:
-        poke_byte(pointer and offset + i and number % 256)
-        set number to number / 256
+        set byte to number % 256
+        if byte < 0:
+            set byte to byte + 256
+        poke_byte(pointer and offset + i and byte)
+        set number to (number - byte) / 256
         set i to i + 1
     return 0
 
 define native_variadic_int with function and fixed_count and arguments and kinds:
     if NATIVE_VARIADIC_FFI == 0:
-        set NATIVE_VARIADIC_FFI to ep_dlopen("/usr/lib/libffi.dylib")
+        if native_android():
+            set NATIVE_VARIADIC_FFI to ep_dlopen("libecholite_ffi.so")
+        else:
+            set NATIVE_VARIADIC_FFI to ep_dlopen("/usr/lib/libffi.dylib")
     if NATIVE_VARIADIC_FFI == 0 || function == 0:
         return 0 - 1
     set count to length_list(arguments)
@@ -68,12 +79,84 @@ define native_variadic_int with function and fixed_count and arguments and kinds
 
 define native_open with path and flags and mode:
     set function to ep_dlsym(native_system() and "open")
+    if native_android():
+        set converted to native_android_open_flags(flags)
+        if converted < 0:
+            return 0 - 1
+        return native_signed_int(ep_dlcall3(function and path and converted and mode))
     return native_variadic_int(function and 2 and [str_to_ptr(path),flags,mode] and [1,0,0])
 
 define native_openat with directory and path and flags and mode:
     set function to ep_dlsym(native_system() and "openat")
+    if native_android():
+        set converted to native_android_open_flags(flags)
+        if converted < 0:
+            return 0 - 1
+        return native_signed_int(ep_dlcall4(function and directory and path and converted and mode))
     return native_variadic_int(function and 3 and [directory,str_to_ptr(path),flags,mode] and [0,1,0,0])
 
 define native_fcntl_int with descriptor and command and argument:
     set function to ep_dlsym(native_system() and "fcntl")
+    if native_android():
+        set value to argument
+        if command == 4:
+            set value to native_android_open_flags(argument)
+            if value < 0:
+                return 0 - 1
+        return native_signed_int(ep_dlcall3(function and descriptor and command and value))
     return native_variadic_int(function and 2 and [descriptor,command,argument] and [0,0,0])
+
+# Platform selection follows the loaded libc, never user-controlled state files.
+define native_android:
+    native_system()
+    return NATIVE_ANDROID
+
+define native_errno_pointer:
+    set name to "__error"
+    if native_android():
+        set name to "__errno"
+    return ep_dlcall0(ep_dlsym(native_system() and name))
+
+define native_signed_int with value:
+    if value >= 2147483648 && value <= 4294967295:
+        return value - 4294967296
+    return value
+
+# Existing callers express Darwin open flags; translate supported flags once.
+# Unknown bits fail closed rather than silently dropping a protection.
+define native_android_open_flags with flags:
+    set source_bits to [1,2,4,8,256,512,1024,2048,1048576,16777216]
+    set target_bits to [1,2,2048,1024,32768,64,512,128,16384,524288]
+    set remainder to flags
+    set result to 0
+    set i to 0
+    repeat while i < length_list(source_bits):
+        set bit to get_list(source_bits and i)
+        if flags / bit % 2 == 1:
+            set remainder to remainder - bit
+            set result to result + get_list(target_bits and i)
+        set i to i + 1
+    if remainder != 0:
+        return 0 - 1
+    return result
+
+define native_at_nofollow:
+    if native_android():
+        return 256
+    return 32
+
+define native_dirent_name with entry returning Str:
+    if native_android():
+        return ptr_to_str(entry + 19)
+    return ptr_to_str(entry + 21)
+
+define native_rename_exclusive with source_dir and source_name and target_dir and target_name:
+    set name to "renameatx_np"
+    set flag to 4
+    if native_android():
+        set name to "renameat2"
+        set flag to 1
+    set function to ep_dlsym(native_system() and name)
+    if function == 0:
+        return 0 - 1
+    return native_signed_int(ep_dlcall5(function and source_dir and source_name and target_dir and target_name and flag))

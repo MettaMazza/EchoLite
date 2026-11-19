@@ -1,0 +1,30 @@
+import "../src/identity_active"
+import "os"
+set checks to 0
+
+define active_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    active_assert(sql_execute(db and "PRAGMA foreign_keys=ON; CREATE TABLE me_versions(id INTEGER PRIMARY KEY AUTOINCREMENT,body TEXT NOT NULL,reason TEXT NOT NULL,created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); INSERT INTO me_versions(body,reason) VALUES('Earlier Me','first'),('Current Me','second');") == 0 and "legacy identity history")
+    active_assert(identity_active_id(db) == "2" and "legacy reader compatibility")
+    active_assert(identity_active_init(db) && identity_active_id(db) == "2" and "migration selects current legacy identity")
+    active_assert(identity_active_init(db) && result_cache_scalar(db and "SELECT count(*) FROM identity_selections" and []) == "2" and "migration is idempotent")
+    active_assert(sql_execute(db and "BEGIN; UPDATE identity_control SET importing=1; INSERT INTO me_versions(body,reason) VALUES('Remote historical Me','imported'); UPDATE identity_control SET importing=0; COMMIT;") == 0 && identity_active_id(db) == "2" and "imported history cannot activate itself")
+    active_assert(sql_execute(db and "INSERT INTO me_versions(body,reason) VALUES('Local evolved Me','self revision')") == 0 && identity_active_id(db) == "4" and "local self revision becomes active")
+    active_assert(result_cache_scalar(db and "SELECT last_insert_rowid()" and []) == "4" and "selection trigger preserves caller revision ID")
+    active_assert(sql_execute(db and "BEGIN; INSERT INTO me_versions(body,reason) VALUES('Rolled back','test'); ROLLBACK;") == 0 && identity_active_id(db) == "4" and "failed local revision cannot change active identity")
+    active_assert(sql_execute(db and "DELETE FROM me_versions WHERE id=4") == 0 && identity_active_id(db) == "2" and "forgetting active revision returns to actual prior selection")
+    active_assert(sql_execute(db and "DELETE FROM me_versions WHERE id=2") == 0 && identity_active_id(db) == "1" and "migration preserves earlier local selections")
+    active_assert(sql_execute(db and "DELETE FROM me_versions WHERE id=1") == 0 && identity_active_id(db) == "" and "unselected imported history is never promoted by forgetting")
+    active_assert(identity_active_init(db) && identity_active_id(db) == "" and "reinitialization does not adopt unselected history")
+    active_assert(sql_execute(db and "INSERT INTO me_versions(body,reason) VALUES('Identity reset','forgetting')") == 0 && identity_active_id(db) != "" and "fresh local identity can replace deleted selection")
+    active_assert(sql_execute(db and "BEGIN; UPDATE identity_control SET importing=1; INSERT INTO me_versions(body,reason) VALUES('Interrupted import','test'); ROLLBACK;") == 0 && result_cache_scalar(db and "SELECT importing FROM identity_control" and []) == "0" and "interrupted import restores activation control")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " active identity checks"))
+    return 0

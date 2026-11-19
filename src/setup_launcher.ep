@@ -1,0 +1,80 @@
+# Native visual installer, compiled from EP and bundled with its graphics library.
+import "setup_common"
+import "../stdlib/bridge/raylib"
+define setup_lines with text and y and tint:
+    set i to 0
+    repeat while i < string_length(text) && i < 320:
+        raylib_draw_text(substring(text and i and 72) and 40 and y and 18 and tint)
+        set i to i + 72
+        set y to y + 25
+    return 0
+
+define main:
+    set args to get_args()
+    set resources to concat(application_root(get_list(args and 0)) and "/Resources")
+    set mode to string_trim(read_file(concat(resources and "/mode.txt")))
+    set root to get_env("ECHOLITE_INSTALL_ROOT")
+    if root == "":
+        set root to concat(get_env("HOME") and "/Library/Application Support/EchoLite")
+    set cache to get_env("ECHOLITE_INSTALL_CACHE")
+    if cache == "":
+        set cache to concat(get_env("HOME") and "/Library/Caches/EchoLite-install")
+    application_directory(cache and 0)
+    set progress to concat(cache and "/progress.txt")
+    set RAYLIB_HANDLE to ep_dlopen(concat(resources and "/libraylib.dylib"))
+    if RAYLIB_HANDLE == 0:
+        return 1
+    raylib_init_window(850 and 390 and "EchoLite Setup")
+    raylib_set_target_fps(20)
+    set pid to 0
+    set done to 0
+    set result to 0
+    set mint to 4291552439
+    set light to 4293191650
+    set muted to 4288914067
+    repeat while raylib_window_should_close() == 0:
+        if pid == 0 && done == 0:
+            write_file(progress and "Preparing verified local installation...")
+            set fd to native_open(concat(cache and "/install.log") and 521 and 384)
+            set pid to process_detached(concat(resources and "/setup-worker") and [mode,root,cache,progress,concat(resources and "/release.json")] and fd)
+            ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+            if pid == 0:
+                set done to 1
+                set result to 127
+        if pid > 0 && done == 0:
+            set code to process_poll(pid)
+            if code != -1:
+                set done to 1
+                set result to code
+        raylib_begin_drawing()
+        raylib_clear_background(4280096785)
+        raylib_draw_rectangle(40 and 35 and 7 and 43 and mint)
+        raylib_draw_rectangle(47 and 35 and 24 and 7 and mint)
+        raylib_draw_rectangle(47 and 53 and 18 and 7 and mint)
+        raylib_draw_rectangle(47 and 71 and 24 and 7 and mint)
+        raylib_draw_text("EchoLite" and 92 and 35 and 34 and light)
+        raylib_draw_text("LOCAL AI / ACTIVE DEVELOPMENT" and 94 and 76 and 14 and mint)
+        set message to "Preparing setup..."
+        if file_exists(progress):
+            set message to read_file(progress)
+        setup_lines(message and 130 and light)
+        set download to concat(progress and ".download")
+        if done == 0 && file_exists(download):
+            set path to read_file(download)
+            if file_exists(path):
+                raylib_draw_text(concat(int_to_string(file_size(path) / 1048576) and " MB downloaded") and 40 and 235 and 18 and mint)
+        raylib_draw_text("First setup includes about 54 GB of models and offline references." and 40 and 275 and 16 and muted)
+        if done == 0:
+            raylib_draw_text("Close to pause. Reopen to resume verified downloads." and 40 and 310 and 16 and muted)
+        else if result == 0:
+            raylib_draw_text("Setup complete. You can close this window." and 40 and 310 and 18 and mint)
+        else:
+            raylib_draw_text("Click to retry. Details: Library/Caches/EchoLite-install/install.log" and 40 and 310 and 16 and mint)
+            if raylib_is_mouse_button_pressed(0):
+                set done to 0
+                set pid to 0
+        raylib_end_drawing()
+    if done == 0 && pid > 0:
+        ep_dlcall2(ep_dlsym(native_system() and "kill") and 0 - pid and 15)
+    raylib_close_window()
+    return 0

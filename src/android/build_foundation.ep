@@ -1,0 +1,59 @@
+import "../application_paths"
+
+# Host-side Android foundation build. Dependencies and signing key are local.
+define android_run with executable and arguments:
+    set code to application_wait(executable and arguments)
+    if code != 0:
+        display concat("Android build step failed: " and executable)
+        ep_exit(code)
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 4:
+        display "Usage: build_foundation CHECKOUT ANDROID_WORK JDK_HOME"
+        return 1
+    set root to get_list(args and 1)
+    set work to get_list(args and 2)
+    set java_home to get_list(args and 3)
+    set sdk to concat(work and "/sdk")
+    set ndk to concat(work and "/tools/android-ndk-r30")
+    set package to concat(work and "/apk")
+    set compiler to get_env("ERNOS_COMPILER")
+    if compiler == "":
+        set compiler to concat(get_env("HOME") and "/.local/bin/ernos")
+    set clang to concat(ndk and "/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android28-clang")
+    set cmake to concat(sdk and "/cmake/3.31.6/bin/cmake")
+    set build_tools to concat(sdk and "/build-tools/36.0.0")
+    if file_exists(concat(work and "/signing/debug.keystore")) == 0:
+        display "Create a local development signing key before packaging."
+        return 1
+    if application_directory(concat(package and "/lib/arm64-v8a") and 0) == 0:
+        return 1
+    if ep_dlcall1(ep_dlsym(native_system() and "chdir") and root) != 0:
+        return 1
+    set source to concat(root and "/src/android/foundation.ep")
+    android_run(compiler and [source])
+    if string_contains(read_file(concat(root and "/src/android/foundation_compiled.c")) and "ep_android_string_byte") == 0:
+        display "Android requires the Ernos runtime with tagged heap-string support. Set ERNOS_COMPILER to that build."
+        return 1
+    android_run(cmake and ["-S",concat(work and "/vendor/raylib-6.2"),"-B",concat(work and "/build/raylib"),"-G","Ninja",concat("-DCMAKE_MAKE_PROGRAM=" and concat(sdk and "/cmake/3.31.6/bin/ninja")),concat("-DCMAKE_TOOLCHAIN_FILE=" and concat(ndk and "/build/cmake/android.toolchain.cmake")),"-DANDROID_ABI=arm64-v8a","-DANDROID_PLATFORM=android-28","-DPLATFORM=Android","-DBUILD_EXAMPLES=OFF","-DBUILD_SHARED_LIBS=OFF","-DCMAKE_BUILD_TYPE=Release","-DCMAKE_POSITION_INDEPENDENT_CODE=ON"])
+    android_run(cmake and ["--build",concat(work and "/build/raylib"),"-j","4"])
+    android_run(clang and [concat(root and "/src/android/foundation_compiled.c"),"-O2","-fPIC","-shared","-o",concat(package and "/lib/arm64-v8a/libecholite.so"),"-Wl,--whole-archive",concat(work and "/build/raylib/raylib/libraylib.a"),"-Wl,--no-whole-archive","-Wl,-u,ANativeActivity_onCreate","-Wl,--wrap=fopen","-Wl,--no-undefined","-Wl,-z,max-page-size=16384","-ldl","-lm","-llog","-landroid","-lEGL","-lGLESv2","-lOpenSLES","-latomic"])
+    # SQLite math functions are required by cosine-vector normalization.
+    android_run(clang and ["-O2","-fPIC","-DSQLITE_ENABLE_FTS5","-DSQLITE_ENABLE_COLUMN_METADATA","-DSQLITE_ENABLE_MATH_FUNCTIONS","-c",concat(work and "/vendor/sqlite-amalgamation-3540100/sqlite3.c"),"-o",concat(work and "/build/sqlite3.o")])
+    android_run(compiler and [concat(root and "/src/echolite.ep")])
+    android_run(clang and ["-O2","-DEP_HAS_SQLITE",concat(root and "/src/echolite_compiled.c"),concat(work and "/build/sqlite3.o"),"-ldl","-lm","-o",concat(package and "/lib/arm64-v8a/libecholite-core.so")])
+    android_run(cmake and ["-S",concat(work and "/vendor/llama.cpp-b1b770d90d94cad9e9ea5b993bdbc383a522fb28"),"-B",concat(work and "/build/llama"),"-G","Ninja",concat("-DCMAKE_MAKE_PROGRAM=" and concat(sdk and "/cmake/3.31.6/bin/ninja")),concat("-DCMAKE_TOOLCHAIN_FILE=" and concat(ndk and "/build/cmake/android.toolchain.cmake")),"-DANDROID_ABI=arm64-v8a","-DANDROID_PLATFORM=android-28","-DCMAKE_BUILD_TYPE=Release","-DGGML_OPENMP=OFF","-DLLAMA_OPENSSL=OFF","-DLLAMA_BUILD_TESTS=OFF","-DLLAMA_BUILD_EXAMPLES=OFF","-DLLAMA_BUILD_SERVER=ON","-DLLAMA_BUILD_TOOLS=ON","-DBUILD_SHARED_LIBS=OFF","-DGGML_NATIVE=OFF","-DGGML_CPU_ARM_ARCH=armv8.7-a","-DLLAMA_BUILD_NUMBER=12359","-DLLAMA_BUILD_COMMIT=b1b770d9"])
+    android_run(cmake and ["--build",concat(work and "/build/llama"),"--target","llama-server","-j","4"])
+    android_run("/bin/cp" and [concat(work and "/build/llama/bin/llama-server"),concat(package and "/lib/arm64-v8a/libllama-server.so")])
+    android_run(concat(build_tools and "/aapt2") and ["link","--manifest",concat(root and "/android/AndroidManifest.xml"),"-I",concat(sdk and "/platforms/android-36/android.jar"),"-o",concat(package and "/echolite-unsigned.apk")])
+    if ep_dlcall1(ep_dlsym(native_system() and "chdir") and package) != 0:
+        return 1
+    android_run("/usr/bin/zip" and ["-q","echolite-unsigned.apk","lib/arm64-v8a/libecholite.so","lib/arm64-v8a/libecholite-core.so","lib/arm64-v8a/libllama-server.so"])
+    android_run(concat(build_tools and "/zipalign") and ["-f","-P","16","4","echolite-unsigned.apk","echolite-aligned.apk"])
+    set_env("JAVA_HOME" and java_home)
+    android_run(concat(build_tools and "/apksigner") and ["sign","--ks",concat(work and "/signing/debug.keystore"),"--ks-pass","pass:android","--out","echolite-dev.apk","echolite-aligned.apk"])
+    android_run(concat(build_tools and "/apksigner") and ["verify","echolite-dev.apk"])
+    display concat("Built Android foundation APK: " and concat(package and "/echolite-dev.apk"))
+    return 0

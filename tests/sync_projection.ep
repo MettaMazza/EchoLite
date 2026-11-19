@@ -1,0 +1,68 @@
+import "../src/sync_projection"
+import "os"
+set checks to 0
+
+define project_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define projection_ok with db and result:
+    set status to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.status'),'ok')" and [result])
+    if status == "error":
+        return 0
+    return 1
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: sync_projection EMPTY_APP_DB_A EMPTY_APP_DB_B"
+        return 1
+    set a to sql_open(get_list(args and 1))
+    set b to sql_open(get_list(args and 2))
+    sql_execute(a and "PRAGMA foreign_keys=ON")
+    sql_execute(b and "PRAGMA foreign_keys=ON")
+    project_assert(result_cache_scalar(a and "SELECT count(*) FROM memories" and []) == "0" && result_cache_scalar(b and "SELECT count(*) FROM memories" and []) == "0" && sync_application_init(a) && sync_application_init(b) and "fresh actual application schemas")
+    project_assert(sql_execute(a and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','test','user','Parent 🌱'),('episodic','test','assistant','Child memory'); INSERT INTO derivations VALUES(1,2);") == 0 && sql_execute(b and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','local','user','Keep local memory');") == 0 and "independent local numeric identities")
+    set parent to sync_identity_get(a and "memory" and "1")
+    set child to sync_identity_get(a and "memory" and "2")
+    project_assert(projection_ok(a and sync_application_capture(a and "memory" and "1")) && projection_ok(a and sync_application_capture(a and "memory" and "2")) and "source snapshots")
+    set peer to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    project_assert(projection_ok(b and sync_import(b and peer and sync_export(a and "0"))) and "received replica frontier")
+    project_assert(projection_ok(b and sync_project_memory(b and child)) == 0 && result_cache_scalar(b and "SELECT count(*) FROM memories" and []) == "1" and "out-of-order child waits without partial insertion")
+    set applied to sync_project_memory(b and parent)
+    project_assert(projection_ok(b and applied) and concat("parent projection: " and applied))
+    set parent_id to result_cache_scalar(b and "SELECT local_id FROM sync_local_ids WHERE object=?" and [parent])
+    project_assert(parent_id != "1" && result_cache_scalar(b and "SELECT body FROM memories WHERE id=1" and []) == "Keep local memory" and "remote identity cannot overwrite unrelated local row")
+    project_assert(result_cache_scalar(b and "SELECT body FROM memories WHERE id=?" and [parent_id]) == "Parent 🌱" and "Unicode content reaches application memory")
+    project_assert(projection_ok(b and sync_project_memory(b and child)) and "deferred child applies after parent")
+    set child_id to result_cache_scalar(b and "SELECT local_id FROM sync_local_ids WHERE object=?" and [child])
+    project_assert(result_cache_scalar(b and "SELECT count(*) FROM derivations WHERE parent=? AND child=?" and [parent_id,child_id]) == "1" and "lineage resolves to receiving device IDs")
+    project_assert(result_cache_scalar(b and "SELECT count(*) FROM recall_fts WHERE recall_fts MATCH 'Child'" and []) == "1" and "existing app recall index receives projected content")
+    set revision to result_cache_scalar(b and "SELECT value FROM metadata WHERE key='memory_revision'" and [])
+    project_assert(projection_ok(b and sync_project_memory(b and child)) && result_cache_scalar(b and "SELECT value FROM metadata WHERE key='memory_revision'" and []) == revision and "repeated projection is a no-op")
+    sql_execute_params(b and "UPDATE memories SET body='Local offline edit' WHERE id=?" and [child_id])
+    sql_execute(a and "UPDATE memories SET body='Remote offline edit' WHERE id=2")
+    project_assert(projection_ok(a and sync_application_capture(a and "memory" and "2")) and "remote edit captured")
+    set cursor to result_cache_scalar(b and "SELECT cursor FROM sync_cursors WHERE peer=?" and [peer])
+    project_assert(projection_ok(b and sync_import(b and peer and sync_export(a and cursor))) and "remote edit received")
+    project_assert(projection_ok(b and sync_project_memory(b and child)) == 0 && result_cache_scalar(b and "SELECT body FROM memories WHERE id=?" and [child_id]) == "Local offline edit" and "dirty local edit is never overwritten")
+    project_assert(result_cache_scalar(b and "SELECT value FROM sync_meta WHERE key='projecting'" and []) == "0" and "projection suppression is cleared after failures")
+    project_assert(sql_execute(a and "INSERT INTO memories(layer,project,source,body) VALUES('working','test','session','Remote session'); INSERT INTO sessions(memory,project) VALUES(3,'test');") == 0 && sql_execute(b and "INSERT INTO memories(layer,project,source,body) VALUES('working','test','session','Local session'); INSERT INTO sessions(memory,project) VALUES(last_insert_rowid(),'test');") == 0 and "two devices independently have an open session")
+    set remote_session to sync_identity_get(a and "memory" and "3")
+    project_assert(projection_ok(a and sync_application_capture(a and "memory" and "3")) and "remote session capture")
+    set cursor to result_cache_scalar(b and "SELECT cursor FROM sync_cursors WHERE peer=?" and [peer])
+    project_assert(projection_ok(b and sync_import(b and peer and sync_export(a and cursor))) and "remote session received")
+    set before to result_cache_scalar(b and "SELECT count(*) FROM memories" and [])
+    project_assert(projection_ok(b and sync_project_memory(b and remote_session)) == 0 && result_cache_scalar(b and "SELECT count(*) FROM memories" and []) == before && result_cache_scalar(b and "SELECT count(*) FROM sync_local_ids WHERE object=?" and [remote_session]) == "0" and "late open-session conflict rolls back content and identity allocation")
+    sql_execute(a and "UPDATE sessions SET closed='2026-11-19T00:00:00Z' WHERE memory=3")
+    project_assert(projection_ok(a and sync_application_capture(a and "memory" and "3")) and "closed remote session capture")
+    set cursor to result_cache_scalar(b and "SELECT cursor FROM sync_cursors WHERE peer=?" and [peer])
+    project_assert(projection_ok(b and sync_import(b and peer and sync_export(a and cursor))) && projection_ok(b and sync_project_memory(b and remote_session)) and "closed remote session applies without replacing local open session")
+    project_assert(result_cache_scalar(b and "SELECT count(*) FROM sessions WHERE closed IS NULL" and []) == "1" && result_cache_scalar(b and "SELECT value FROM sync_meta WHERE key='projecting'" and []) == "0" and "session invariant and tracking state survive late rollback")
+    sql_close(a)
+    sql_close(b)
+    display concat("PASS: " and concat(int_to_string(checks) and " real application projection checks"))
+    return 0

@@ -1,0 +1,23 @@
+# Register a checksum-verified archive using this device's actual file metadata.
+import "wikipedia"
+import "application_paths"
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set library to get_list(args and 1)
+    set template to read_file(get_list(args and 2))
+    set db to sql_open(":memory:")
+    set name to result_cache_scalar(db and "SELECT json_extract(?,'$.file')" and [template])
+    if name == "" || string_contains(name and "/") || string_contains(name and ".."):
+        return 1
+    set info to alloc_bytes(144)
+    if ep_dlcall2(ep_dlsym(native_system() and "stat") and concat(library and concat("/" and name)) and info) != 0:
+        return 1
+    set modified to native_stat_time(info and 48) * 1000000000 + native_stat_time(info and 56)
+    set manifest to result_cache_scalar(db and "SELECT json_set(?,'$.mtime_ns',CAST(? AS INTEGER))" and [template,int_to_string(modified)])
+    free_bytes(info)
+    write_file(concat(library and "/wikipedia.json") and manifest)
+    set checked to wiki_manifest(db and library)
+    display checked
+    return result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [checked]) != "ok"

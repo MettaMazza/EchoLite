@@ -1,0 +1,90 @@
+import "android/input"
+import "android/jni"
+import "native_font"
+import "transport"
+import "../stdlib/bridge/raylib"
+set UI_TOUCH_CAPTURE to 0
+set UI_POINTER_PRESSED to 0
+set UI_TOUCH_START_X to 0
+set UI_TOUCH_START_Y to 0
+set UI_TOUCH_LAST_Y to 0
+set UI_TOUCH_MOVED to 0
+set UI_TOUCH_DELTA to 0
+set UI_TOUCH_STARTED to 0
+set UI_SCALE to 1
+set UI_TOP to 0
+set UI_BOTTOM to 0
+set UI_TRANSFORM_CIF to 0
+
+define ui_viewport_update:
+    set UI_POINTER_PRESSED to android_pointer_take()
+    if native_android():
+        set UI_SCALE to raylib_get_screen_width() / 400
+        if UI_SCALE < 1:
+            set UI_SCALE to 1
+        if UI_SCALE > 4:
+            set UI_SCALE to 4
+        set safe to alloc_bytes(16)
+        if ep_dlcall2(ep_dlsym(ANDROID_SDL and "SDL_GetWindowSafeArea") and ANDROID_INPUT_WINDOW and safe):
+            set top to process_integer(safe + 4 and 4)
+            set usable to process_integer(safe + 12 and 4)
+            set UI_TOP to top / UI_SCALE
+            set UI_BOTTOM to (raylib_get_screen_height() - top - usable) / UI_SCALE
+        free_bytes(safe)
+        set keyboard to android_keyboard_inset(ANDROID_SDL) / UI_SCALE
+        if keyboard > UI_BOTTOM:
+            set UI_BOTTOM to keyboard
+        set UI_TOUCH_DELTA to 0
+        if UI_POINTER_PRESSED:
+            set UI_TOUCH_START_X to ui_mouse_x()
+            set UI_TOUCH_START_Y to ui_mouse_y()
+            set UI_TOUCH_LAST_Y to UI_TOUCH_START_Y
+            set UI_TOUCH_MOVED to 0
+            set UI_TOUCH_STARTED to transport_now(native_system())
+        if raylib_is_mouse_button_down(0):
+            set delta to ui_mouse_y() - UI_TOUCH_START_Y
+            set horizontal to ui_mouse_x() - UI_TOUCH_START_X
+            if delta > 8 || delta < 0 - 8 || horizontal > 8 || horizontal < 0 - 8:
+                set UI_TOUCH_MOVED to 1
+            if UI_TOUCH_MOVED:
+                set UI_TOUCH_DELTA to ui_mouse_y() - UI_TOUCH_LAST_Y
+            set UI_TOUCH_LAST_Y to ui_mouse_y()
+    return 0
+
+define ui_screen_width:
+    return raylib_get_screen_width() / UI_SCALE
+
+define ui_screen_height:
+    return raylib_get_screen_height() / UI_SCALE - UI_TOP - UI_BOTTOM
+
+define ui_mouse_x:
+    return raylib_get_mouse_x() / UI_SCALE
+
+define ui_mouse_y:
+    return raylib_get_mouse_y() / UI_SCALE - UI_TOP
+
+define ui_transform with name and x and y and z:
+    if UI_TRANSFORM_CIF == 0:
+        set float_type to ep_dlsym(FONT_FFI and "ffi_type_float")
+        set UI_TRANSFORM_CIF to native_cif(ep_dlsym(FONT_FFI and "ffi_type_void") and [float_type,float_type,float_type])
+    set a to [native_f32(x)]
+    set b to [native_f32(y)]
+    set c to [native_f32(z)]
+    set values to [get_list_data_ptr(a),get_list_data_ptr(b),get_list_data_ptr(c)]
+    ep_dlcall4(FONT_CALL and UI_TRANSFORM_CIF and ep_dlsym(RAYLIB_HANDLE and name) and 0 and get_list_data_ptr(values))
+    return 0
+
+define ui_begin_drawing:
+    raylib_begin_drawing()
+    if native_android():
+        ui_transform("rlScalef" and UI_SCALE and UI_SCALE and 1)
+        ui_transform("rlTranslatef" and 0 and UI_TOP and 0)
+    return 0
+
+define ui_scissor with x and y and width and height:
+    return ep_dlcall4(ep_dlsym(RAYLIB_HANDLE and "BeginScissorMode") and x * UI_SCALE and (y + UI_TOP) * UI_SCALE and width * UI_SCALE and height * UI_SCALE)
+
+define ui_mouse_pressed:
+    if UI_TOUCH_CAPTURE:
+        return 0
+    return UI_POINTER_PRESSED || raylib_is_mouse_button_pressed(0)

@@ -1,0 +1,52 @@
+import "../src/sync_application"
+import "os"
+set checks to 0
+
+define app_sync_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define app_sync_payload with db and kind and id returning Str:
+    set record to sync_application_capture(db and kind and id)
+    app_sync_assert(result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.status'),'ok')!='error'" and [record]) == "1" and concat("capture " and record))
+    return result_cache_scalar(db and "SELECT json_extract(?,'$.versions[0].payload')" and [record])
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: sync_application EMPTY_INITIALIZED_APP_DATABASE"
+        return 1
+    set db to sql_open(get_list(args and 1))
+    app_sync_assert(sql_execute(db and "PRAGMA foreign_keys=ON") == 0 && result_cache_scalar(db and "SELECT count(*) FROM memories" and []) == "0" and "fresh actual application database")
+    app_sync_assert(sync_application_init(db) and "application sync hooks install")
+    app_sync_assert(sql_execute(db and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','test','user-message','Hello 🌱'),('episodic','test','assistant','Hello back'),('working','test','session','Conversation'); INSERT INTO sessions(memory,project) VALUES(3,'test'); INSERT INTO turns(project,user_memory,reply_memory,me_version,status,answer_basis) VALUES('test',1,2,1,'completed','conversation'); INSERT INTO session_turns VALUES(1,3); INSERT INTO me_sources VALUES(1,1); INSERT INTO derivations VALUES(1,2); INSERT INTO tool_runs(turn_id,name,arguments,status,observation,request_memory) VALUES(1,'calculator','{\"expression\":\"1+1\"}','completed',2,1);") == 0 and "actual conversation rows and relationships")
+    set user to sync_identity_get(db and "memory" and "1")
+    set reply to sync_identity_get(db and "memory" and "2")
+    set session to sync_identity_get(db and "memory" and "3")
+    set identity to sync_identity_get(db and "identity" and "1")
+    set turn to sync_identity_get(db and "turn" and "1")
+    set payload to app_sync_payload(db and "memory" and "1")
+    app_sync_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.body')" and [payload]) == "Hello 🌱" and "Unicode memory content preserved")
+    set payload to app_sync_payload(db and "memory" and "2")
+    app_sync_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.parents[0]')" and [payload]) == user and "derivation uses stable parent reference")
+    set payload to app_sync_payload(db and "memory" and "3")
+    app_sync_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.session.project')" and [payload]) == "test" and "session metadata accompanies session memory")
+    set payload to app_sync_payload(db and "identity" and "1")
+    app_sync_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.sources[0]')" and [payload]) == user and "Me evidence uses stable reference")
+    set payload to app_sync_payload(db and "turn" and "1")
+    app_sync_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.user')=? AND json_extract(?,'$.reply')=? AND json_extract(?,'$.session')=? AND json_extract(?,'$.identity')=?" and [payload,user,payload,reply,payload,session,payload,identity]) == "1" and "conversation references remain portable")
+    set payload to app_sync_payload(db and "tool_run" and "1")
+    app_sync_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.turn')=? AND json_extract(?,'$.observation')=? AND json_extract(?,'$.request')=?" and [payload,turn,payload,reply,payload,user]) == "1" and "tool receipt relationships remain portable")
+    app_sync_assert(sql_execute(db and "UPDATE sessions SET closed='2026-11-19T00:00:00Z' WHERE memory=3; DELETE FROM me_sources WHERE version=1; DELETE FROM derivations WHERE child=2;") == 0 and "relationship-only edits")
+    app_sync_assert(result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE dirty=1" and []) == "3" and "session closure and removed links queue affected objects")
+    set payload to app_sync_payload(db and "identity" and "1")
+    app_sync_assert(result_cache_scalar(db and "SELECT json_array_length(?,'$.sources')" and [payload]) == "0" and "removed Me evidence is reflected in snapshot")
+    set payload to app_sync_payload(db and "memory" and "2")
+    app_sync_assert(result_cache_scalar(db and "SELECT json_array_length(?,'$.parents')" and [payload]) == "0" and "removed derivation is reflected in snapshot")
+    app_sync_assert(sync_application_track(db and "sessions" and "memory; DROP TABLE memories" and "memory") == 0 and "auxiliary tracking identifiers are allowlisted")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " real application serialization checks"))
+    return 0

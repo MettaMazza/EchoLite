@@ -1,0 +1,68 @@
+# Private UI-to-core handoff. Secret-bearing text is never a process argument.
+import "sync_invitation"
+import "restore"
+
+define sync_pairing_stage with home and text:
+    if string_length(text) == 0 || string_length(text) > 4096:
+        return 0
+    set fd to private_lock(home and ".pairing-input")
+    if fd < 0:
+        return 0
+    set libc to native_system()
+    set valid to ep_dlcall2(ep_dlsym(libc and "ftruncate") and fd and 0) == 0
+    if valid:
+        set valid to restore_write_all(fd and str_to_ptr(text) and string_length(text))
+    if valid:
+        set valid to ep_dlcall1(ep_dlsym(libc and "fsync") and fd) == 0
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    return valid
+
+define sync_pairing_take with home returning Str:
+    set dir to native_open(home and 17826048 and 0)
+    if dir < 0:
+        return ""
+    set text to restore_read(dir and ".pairing-input" and 4096 and 1)
+    if restore_remove(dir and ".pairing-input") == 0 || ep_dlcall1(ep_dlsym(native_system() and "fsync") and dir) != 0:
+        set text to ""
+    ep_dlcall1(ep_dlsym(native_system() and "close") and dir)
+    return text
+
+define sync_pairing_ui_init with db:
+    if sync_invitation_init(db) == 0:
+        return 0
+    set code to sql_execute(db and "CREATE TABLE IF NOT EXISTS sync_pairing_output(singleton INTEGER PRIMARY KEY CHECK(singleton=1),stage TEXT NOT NULL,payload TEXT NOT NULL,expires INTEGER NOT NULL); DELETE FROM sync_pairing_output WHERE expires<=unixepoch();")
+    return code == 0
+
+define sync_pairing_output with db and stage and payload returning Str:
+    if sync_execute(db and "INSERT OR REPLACE INTO sync_pairing_output VALUES(1,?,?,unixepoch()+600)" and [stage,payload]) == 0:
+        return result_cache_error("Cannot save pairing response for the interface")
+    return "{\"status\":\"ok\",\"pairing\":\"ready\"}"
+
+define sync_pairing_command with db and home and command and label returning Str:
+    if sync_pairing_ui_init(db) == 0:
+        return result_cache_error("Cannot initialize pairing controls")
+    if command == "sync-invite":
+        set invitation to sync_invitation_create(db and label)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')" and [invitation]) != "EchoLite pairing 1":
+            return invitation
+        return sync_pairing_output(db and "invitation" and invitation)
+    if command == "sync-pair-cancel":
+        set discarded to sync_pairing_take(home)
+        if sql_execute(db and "DELETE FROM sync_pairing_output") != 0:
+            return result_cache_error("Cannot clear pairing display")
+        return sync_invitation_cancel(db)
+    if command == "sync-pair-paste":
+        set text to sync_pairing_take(home)
+        if text == "" || result_cache_scalar(db and "SELECT json_valid(?)" and [text]) != "1":
+            return result_cache_error("Clipboard does not contain a valid EchoLite pairing code")
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')" and [text]) == "EchoLite pairing 1":
+            set response to sync_invitation_accept(db and text and label)
+            if result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')" and [response]) != "1":
+                return response
+            return sync_pairing_output(db and "confirmation" and response)
+        set result to sync_invitation_finish(db and text)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok":
+            if sql_execute(db and "DELETE FROM sync_pairing_output") != 0:
+                return result_cache_error("Device paired; cannot clear pairing display")
+        return result
+    return result_cache_error("Unknown pairing action")

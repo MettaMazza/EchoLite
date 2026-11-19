@@ -1,0 +1,49 @@
+import "../src/sync_forgetting"
+import "os"
+set checks to 0
+
+define forgetting_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define forgetting_ok with db and result:
+    set status to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.status'),'ok')" and [result])
+    if status == "error":
+        return 0
+    return 1
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: sync_forgetting EMPTY_APP_DB"
+        return 1
+    set db to sql_open(get_list(args and 1))
+    sql_execute(db and "PRAGMA foreign_keys=ON")
+    forgetting_assert(sync_application_init(db) && sync_generation_init(db) && sync_forgetting_init(db) and "application forgetting schemas")
+    forgetting_assert(sql_execute(db and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','forget','user','Private root'),('episodic','forget','assistant','Derived reply'),('semantic','forget','summary','Derived summary'),('episodic','keep','user','Keep this'); INSERT INTO derivations VALUES(1,2),(2,3); INSERT INTO me_sources VALUES(1,1); INSERT INTO turns(project,user_memory,reply_memory,me_version,status) VALUES('forget',1,2,1,'completed'); INSERT INTO tool_runs(turn_id,name,arguments,status,observation,request_memory) VALUES(1,'calculator','private arguments','completed',2,1); INSERT INTO generation_rounds VALUES(1,0,'{\"reasoning\":\"Private thinking\",\"completion_tokens\":\"3\"}');") == 0 and "derived memory, Me, turn and tool fixture")
+    set root to sync_identity_get(db and "memory" and "1")
+    set child to sync_identity_get(db and "memory" and "2")
+    set summary to sync_identity_get(db and "memory" and "3")
+    set identity to sync_identity_get(db and "identity" and "1")
+    forgetting_assert(forgetting_ok(db and sync_application_capture(db and "memory" and "1")) && forgetting_ok(db and sync_application_capture(db and "memory" and "2")) && forgetting_ok(db and sync_application_capture(db and "memory" and "3")) && forgetting_ok(db and sync_application_capture(db and "identity" and "1")) && forgetting_ok(db and sync_application_capture(db and "turn" and "1")) && forgetting_ok(db and sync_application_capture(db and "tool_run" and "1")) && forgetting_ok(db and sync_generation_capture(db and "1" and "0")) and "private data queued for sync")
+    sql_execute(db and "INSERT INTO response_cache VALUES('x','0','Private cache','digest',13,0); INSERT INTO prompt_cache VALUES('x','0','x','Private prompt','digest',14,0);")
+    forgetting_assert(forgetting_ok(db and sync_forget(db and root)) and "received root forgetting frontier")
+    sql_execute(db and "CREATE TRIGGER injected_forget_failure BEFORE DELETE ON memories WHEN old.id=2 BEGIN SELECT RAISE(ABORT,'injected forgetting failure'); END;")
+    forgetting_assert(forgetting_ok(db and sync_apply_memory_tombstone(db and root)) == 0 && result_cache_scalar(db and "SELECT count(*) FROM memories" and []) == "4" && result_cache_scalar(db and "SELECT count(*) FROM generation_rounds" and []) == "1" and "late deletion failure rolls back closure and thinking purge")
+    sql_execute(db and "DROP TRIGGER injected_forget_failure")
+    set result to sync_apply_memory_tombstone(db and root)
+    forgetting_assert(forgetting_ok(db and result) && result_cache_scalar(db and "SELECT json_extract(?,'$.runtime_cleanup_required')" and [result]) == "1" and "database cleanup records required runtime cleanup")
+    forgetting_assert(result_cache_scalar(db and "SELECT count(*) FROM memories" and []) == "1" && result_cache_scalar(db and "SELECT body FROM memories" and []) == "Keep this" and "derived closure removed while unrelated memory survives")
+    forgetting_assert(result_cache_scalar(db and "SELECT (SELECT count(*) FROM turns)+(SELECT count(*) FROM tool_runs)+(SELECT count(*) FROM generation_rounds)+(SELECT count(*) FROM response_cache)+(SELECT count(*) FROM prompt_cache)" and []) == "0" and "conversation, receipt, thinking and inference caches purged")
+    forgetting_assert(result_cache_scalar(db and "SELECT count(*) FROM sync_versions" and []) == "0" && result_cache_scalar(db and "SELECT count(*) FROM sync_seen" and []) == "0" and "all queued private payloads and receipt hashes purged atomically")
+    forgetting_assert(result_cache_scalar(db and "SELECT count(*) FROM sync_objects WHERE id IN (?,?,?) AND deleted=1" and [child,summary,identity]) == "3" and "derived memory and Me tombstones propagate")
+    forgetting_assert(result_cache_scalar(db and "SELECT reason FROM active_me" and []) == "Identity reset following synchronized forgetting" and "forgotten identity gets a fresh local reset")
+    forgetting_assert(string_contains(sync_export(db and "0") and "Private") == 0 && string_contains(sync_export(db and "0") and "Derived") == 0 and "old outgoing cursor cannot expose forgotten content")
+    set epoch to result_cache_scalar(db and "SELECT epoch FROM sync_cleanup" and [])
+    forgetting_assert(forgetting_ok(db and sync_apply_memory_tombstone(db and root)) && result_cache_scalar(db and "SELECT epoch FROM sync_cleanup" and []) == epoch and "replayed tombstone preserves pending cleanup without repeated reset")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " application forgetting checks"))
+    return 0

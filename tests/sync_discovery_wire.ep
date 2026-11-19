@@ -1,0 +1,64 @@
+# Local integration harness: isolated pairing DB, no personal memory transfer.
+import "../src/sync_datagram"
+import "../src/sync_discovery_service"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 6:
+        display "Usage: sync_discovery_wire serve/listen DB ADVERTISED_HOST UDP_PORT SERVICE_PORT | probe/search DB PEER BROADCAST UDP_PORT"
+        return 1
+    set db to sql_open(get_list(args and 2))
+    if sync_devices_init(db) == 0:
+        return 1
+    set mode to get_list(args and 1)
+    if mode == "search":
+        set result to sync_discovery_search(db and get_list(args and 3) and [get_list(args and 4)] and string_to_int(get_list(args and 5)))
+        display result
+        set success to result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok"
+        sql_close(db)
+        if success:
+            return 0
+        return 1
+    if mode == "listen":
+        set attempts to 0
+        repeat while attempts < 20:
+            set result to sync_discovery_listen(db and get_list(args and 3) and string_to_int(get_list(args and 4)) and string_to_int(get_list(args and 5)))
+            if result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.replies'),0)>0" and [result]) == "1":
+                display "PASS: bounded discovery listener replied"
+                sql_close(db)
+                return 0
+            set attempts to attempts + 1
+        sql_close(db)
+        return 1
+    set port to 0
+    if mode == "serve":
+        set port to string_to_int(get_list(args and 4))
+    set fd to sync_datagram_open("0.0.0.0" and port)
+    if fd < 0:
+        display "Cannot bind isolated discovery socket"
+        return 1
+    set success to 0
+    if mode == "serve":
+        display "READY: authenticated discovery listener"
+        set packet to sync_datagram_receive(fd and transport_now(native_system()) + 30000)
+        if length_list(packet) == 3:
+            set reply to sync_discovery_reply(db and get_list(packet and 2) and get_list(args and 3) and string_to_int(get_list(args and 5)))
+            if reply != "":
+                set success to sync_datagram_send(fd and get_list(packet and 0) and string_to_int(get_list(packet and 1)) and reply)
+    else if mode == "probe":
+        set peer to get_list(args and 3)
+        set probe to sync_discovery_probe(db and peer)
+        set nonce to result_cache_scalar(db and "SELECT json_extract(?,'$.nonce')" and [probe])
+        if sync_datagram_send(fd and get_list(args and 4) and string_to_int(get_list(args and 5)) and probe):
+            set packet to sync_datagram_receive(fd and transport_now(native_system()) + 5000)
+            if length_list(packet) == 3:
+                set result to sync_discovery_accept(db and peer and nonce and get_list(packet and 2) and get_list(packet and 0))
+                set success to result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok"
+                display result
+    sync_socket_close(fd)
+    sql_close(db)
+    if success:
+        display "PASS: authenticated discovery datagram"
+        return 0
+    display "FAIL: discovery datagram did not complete"
+    return 1

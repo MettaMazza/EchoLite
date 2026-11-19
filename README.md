@@ -12,7 +12,16 @@
   <a href="docs/STATUS.md">Status & limits</a>
 </p>
 
-> **Active development.** EchoLite is an experimental native macOS application, developed on an 8 GB Apple Silicon Mac. It runs locally on the development machine; a fresh checkout still requires manual dependency and reference-library provisioning. Expect rough edges. This is a source release, not a finished consumer installer.
+> **Active development.** EchoLite runs locally on Apple Silicon Macs and ARM64 Android phones. Native EP installers provision its models, voice and offline references automatically. Expect rough edges; this is an evolving development release, not a finished consumer product.
+
+## Open. Install. Start a conversation.
+
+| On your Mac | On your Android phone |
+| :--- | :--- |
+| Open **Install EchoLite.app** from the downloaded repository. | Connect the phone by USB, then open **Install EchoLite on Android.app**. |
+| Setup downloads the verified local assets and launches the app. | Setup installs the app, transfers its assets and pairs it with the Mac. |
+
+No development environment is required. The full offline library needs about **60 GB free**. First-time OS security, USB-debugging and home-screen permissions still belong to you. [Installation details →](docs/SETUP.md)
 
 ## Continuity, beyond the chat window
 
@@ -72,7 +81,7 @@ flowchart LR
 
 | Component | Current development configuration |
 | :--- | :--- |
-| Platform | macOS on Apple Silicon; development hardware: M1 with 8 GB unified memory |
+| Platform | Apple Silicon macOS and ARM64 Android; originally developed on an 8 GB M1 Mac |
 | Agent model | Qwen3.5-4B, Q4_K_M GGUF, with a local vision projector |
 | Recall model | all-MiniLM-L6-v2, 384-dimensional embeddings, CPU execution |
 | Generation runtime | Pinned native llama.cpp; configured context capacity: **262,144 tokens** |
@@ -90,7 +99,7 @@ On an already provisioned installation:
 ./echolite
 ```
 
-For a fresh checkout, start with the [setup guide](docs/SETUP.md). It lists the required model files, native libraries, compiler and local knowledge assets. The repository does **not** contain model weights, reference downloads, runtime binaries, personal state or credentials.
+For a fresh checkout, start with the [setup guide](docs/SETUP.md). Open the included installer; it handles the model files, native libraries and local knowledge assets. The repository includes small bootstrap installers, but excludes model weights, reference archives, personal state and credentials. A compiler is needed only to build modified source.
 
 ```sh
 # Once Ernos and the documented dependencies are installed:
@@ -103,7 +112,7 @@ Web and browser tools are available automatically. EchoLite uses its persistent 
 
 ## Help shape it
 
-Useful next work includes easier installation, richer native text/accessibility support, broader language rendering, better performance measurements and more reproducible end-to-end journeys.
+Useful next work includes broader installation coverage, richer native text/accessibility support, broader language rendering, better performance measurements and more reproducible end-to-end journeys.
 
 Bug reports are especially useful when they include the expected behavior, exact steps, platform and a minimal redacted example. Never attach your private memory database, model credential or unreviewed tool output.
 

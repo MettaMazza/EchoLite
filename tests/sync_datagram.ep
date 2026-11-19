@@ -1,0 +1,47 @@
+import "../src/sync_datagram"
+set checks to 0
+
+define datagram_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    datagram_assert(sync_datagram_open("8.8.8.8" and 18417) < 0 && sync_datagram_open("127.0.0.1" and 80) < 0 and "invalid bind addresses and ports rejected")
+    set receiver to sync_datagram_open("127.0.0.1" and 0)
+    set sender to sync_datagram_open("127.0.0.1" and 0)
+    datagram_assert(receiver >= 0 && sender >= 0 and "ephemeral sockets opened")
+    set address to alloc_bytes(16)
+    set size to alloc_bytes(4)
+    native_bytes_write(size and 0 and 16 and 4)
+    datagram_assert(ep_dlcall3(ep_dlsym(native_system() and "getsockname") and receiver and address and size) == 0 and "assigned receiver port retrieved")
+    set port to peek_byte(address and 2) * 256 + peek_byte(address and 3)
+    datagram_assert(sync_datagram_send(sender and "127.0.0.1" and port and "hello") and "loopback datagram sent")
+    set packet to sync_datagram_receive(receiver and transport_now(native_system()) + 1000)
+    datagram_assert(length_list(packet) == 3 && get_list(packet and 0) == "127.0.0.1" && get_list(packet and 2) == "hello" and "source and payload preserved")
+    set body to ""
+    repeat while string_length(body) < 4096:
+        set body to concat(body and "a")
+    datagram_assert(sync_datagram_send(sender and "127.0.0.1" and port and body) and "maximum payload sent")
+    set packet to sync_datagram_receive(receiver and transport_now(native_system()) + 1000)
+    datagram_assert(length_list(packet) == 3 && string_length(get_list(packet and 2)) == 4096 and "maximum payload received intact")
+    set body to concat(body and "a")
+    datagram_assert(sync_datagram_send(sender and "127.0.0.1" and port and body) == 0 && sync_datagram_send(sender and "127.0.0.1" and port and "") == 0 and "empty and oversized outgoing payloads rejected")
+    set sent to ep_dlcall6(ep_dlsym(native_system() and "sendto") and sender and str_to_ptr(body) and 4097 and 0 and address and 16)
+    datagram_assert(sent == 4097 && length_list(sync_datagram_receive(receiver and transport_now(native_system()) + 1000)) == 0 and "oversized incoming payload rejected")
+    set raw to alloc_bytes(3)
+    poke_byte(raw and 0 and 65)
+    poke_byte(raw and 1 and 0)
+    poke_byte(raw and 2 and 66)
+    set sent to ep_dlcall6(ep_dlsym(native_system() and "sendto") and sender and raw and 3 and 0 and address and 16)
+    datagram_assert(sent == 3 && length_list(sync_datagram_receive(receiver and transport_now(native_system()) + 1000)) == 0 and "embedded NUL rejected")
+    datagram_assert(length_list(sync_datagram_receive(receiver and transport_now(native_system()) + 20)) == 0 and "idle receive respects deadline")
+    free_bytes(raw)
+    free_bytes(size)
+    free_bytes(address)
+    sync_socket_close(sender)
+    sync_socket_close(receiver)
+    display concat("PASS: " and concat(int_to_string(checks) and " bounded datagram checks"))
+    return 0

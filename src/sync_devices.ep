@@ -1,0 +1,54 @@
+# Device-local connection settings and status. Never exported as memory records.
+import "sync_service"
+
+define sync_devices_init with db:
+    if sync_pair_init(db) == 0:
+        return 0
+    set code to sql_execute(db and "CREATE TABLE IF NOT EXISTS sync_endpoints(peer TEXT NOT NULL,host TEXT NOT NULL,port INTEGER NOT NULL,transport TEXT NOT NULL CHECK(transport IN ('usb','wifi')),failures INTEGER NOT NULL DEFAULT 0,retry_at INTEGER NOT NULL DEFAULT 0,last_result TEXT NOT NULL DEFAULT 'never',last_attempt TEXT,PRIMARY KEY(peer,host,port)); CREATE TRIGGER IF NOT EXISTS sync_device_revoked AFTER UPDATE OF enabled ON sync_peers WHEN new.enabled=0 BEGIN DELETE FROM sync_endpoints WHERE peer=new.peer; END;")
+    return code == 0
+
+define sync_endpoint_set with db and peer and host and port and transport returning Str:
+    set address to alloc_bytes(16)
+    set valid to sync_address(host and port and address)
+    free_bytes(address)
+    if valid == 0 || (transport != "usb" && transport != "wifi") || (transport == "usb" && host != "127.0.0.1"):
+        return result_cache_error("Use a private network address, or loopback for USB")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot update device address")
+    if result_cache_scalar(db and "SELECT count(*) FROM sync_peers WHERE peer=? AND enabled=1" and [peer]) != "1":
+        return sync_pair_abort(db and "Pair the device before saving its address")
+    if result_cache_scalar(db and "SELECT (SELECT count(*) FROM sync_endpoints WHERE peer=?)<4 OR EXISTS(SELECT 1 FROM sync_endpoints WHERE peer=? AND host=? AND port=?)" and [peer,peer,host,int_to_string(port)]) != "1":
+        return sync_pair_abort(db and "A device can retain up to four connection addresses")
+    if sync_execute(db and "INSERT INTO sync_endpoints(peer,host,port,transport) VALUES(?,?,?,?) ON CONFLICT(peer,host,port) DO UPDATE SET transport=excluded.transport,retry_at=0" and [peer,host,int_to_string(port),transport]) == 0 || sql_execute(db and "COMMIT") != 0:
+        return sync_pair_abort(db and "Cannot save device address")
+    return "{\"status\":\"ok\"}"
+
+define sync_devices_list with db returning Str:
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','device',(SELECT value FROM sync_meta WHERE key='device'),'peers',json((SELECT json_group_array(json(row)) FROM (SELECT json_object('id',p.peer,'label',p.label,'enabled',p.enabled,'fingerprint',p.fingerprint,'addresses',json((SELECT json_group_array(json(endpoint)) FROM (SELECT json_object('host',host,'port',port,'transport',transport,'last_result',last_result,'last_attempt',last_attempt,'retry_at',retry_at) endpoint FROM sync_endpoints WHERE peer=p.peer ORDER BY transport,host,port)))) row FROM sync_peers p ORDER BY enabled DESC,label,peer LIMIT 16))))" and [])
+    return result
+
+define sync_endpoint_result with db and peer and host and port and success:
+    set statement to "UPDATE sync_endpoints SET failures=min(failures+1,6),retry_at=unixepoch()+min(300,5*(1 << min(failures,6))),last_result='unavailable',last_attempt=CURRENT_TIMESTAMP WHERE peer=? AND host=? AND port=?"
+    if success:
+        set statement to "UPDATE sync_endpoints SET failures=0,retry_at=0,last_result='transferred',last_attempt=CURRENT_TIMESTAMP WHERE peer=? AND host=? AND port=?"
+    return sync_execute(db and statement and [peer,host,int_to_string(port)])
+
+# Manual sync bypasses backoff; background attempts respect it. USB is preferred,
+# then Wi-Fi, without ever sending a pairing credential to an unpaired device.
+define sync_device_exchange with db and peer and manual and home and runtime_home and token and model_port returning Str:
+    if result_cache_scalar(db and "SELECT count(*) FROM sync_peers WHERE peer=? AND enabled=1" and [peer]) != "1":
+        return result_cache_error("Device is not paired")
+    set rows to sql_query_params(db and "SELECT host,CAST(port AS TEXT) FROM sync_endpoints WHERE peer=? AND (?='1' OR retry_at<=unixepoch()) ORDER BY CASE transport WHEN 'usb' THEN 0 ELSE 1 END,failures,host,port LIMIT 4" and [peer,int_to_string(manual)])
+    set index to 0
+    repeat while index < length_list(rows):
+        set row to get_list(rows and index)
+        set host to get_list(row and 0)
+        set port to string_to_int(get_list(row and 1))
+        set result to sync_service_exchange(db and peer and host and port and home and runtime_home and token and model_port)
+        set success to result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok"
+        if sync_endpoint_result(db and peer and host and port and success) == 0:
+            return result_cache_error("Cannot persist device connection status")
+        if success:
+            return result
+        set index to index + 1
+    return result_cache_error("Paired device is unavailable; local work can continue and sync will retry")

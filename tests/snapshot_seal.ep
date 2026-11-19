@@ -31,9 +31,13 @@ define main:
     seal_assert(snapshot_hash(dir and "../sample.sqlite3") == "" and "parent traversal rejected")
     seal_assert(snapshot_hash(dir and "missing.sqlite3") == "" and "missing snapshot rejected")
     set linked to concat(root and "/linked.sqlite3")
-    seal_assert(ep_dlcall2(ep_dlsym(libc and "link") and path and linked) == 0 and "hardlink created")
-    seal_assert(snapshot_hash(dir and "sample.sqlite3") == "" and "multiply linked snapshot rejected")
-    ep_dlcall1(ep_dlsym(libc and "unlink") and linked)
+    set link_result to ep_dlcall2(ep_dlsym(libc and "link") and path and linked)
+    if link_result == 0:
+        seal_assert(snapshot_hash(dir and "sample.sqlite3") == "" and "multiply linked snapshot rejected")
+        ep_dlcall1(ep_dlsym(libc and "unlink") and linked)
+    else:
+        set link_error to lease_integer(native_errno_pointer() and 0 and 4)
+        seal_assert(native_android() && (link_error == 1 || link_error == 13) and "Android denies hardlink creation before application checks")
     seal_assert(ep_dlcall2(ep_dlsym(libc and "symlink") and path and linked) == 0 and "symlink created")
     seal_assert(snapshot_hash(dir and "linked.sqlite3") == "" and "symlink snapshot rejected")
     ep_dlcall1(ep_dlsym(libc and "unlink") and linked)

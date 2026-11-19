@@ -1,0 +1,233 @@
+# Small JVM class-file backend, authored and executed in Ernos Plain.
+# Version 49 uses verifier-inferred stack frames; Android D8 produces final DEX.
+# Constants are ASCII (a valid subset of modified UTF-8). No source-language glue.
+import "../native_process"
+import "../application_paths"
+set JVM_POOL to []
+set JVM_FIELDS to []
+set JVM_METHODS to []
+set JVM_CODE to []
+set JVM_LABELS to []
+set JVM_FIXUPS to []
+set JVM_OWNER to ""
+set JVM_PARENT to ""
+set JVM_INTERFACES to []
+
+define jvm_bytes with destination and values:
+    set i to 0
+    repeat while i < length_list(values):
+        append_list(destination and get_list(values and i))
+        set i to i + 1
+    return 0
+
+define jvm_u2 with destination and value:
+    append_list(destination and value / 256 % 256)
+    append_list(destination and value % 256)
+    return 0
+
+define jvm_u4 with destination and value:
+    jvm_u2(destination and value / 65536)
+    jvm_u2(destination and value % 65536)
+    return 0
+
+define jvm_pool with bytes:
+    append_list(JVM_POOL and bytes)
+    return length_list(JVM_POOL)
+
+define jvm_utf with value:
+    set bytes to [1]
+    jvm_u2(bytes and string_length(value))
+    set i to 0
+    repeat while i < string_length(value):
+        set c to get_character(value and i)
+        if c < 1 || c > 127:
+            display "JVM backend requires ASCII constant strings"
+            ep_exit(1)
+        append_list(bytes and c)
+        set i to i + 1
+    return jvm_pool(bytes)
+
+define jvm_class with name:
+    set index to jvm_utf(name)
+    set bytes to [7]
+    jvm_u2(bytes and index)
+    return jvm_pool(bytes)
+
+define jvm_reference with tag and owner and name and signature:
+    set kind to jvm_class(owner)
+    set n to jvm_utf(name)
+    set s to jvm_utf(signature)
+    set pair to [12]
+    jvm_u2(pair and n)
+    jvm_u2(pair and s)
+    set index to jvm_pool(pair)
+    set bytes to [tag]
+    jvm_u2(bytes and kind)
+    jvm_u2(bytes and index)
+    return jvm_pool(bytes)
+
+define jvm_begin with owner and parent and interfaces:
+    set JVM_POOL to []
+    set JVM_FIELDS to []
+    set JVM_METHODS to []
+    set JVM_OWNER to owner
+    set JVM_PARENT to parent
+    set JVM_INTERFACES to interfaces
+    return 0
+
+define jvm_field with name and signature:
+    append_list(JVM_FIELDS and [2,jvm_utf(name),jvm_utf(signature),0])
+    return 0
+
+define jvm_method:
+    set JVM_CODE to []
+    set JVM_LABELS to []
+    set JVM_FIXUPS to []
+    return 0
+
+define jvm_emit with bytes:
+    return jvm_bytes(JVM_CODE and bytes)
+
+define jvm_index with opcode and index:
+    jvm_emit([opcode])
+    jvm_u2(JVM_CODE and index)
+    return 0
+
+define jvm_new with kind:
+    return jvm_index(187 and jvm_class(kind))
+
+define jvm_string with value:
+    set index to jvm_utf(value)
+    set bytes to [8]
+    jvm_u2(bytes and index)
+    return jvm_index(19 and jvm_pool(bytes))
+
+define jvm_int with value:
+    set bytes to [3]
+    jvm_u4(bytes and value)
+    return jvm_index(19 and jvm_pool(bytes))
+
+define jvm_call with opcode and owner and name and signature:
+    return jvm_index(opcode and jvm_reference(10 and owner and name and signature))
+
+define jvm_interface with owner and name and signature and slots:
+    jvm_index(185 and jvm_reference(11 and owner and name and signature))
+    jvm_emit([slots,0])
+    return 0
+
+define jvm_access with opcode and owner and name and signature:
+    return jvm_index(opcode and jvm_reference(9 and owner and name and signature))
+
+define jvm_label with name:
+    append_list(JVM_LABELS and [name,length_list(JVM_CODE)])
+    return 0
+
+define jvm_position with name:
+    set i to 0
+    repeat while i < length_list(JVM_LABELS):
+        set label to get_list(JVM_LABELS and i)
+        if string_equals(get_list(label and 0) and name):
+            return get_list(label and 1)
+        set i to i + 1
+    display concat("Unknown JVM label: " and name)
+    ep_exit(1)
+    return 0
+
+define jvm_branch with opcode and label:
+    append_list(JVM_FIXUPS and [length_list(JVM_CODE),label])
+    return jvm_emit([opcode,0,0])
+
+define jvm_end with flags and name and signature and stack and locals and catches:
+    set i to 0
+    repeat while i < length_list(JVM_FIXUPS):
+        set fix to get_list(JVM_FIXUPS and i)
+        set at to get_list(fix and 0)
+        set distance to jvm_position(get_list(fix and 1)) - at
+        if distance < -32768 || distance > 32767:
+            display "JVM branch exceeds signed 16-bit range"
+            ep_exit(1)
+        if distance < 0:
+            set distance to distance + 65536
+        set_list(JVM_CODE and at + 1 and distance / 256)
+        set_list(JVM_CODE and at + 2 and distance % 256)
+        set i to i + 1
+    set code to []
+    jvm_u2(code and stack)
+    jvm_u2(code and locals)
+    jvm_u4(code and length_list(JVM_CODE))
+    jvm_bytes(code and JVM_CODE)
+    jvm_u2(code and length_list(catches))
+    set i to 0
+    repeat while i < length_list(catches):
+        set item to get_list(catches and i)
+        jvm_u2(code and jvm_position(get_list(item and 0)))
+        jvm_u2(code and jvm_position(get_list(item and 1)))
+        jvm_u2(code and jvm_position(get_list(item and 2)))
+        jvm_u2(code and jvm_class(get_list(item and 3)))
+        set i to i + 1
+    jvm_u2(code and 0)
+    set method to []
+    jvm_u2(method and flags)
+    jvm_u2(method and jvm_utf(name))
+    jvm_u2(method and jvm_utf(signature))
+    jvm_u2(method and 1)
+    jvm_u2(method and jvm_utf("Code"))
+    jvm_u4(method and length_list(code))
+    jvm_bytes(method and code)
+    append_list(JVM_METHODS and method)
+    return 0
+
+define jvm_constructor:
+    jvm_method()
+    jvm_emit([42])
+    jvm_call(183 and JVM_PARENT and "<init>" and "()V")
+    jvm_emit([177])
+    return jvm_end(1 and "<init>" and "()V" and 1 and 1 and [])
+
+define jvm_write with path:
+    set owner to jvm_class(JVM_OWNER)
+    set parent to jvm_class(JVM_PARENT)
+    set interfaces to []
+    set i to 0
+    repeat while i < length_list(JVM_INTERFACES):
+        jvm_u2(interfaces and jvm_class(get_list(JVM_INTERFACES and i)))
+        set i to i + 1
+    set bytes to [202,254,186,190,0,0,0,49]
+    jvm_u2(bytes and length_list(JVM_POOL) + 1)
+    set i to 0
+    repeat while i < length_list(JVM_POOL):
+        jvm_bytes(bytes and get_list(JVM_POOL and i))
+        set i to i + 1
+    jvm_u2(bytes and 33)
+    jvm_u2(bytes and owner)
+    jvm_u2(bytes and parent)
+    jvm_u2(bytes and length_list(JVM_INTERFACES))
+    jvm_bytes(bytes and interfaces)
+    jvm_u2(bytes and length_list(JVM_FIELDS))
+    set i to 0
+    repeat while i < length_list(JVM_FIELDS):
+        set field to get_list(JVM_FIELDS and i)
+        set n to 0
+        repeat while n < 4:
+            jvm_u2(bytes and get_list(field and n))
+            set n to n + 1
+        set i to i + 1
+    jvm_u2(bytes and length_list(JVM_METHODS))
+    set i to 0
+    repeat while i < length_list(JVM_METHODS):
+        jvm_bytes(bytes and get_list(JVM_METHODS and i))
+        set i to i + 1
+    jvm_u2(bytes and 0)
+    set buffer to alloc_bytes(length_list(bytes))
+    set i to 0
+    repeat while i < length_list(bytes):
+        poke_byte(buffer and i and get_list(bytes and i))
+        set i to i + 1
+    set fd to native_open(path and 1537 and 420)
+    set written to ep_dlcall3(ep_dlsym(native_system() and "write") and fd and buffer and length_list(bytes))
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    free_bytes(buffer)
+    if written != length_list(bytes):
+        display concat("Cannot write JVM class: " and path)
+        ep_exit(1)
+    return 0

@@ -5,7 +5,10 @@ set WEB_URL_LIBRARY to 0
 
 define web_url_library:
     if WEB_URL_LIBRARY == 0:
-        set WEB_URL_LIBRARY to ep_dlopen("/usr/lib/libcurl.4.dylib")
+        if native_android():
+            set WEB_URL_LIBRARY to ep_dlopen("libecholite_curl.so")
+        else:
+            set WEB_URL_LIBRARY to ep_dlopen("/usr/lib/libcurl.4.dylib")
     return WEB_URL_LIBRARY
 
 define web_url_part with handle and part returning Str:
@@ -29,6 +32,8 @@ define web_url with input and base returning Str:
             return ""
         set i to i + 1
     set library to web_url_library()
+    if library == 0:
+        return ""
     set handle to ep_dlcall0(ep_dlsym(library and "curl_url"))
     if handle == 0:
         return ""

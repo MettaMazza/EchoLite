@@ -19,7 +19,7 @@ define web_file_size with file:
     set info to alloc_bytes(144)
     set size to 0 - 1
     if ep_dlcall2(ep_dlsym(native_system() and "fstat") and fd and info) == 0:
-        set size to lease_integer(info and 96 and 8)
+        set size to native_stat_size(info)
     free_bytes(info)
     return size
 
@@ -41,8 +41,8 @@ define web_transfer_request with db and url and etag and modified returning Str:
         return web_markup_error(db and "Invalid web cache validator")
     set library to web_url_library()
     set libc to native_system()
-    set body to ep_dlcall0(ep_dlsym(libc and "tmpfile"))
-    set headers to ep_dlcall0(ep_dlsym(libc and "tmpfile"))
+    set body to web_temporary_file()
+    set headers to web_temporary_file()
     set handle to ep_dlcall0(ep_dlsym(library and "curl_easy_init"))
     set multi to ep_dlcall0(ep_dlsym(library and "curl_multi_init"))
     set problem to ""
@@ -59,6 +59,15 @@ define web_transfer_request with db and url and etag and modified returning Str:
             if web_setopt(handle and get_list(option and 0) and get_list(option and 1) and get_list(option and 2)) != 0:
                 set problem to "Cannot configure bounded HTTPS transfer"
             set i to i + 1
+        if native_android() && problem == "":
+            set certificates to web_android_certificates()
+            set blob to alloc_bytes(24)
+            native_bytes_write(blob and 0 and str_to_ptr(certificates) and 8)
+            native_bytes_write(blob and 8 and string_length(certificates) and 8)
+            native_bytes_write(blob and 16 and 1 and 4)
+            if certificates == "" || web_setopt(handle and 40309 and blob and 1) != 0:
+                set problem to "Cannot configure Android HTTPS trust store"
+            free_bytes(blob)
         set fields to ["Accept: text/html,text/plain","Accept-Encoding: identity"]
         if etag != "":
             append_list(fields and concat("If-None-Match: " and etag))
@@ -143,3 +152,56 @@ define web_transfer_request with db and url and etag and modified returning Str:
 define web_transfer with db and url returning Str:
     set result to web_transfer_request(db and url and "" and "")
     return result
+
+# Android certificate filenames use the legacy subject hash. Supply their PEM
+# contents to OpenSSL instead of depending on a different hash-directory format.
+define web_android_certificates returning Str:
+    set libc to native_system()
+    set path to "/apex/com.android.conscrypt/cacerts"
+    set directory to ep_dlcall1(ep_dlsym(libc and "opendir") and path)
+    if directory == 0:
+        set path to "/system/etc/security/cacerts"
+        set directory to ep_dlcall1(ep_dlsym(libc and "opendir") and path)
+    if directory == 0:
+        return ""
+    set bundle to create_builder()
+    set size to 0
+    set count to 0
+    set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and directory)
+    repeat while entry != 0 && size <= 2097152 && count < 1024:
+        set name to native_dirent_name(entry)
+        if name != "." && name != "..":
+            set certificate to read_file(concat(path and concat("/" and name)))
+            if string_contains(certificate and "-----BEGIN CERTIFICATE-----"):
+                builder_append(bundle and certificate)
+                builder_append(bundle and "\n")
+                set size to size + string_length(certificate) + 1
+            set count to count + 1
+        set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and directory)
+    ep_dlcall1(ep_dlsym(libc and "closedir") and directory)
+    set result to builder_to_string(bundle)
+    if size > 2097152 || count >= 1024:
+        return ""
+    return result
+
+# Android apps use private anonymous storage for bounded HTTPS responses.
+define web_temporary_file:
+    set libc to native_system()
+    if native_android() == 0:
+        return ep_dlcall0(ep_dlsym(libc and "tmpfile"))
+    set home to get_env("ECHOLITE_HOME")
+    if home == "":
+        return 0
+    set template to concat(home and "/.https-XXXXXX")
+    set path to alloc_bytes(string_length(template) + 1)
+    ep_dlcall3(ep_dlsym(libc and "memcpy") and path and template and string_length(template) + 1)
+    set descriptor to native_signed_int(ep_dlcall1(ep_dlsym(libc and "mkstemp") and path))
+    set stream to 0
+    if descriptor >= 0:
+        set removed to ep_dlcall1(ep_dlsym(libc and "unlink") and path)
+        if removed == 0:
+            set stream to ep_dlcall2(ep_dlsym(libc and "fdopen") and descriptor and "w+b")
+        if stream == 0:
+            ep_dlcall1(ep_dlsym(libc and "close") and descriptor)
+    free_bytes(path)
+    return stream

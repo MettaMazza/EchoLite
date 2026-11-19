@@ -1,0 +1,85 @@
+EchoLite Android background synchronization
+
+Implementation
+The Ernos Plain packaging toolchain now emits Android lifecycle class files
+straight from EP. src/android/jvm_class.ep implements the class-file writer and
+bytecode assembler; service_classes.ep defines the activity, receiver and service.
+D8 converts these generated files alongside the existing upstream SDL dependency.
+There is no authored Java/Kotlin adapter, Python service or scripting runtime.
+This is a scoped Android class-generation backend, not a general JVM replacement
+for the existing native EP compiler.
+
+SyncService runs in the separate :sync process as a connectedDevice foreground
+service. It starts the native EP sync agent, supervises it every five seconds,
+and returns START_STICKY. Closing/swiping away the chat activity does not stop it.
+The notification opens the chat. BOOT_COMPLETED (after unlock) and
+MY_PACKAGE_REPLACED receivers start the service when a local database exists.
+The activity also starts it, and the EP UI ensures startup after initialization.
+The service itself does not load the language, embedding or voice models.
+
+The native child is tied to the service parent using PR_SET_PDEATHSIG and a
+parent-PID check. A killed service cannot leave an orphan holding the sync lock.
+Service restart creates a fresh supervised child. A killed child is restarted
+at the next supervision tick. Existing authenticated pairing, state leases,
+USB priority and automatic Wi-Fi discovery remain in sync_agent.ep.
+Android's Context storage alias is canonicalized before secure SQLite opens.
+
+Power and user control
+Android requires a visible foreground-service notification; notification
+permission should be allowed. The service renews a non-reference-counted partial
+wake lock with a 20-second timeout while running, so the native worker can receive
+connections with the screen off. It releases it on destruction; process death
+also releases it. Keeping background sync available has a battery cost.
+Android's Active apps / Stop or Force stop remains authoritative: after a user
+explicitly stops the app, reopen it to resume. The service does not bypass that.
+
+REDMAGIC configuration
+App info > App battery usage > Battery optimization:
+- Auto-start: Allowed
+- Background running: Allowed
+- Secondary launch: Allowed
+Allow EchoLite notifications. On the tested device Background running Allowed
+also added the app to the Android device-idle allowlist. Without Auto-start,
+the vendor dropped MY_PACKAGE_REPLACED with the recorded reason 'autolaunch
+policy'; changing the per-app setting is necessary for automatic receiver starts.
+Secondary launch also had to be Allowed: Auto-start alone still blocked the
+package-update receiver. With all three allowed, Android started :sync directly
+from the update receiver while the chat process remained absent.
+These are per-device preferences, not permissions silently enforced by app code.
+
+Build and checks
+The standard src/android/build_chat.ep pipeline compiles the EP generator,
+emits three class files, runs D8, then packages/signs the native APK.
+tests/android_jvm.ep emits EpBackendProbe.class. Running it with
+java -Xverify:all exercises fields, object construction, forward/backward branches,
+method calls and exception tables. Android ART verifies the generated components
+again when the installed application/service runs.
+
+The model context and model selection are unchanged by this update.
+
+Validation completed (2026-11-19, Europe/London)
+- JVM -Xverify:all backend probe passed; D8 packaging/signature checks passed;
+  Android ART loaded the generated components successfully.
+- Auto-start, Secondary launch and Background running are Allowed. Notification
+  permission is granted and the app is on the device-idle allowlist.
+- Reinstalling the final APK triggered the actual MY_PACKAGE_REPLACED receiver.
+  Android started :sync as a connectedDevice foreground service, without opening
+  the activity. Its recorded start reason was SYSTEM_ALLOW_LISTED.
+- With no chat process and Android reporting Dozing before/after, a new Mac
+  record reached the phone automatically over USB within the seven-second check.
+- With EchoLite's USB route removed, no chat process, and Dozing before/after,
+  a fresh Mac record reached the phone over Wi-Fi within the twenty-second check.
+  A prior Android-originated Wi-Fi record also reached Mac while the UI was absent.
+- Killing the worker caused the existing service to create a new worker. USB
+  exchange resumed, and the screen remained Dozing.
+- Killing the service caused Android's START_STICKY restart to create a new
+  service and worker. Both old PIDs disappeared; the parent-death binding prevented
+  an orphan from retaining the singleton. USB exchange resumed with no UI launch
+  and the screen remained Dozing.
+- Normal USB configuration was restored. Test records were forgotten using the
+  normal core and removal was checked on both devices after automatic sync.
+
+The screen-off checks exercise ordinary screen-off operation on this configured
+phone, not a multi-hour endurance run. A phone reboot was not performed; boot
+receiver registration shares the tested receiver/start path but has no separate
+reboot execution result. Explicit Android Force stop remains user-controlled.

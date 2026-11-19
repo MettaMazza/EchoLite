@@ -1,0 +1,140 @@
+# Finalized conversation history only. No imported row launches a worker or tool.
+# Pending/running remote records remain durable in the frontier until finalized.
+import "sync_me"
+
+define sync_history_reference with db and payload and field and kind:
+    set rows to sql_query_params(db and "SELECT j.type,j.value FROM json_each(?) j WHERE j.key=?" and [payload,field])
+    if length_list(rows) != 1:
+        return 0
+    set row to get_list(rows and 0)
+    if get_list(row and 0) == "null":
+        return 1
+    if get_list(row and 0) != "text" || sync_identifier(db and get_list(row and 1)) == 0:
+        return 0
+    set found to result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE object=? AND kind=? AND deleted=0" and [get_list(row and 1),kind])
+    return found == "1"
+
+define sync_history_allocate with db and object and kind returning Str:
+    set table to ""
+    if kind == "turn":
+        set table to "turns"
+    else if kind == "tool_run":
+        set table to "tool_runs"
+    else:
+        return ""
+    set id to result_cache_scalar(db and "SELECT local_id FROM sync_local_ids WHERE object=? AND kind=? AND deleted=0" and [object,kind])
+    if id != "":
+        return id
+    if result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE object=?" and [object]) != "0":
+        return ""
+    set statement to concat("SELECT max(coalesce((SELECT max(id) FROM " and concat(table and "),0),coalesce((SELECT seq FROM sqlite_sequence WHERE name=?),0),coalesce((SELECT max(local_id) FROM sync_local_ids WHERE kind=?),0))+1"))
+    set id to result_cache_scalar(db and statement and [table,kind])
+    if sync_execute(db and "INSERT INTO sync_local_ids(kind,local_id,object,dirty) VALUES(?,?,?,0)" and [kind,id,object]) == 0:
+        return ""
+    return id
+
+define sync_turn_assets with db and payload and field:
+    if field != "images" && field != "documents":
+        return 0
+    set items to sql_query_params(db and "SELECT j.type,j.value FROM json_each(?, '$.'||?) j" and [payload,field])
+    set index to 0
+    repeat while index < length_list(items):
+        set row to get_list(items and index)
+        if get_list(row and 0) != "object":
+            return 0
+        set item to get_list(row and 1)
+        if result_cache_scalar(db and "SELECT (SELECT count(*)=2 AND count(DISTINCT key)=2 AND min(key IN ('memory','sha256')) FROM json_each(p)) AND json_type(p,'$.memory')='text' AND json_type(p,'$.sha256')='text' AND length(json_extract(p,'$.sha256'))=64 AND json_extract(p,'$.sha256') NOT GLOB '*[^0-9a-f]*' FROM (SELECT ? p)" and [item]) != "1" || sync_history_reference(db and item and "memory" and "memory") == 0:
+            return 0
+        set found to ""
+        if field == "images":
+            set found to result_cache_scalar(db and "SELECT count(*) FROM image_assets a JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=a.memory AND i.deleted=0 WHERE i.object=json_extract(?,'$.memory') AND a.payload_sha256=json_extract(?,'$.sha256') AND a.project=json_extract(?,'$.project')" and [item,item,payload])
+        else:
+            set found to result_cache_scalar(db and "SELECT count(*) FROM documents a JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=a.memory AND i.deleted=0 WHERE i.object=json_extract(?,'$.memory') AND a.sha256=json_extract(?,'$.sha256') AND a.project=json_extract(?,'$.project')" and [item,item,payload])
+        if found != "1":
+            return 0
+        set index to index + 1
+    return result_cache_scalar(db and "SELECT count(*)=count(DISTINCT json_extract(value,'$.memory')) FROM json_each(?, '$.'||?)" and [payload,field]) == "1"
+
+define sync_turn_apply with db and object and payload returning Str:
+    if result_cache_scalar(db and "SELECT (SELECT count(*)=11 AND count(DISTINCT key)=11 AND min(key IN ('schema','project','user','reply','identity','status','created','answer_basis','session','images','documents')) FROM json_each(p)) AND json_type(p,'$.schema')='integer' AND json_extract(p,'$.schema')=1 AND json_type(p,'$.project')='text' AND json_type(p,'$.user')='text' AND json_type(p,'$.identity')='text' AND json_type(p,'$.created')='text' AND json_type(p,'$.answer_basis') IN ('null','text') AND json_type(p,'$.images')='array' AND json_type(p,'$.documents')='array' FROM (SELECT ? p)" and [payload]) != "1":
+        return "Invalid conversation snapshot"
+    if result_cache_scalar(db and "SELECT json_extract(p,'$.status') IN ('completed','failed','abandoned') AND (json_extract(p,'$.status')!='completed' OR json_type(p,'$.reply')='text') FROM (SELECT ? p)" and [payload]) != "1":
+        return "Waiting for a finalized remote turn"
+    if sync_history_reference(db and payload and "user" and "memory") == 0 || sync_history_reference(db and payload and "reply" and "memory") == 0 || sync_history_reference(db and payload and "identity" and "identity") == 0 || sync_history_reference(db and payload and "session" and "memory") == 0:
+        return "Waiting for conversation dependencies"
+    if result_cache_scalar(db and "SELECT count(*) FROM json_each(?) j JOIN sync_local_ids i ON i.object=j.value AND i.kind='memory' JOIN memories m ON m.id=i.local_id WHERE j.key IN ('user','reply','session') AND m.project!=json_extract(?,'$.project')" and [payload,payload]) != "0":
+        return "Conversation reference crosses project boundaries"
+    if result_cache_scalar(db and "SELECT json_type(?,'$.session')" and [payload]) == "text" && result_cache_scalar(db and "SELECT count(*) FROM sessions s JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=s.memory WHERE i.object=json_extract(?,'$.session')" and [payload]) != "1":
+        return "Waiting for conversation session"
+    if sync_turn_assets(db and payload and "images") == 0 || sync_turn_assets(db and payload and "documents") == 0:
+        return "Waiting for verified conversation attachments"
+    set id to sync_history_allocate(db and object and "turn")
+    if id == "":
+        return "Cannot allocate local turn identity"
+    if sync_execute(db and "INSERT INTO turns(id,project,user_memory,reply_memory,me_version,status,created,answer_basis) SELECT ?,json_extract(p,'$.project'),(SELECT local_id FROM sync_local_ids WHERE object=json_extract(p,'$.user') AND kind='memory'),(SELECT local_id FROM sync_local_ids WHERE object=json_extract(p,'$.reply') AND kind='memory'),(SELECT local_id FROM sync_local_ids WHERE object=json_extract(p,'$.identity') AND kind='identity'),json_extract(p,'$.status'),json_extract(p,'$.created'),json_extract(p,'$.answer_basis') FROM (SELECT ? p) WHERE 1 ON CONFLICT(id) DO UPDATE SET project=excluded.project,user_memory=excluded.user_memory,reply_memory=excluded.reply_memory,me_version=excluded.me_version,status=excluded.status,created=excluded.created,answer_basis=excluded.answer_basis" and [id,payload]) == 0:
+        return "Cannot apply conversation turn"
+    if sync_execute(db and "DELETE FROM session_turns WHERE turn_id=?" and [id]) == 0 || sync_execute(db and "INSERT INTO session_turns(turn_id,session) SELECT ?,local_id FROM sync_local_ids WHERE object=json_extract(?,'$.session') AND kind='memory' AND deleted=0" and [id,payload]) == 0:
+        return "Cannot restore conversation membership"
+    if sync_execute(db and "DELETE FROM turn_images WHERE turn_id=?" and [id]) == 0 || sync_execute(db and "DELETE FROM turn_documents WHERE turn_id=?" and [id]) == 0:
+        return "Cannot replace conversation attachment links"
+    if sync_execute(db and "INSERT INTO turn_images(turn_id,image,sha256) SELECT ?,i.local_id,json_extract(j.value,'$.sha256') FROM json_each(?,'$.images') j JOIN sync_local_ids i ON i.object=json_extract(j.value,'$.memory') AND i.kind='memory' AND i.deleted=0" and [id,payload]) == 0 || sync_execute(db and "INSERT INTO turn_documents(turn_id,document,sha256) SELECT ?,i.local_id,json_extract(j.value,'$.sha256') FROM json_each(?,'$.documents') j JOIN sync_local_ids i ON i.object=json_extract(j.value,'$.memory') AND i.kind='memory' AND i.deleted=0" and [id,payload]) == 0:
+        return "Cannot restore verified attachment links"
+    return ""
+
+define sync_receipt_apply with db and object and payload returning Str:
+    if result_cache_scalar(db and "SELECT (SELECT count(*)=9 AND count(DISTINCT key)=9 AND min(key IN ('schema','turn','name','arguments','status','observation','request','started','finished')) FROM json_each(p)) AND json_type(p,'$.schema')='integer' AND json_extract(p,'$.schema')=1 AND json_type(p,'$.turn')='text' AND json_type(p,'$.name')='text' AND length(json_extract(p,'$.name')) BETWEEN 1 AND 128 AND json_type(p,'$.arguments')='text' AND json_type(p,'$.started')='text' AND json_type(p,'$.finished') IN ('null','text') FROM (SELECT ? p)" and [payload]) != "1":
+        return "Invalid tool receipt snapshot"
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status') IN ('completed','failed','interrupted','unknown_after_restore')" and [payload]) != "1":
+        return "Waiting for a finalized remote tool receipt"
+    if sync_history_reference(db and payload and "turn" and "turn") == 0 || sync_history_reference(db and payload and "observation" and "memory") == 0 || sync_history_reference(db and payload and "request" and "memory") == 0:
+        return "Waiting for tool receipt dependencies"
+    if result_cache_scalar(db and "SELECT count(*) FROM turns t JOIN sync_local_ids i ON i.kind='turn' AND i.local_id=t.id AND i.deleted=0 WHERE i.object=json_extract(?,'$.turn') AND t.status IN ('completed','failed','abandoned')" and [payload]) != "1":
+        return "Waiting for finalized conversation history"
+    if result_cache_scalar(db and "SELECT count(*) FROM json_each(?) j JOIN sync_local_ids m ON m.kind='memory' AND m.object=j.value JOIN memories a ON a.id=m.local_id WHERE j.key IN ('request','observation') AND a.project!=(SELECT t.project FROM turns t JOIN sync_local_ids i ON i.kind='turn' AND i.local_id=t.id WHERE i.object=json_extract(?,'$.turn'))" and [payload,payload]) != "0":
+        return "Tool receipt reference crosses project boundaries"
+    set id to sync_history_allocate(db and object and "tool_run")
+    if id == "":
+        return "Cannot allocate historical tool receipt"
+    if result_cache_scalar(db and "SELECT count(*) FROM process_operations WHERE operation_id=?" and [id]) != "0":
+        return "Historical receipt cannot replace locally managed process state"
+    if sync_execute(db and "INSERT INTO tool_runs(id,turn_id,name,arguments,status,observation,request_memory,started,finished) SELECT ?,(SELECT local_id FROM sync_local_ids WHERE object=json_extract(p,'$.turn') AND kind='turn'),json_extract(p,'$.name'),json_extract(p,'$.arguments'),json_extract(p,'$.status'),(SELECT local_id FROM sync_local_ids WHERE object=json_extract(p,'$.observation') AND kind='memory'),(SELECT local_id FROM sync_local_ids WHERE object=json_extract(p,'$.request') AND kind='memory'),json_extract(p,'$.started'),json_extract(p,'$.finished') FROM (SELECT ? p) WHERE 1 ON CONFLICT(id) DO UPDATE SET turn_id=excluded.turn_id,name=excluded.name,arguments=excluded.arguments,status=excluded.status,observation=excluded.observation,request_memory=excluded.request_memory,started=excluded.started,finished=excluded.finished" and [id,payload]) == 0:
+        return "Cannot apply historical tool receipt"
+    return ""
+
+define sync_project_history with db and object and kind returning Str:
+    if kind != "turn" && kind != "tool_run":
+        return result_cache_error("Unsupported history projection kind")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot lock conversation projection")
+    set problem to ""
+    set versions to sql_query_params(db and "SELECT v.payload FROM sync_versions v JOIN sync_objects o ON o.id=v.object WHERE o.id=? AND o.kind=? AND o.deleted=0" and [object,kind])
+    if length_list(versions) != 1:
+        set problem to "Conversation needs conflict or deletion reconciliation"
+    else if result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE object=? AND (dirty=1 OR deleted=1)" and [object]) != "0":
+        set problem to "Local conversation change needs reconciliation"
+    else if result_cache_scalar(db and "SELECT applied_heads FROM sync_local_ids WHERE object=?" and [object]) == sync_heads(db and object):
+        set problem to ""
+    else:
+        if sql_execute(db and "UPDATE sync_meta SET value='1' WHERE key='projecting'") != 0:
+            set problem to "Cannot isolate conversation projection"
+        else:
+            if kind == "turn":
+                set problem to sync_turn_apply(db and object and get_list(get_list(versions and 0) and 0))
+            else:
+                set problem to sync_receipt_apply(db and object and get_list(get_list(versions and 0) and 0))
+            if problem == "" && sync_execute(db and "UPDATE sync_local_ids SET dirty=0,applied_heads=? WHERE object=?" and [sync_heads(db and object),object]) == 0:
+                set problem to "Cannot acknowledge conversation projection"
+    if problem == "" && sql_execute(db and "UPDATE sync_meta SET value='0' WHERE key='projecting'") != 0:
+        set problem to "Cannot finish conversation projection"
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        if problem == "":
+            set problem to "Cannot commit conversation projection"
+        return result_cache_error(problem)
+    return result_cache_scalar(db and "SELECT json_object('status','ok',?,local_id,'object',object) FROM sync_local_ids WHERE object=?" and [kind,object])
+
+define sync_project_turn with db and object returning Str:
+    return sync_project_history(db and object and "turn")
+
+define sync_project_receipt with db and object returning Str:
+    return sync_project_history(db and object and "tool_run")

@@ -18,8 +18,8 @@ define main:
         return 1
     if ep_dlcall1(ep_dlsym(native_system() and "chdir") and root) != 0:
         return 1
-    set sources to ["echolite","runtime_manager","interface","launcher","pdf_worker","docx_worker","process_supervisor","image_worker","browser"]
-    set outputs to ["echolite-core","echolite-runtime","echolite-ui","echolite-launch","echolite-pdf","echolite-docx","echolite-process","echolite-image","echolite-browser"]
+    set sources to ["echolite","runtime_manager","interface","launcher","pdf_worker","docx_worker","process_supervisor","image_worker","browser","speech_worker","sync_agent","setup_library"]
+    set outputs to ["echolite-core","echolite-runtime","echolite-ui","echolite-launch","echolite-pdf","echolite-docx","echolite-process","echolite-image","echolite-browser","echolite-speech","echolite-sync","echolite-library"]
     set i to 0
     repeat while i < length_list(sources):
         set source to concat(root and concat("/src/" and get_list(sources and i)))

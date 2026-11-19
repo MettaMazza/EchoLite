@@ -1,3 +1,4 @@
+import "ui_viewport"
 import "ui_style"
 import "chat_sources"
 set SOURCES_OPEN to ""
@@ -16,7 +17,7 @@ define ui_sources with db and turn_id and sources and x and y and width:
         return y
     set y to y + 18
     set opened to string_equals(SOURCES_OPEN and turn_id)
-    set hovered to raylib_get_mouse_x() >= x && raylib_get_mouse_x() < x + width && raylib_get_mouse_y() >= y && raylib_get_mouse_y() < y + 36 && raylib_get_mouse_y() >= SELECT_TOP && raylib_get_mouse_y() < SELECT_BOTTOM
+    set hovered to ui_mouse_x() >= x && ui_mouse_x() < x + width && ui_mouse_y() >= y && ui_mouse_y() < y + 36 && ui_mouse_y() >= SELECT_TOP && ui_mouse_y() < SELECT_BOTTOM
     set fill to ui_color(28 and 34 and 39)
     if hovered:
         set fill to ui_color(35 and 43 and 47)
@@ -26,7 +27,7 @@ define ui_sources with db and turn_id and sources and x and y and width:
     if opened:
         set arrow to "v"
     font_draw(concat(arrow and concat("  Sources / " and int_to_string(length_list(rows)))) and x + 14 and y + 11 and 13 and ui_color(189 and 229 and 201))
-    if hovered && raylib_is_mouse_button_pressed(0):
+    if hovered && ui_mouse_pressed():
         set SOURCES_OPEN to ""
         if opened == 0:
             set SOURCES_OPEN to turn_id
@@ -46,7 +47,7 @@ define ui_sources with db and turn_id and sources and x and y and width:
             set detail to concat(detail and concat(" / snapshot " and get_list(row and 2)))
         set title_lines to layout_lines(title and width - 88 and 15)
         set card_height to length_list(title_lines) * 24 + 42
-        set inside to raylib_get_mouse_x() >= x && raylib_get_mouse_x() < x + width - 58 && raylib_get_mouse_y() >= y && raylib_get_mouse_y() < y + card_height && raylib_get_mouse_y() >= SELECT_TOP && raylib_get_mouse_y() < SELECT_BOTTOM
+        set inside to ui_mouse_x() >= x && ui_mouse_x() < x + width - 58 && ui_mouse_y() >= y && ui_mouse_y() < y + card_height && ui_mouse_y() >= SELECT_TOP && ui_mouse_y() < SELECT_BOTTOM
         set fill to ui_color(24 and 29 and 34)
         if inside:
             set fill to ui_color(31 and 41 and 39)
@@ -58,13 +59,15 @@ define ui_sources with db and turn_id and sources and x and y and width:
             set line_i to line_i + 1
         font_draw(ui_text_fit(detail and width - 40 and 11) and x + 16 and y + card_height - 20 and 11 and ui_color(148 and 159 and 169))
         font_draw("Copy" and x + width - 48 and y + 14 and 11 and ui_color(148 and 159 and 169))
-        if raylib_is_mouse_button_pressed(0) && raylib_get_mouse_y() >= SELECT_TOP && raylib_get_mouse_y() < SELECT_BOTTOM:
+        if ui_mouse_pressed() && ui_mouse_y() >= SELECT_TOP && ui_mouse_y() < SELECT_BOTTOM:
             if inside && SOURCE_CHILD == 0:
                 set SOURCE_CHILD to source_open(url)
                 set SOURCE_NOTICE to ""
                 if SOURCE_CHILD == 0:
                     set SOURCE_NOTICE to "This source cannot be opened. Use Copy to inspect its link."
-            else if raylib_get_mouse_x() >= x + width - 58 && raylib_get_mouse_x() < x + width && raylib_get_mouse_y() >= y && raylib_get_mouse_y() < y + card_height:
+                else if SOURCE_CHILD == 0 - 1:
+                    set SOURCE_CHILD to 0
+            else if ui_mouse_x() >= x + width - 58 && ui_mouse_x() < x + width && ui_mouse_y() >= y && ui_mouse_y() < y + card_height:
                 ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and url)
                 set SOURCE_NOTICE to "Source link copied."
         set y to y + card_height + 8

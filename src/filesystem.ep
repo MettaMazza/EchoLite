@@ -70,11 +70,11 @@ define filesystem_read with db and path and offset returning Str:
     set size to 0
     if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0:
         set problem to "Cannot inspect the opened file"
-    else if lease_integer(info and 4 and 2) / 4096 != 8:
+    else if native_stat_mode(info) / 4096 != 8:
         set problem to "Only regular text files can be read"
     else:
         set before to filesystem_signature(db and info)
-        set size to lease_integer(info and 96 and 8)
+        set size to native_stat_size(info)
         if offset > size:
             set problem to "Offset is beyond the file end"
     set data to alloc_bytes(4097)
@@ -133,7 +133,7 @@ define filesystem_list with db and path and after returning Str:
     sql_execute(db and "CREATE TEMP TABLE IF NOT EXISTS ep_directory_page(name TEXT PRIMARY KEY COLLATE BINARY); DELETE FROM ep_directory_page;")
     set count to 0
     set ended to 0
-    set errno_pointer to ep_dlcall0(ep_dlsym(libc and "__error"))
+    set errno_pointer to native_errno_pointer()
     repeat while ended == 0 && problem == "":
         native_bytes_write(errno_pointer and 0 and 0 and 4)
         set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and directory)
@@ -142,7 +142,7 @@ define filesystem_list with db and path and after returning Str:
             if lease_integer(errno_pointer and 0 and 4) != 0:
                 set problem to "Directory scan failed; retry"
         else:
-            set name to ptr_to_str(entry + 21)
+            set name to native_dirent_name(entry)
             if name != "." && name != "..":
                 set count to count + 1
                 if count > 10000:

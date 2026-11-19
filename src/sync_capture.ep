@@ -1,0 +1,36 @@
+# Atomically snapshot a local edit into the replica frontier. A stale projection
+# must be reconciled before capture; never join an unseen remote branch silently.
+# snapshot_query is a trusted application SELECT with one local-ID parameter,
+# never received from a peer. Evaluate it under the write lock, not beforehand.
+import "sync_identity"
+
+define sync_capture_record with db and kind and local_id and snapshot_query returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot lock application sync snapshot")
+    set rows to sql_query_params(db and "SELECT object,deleted,dirty,applied_heads FROM sync_local_ids WHERE kind=? AND local_id=?" and [kind,local_id])
+    set problem to ""
+    set object to ""
+    if length_list(rows) != 1:
+        set problem to "Application record has no stable identity"
+    else:
+        set row to get_list(rows and 0)
+        set object to get_list(row and 0)
+        if get_list(row and 2) == "1":
+            if get_list(row and 1) == "1":
+                set tombstone to result_cache_scalar(db and "SELECT json_object('id',?,'kind',?,'deleted',1,'versions',json('[]'))" and [object,kind])
+                set problem to sync_merge_record(db and tombstone)
+            else:
+                set expected to get_list(row and 3)
+                if expected == "" && result_cache_scalar(db and "SELECT count(*) FROM sync_objects WHERE id=?" and [object]) == "0":
+                    set expected to sync_heads(db and object)
+                set payload to result_cache_scalar(db and snapshot_query and [local_id])
+                set problem to sync_write_transaction(db and object and kind and payload and expected)
+            if problem == "":
+                if sync_execute(db and "UPDATE sync_local_ids SET dirty=0,applied_heads=? WHERE object=?" and [sync_heads(db and object),object]) == 0:
+                    set problem to "Cannot acknowledge captured application edit"
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        if problem == "":
+            set problem to "Cannot commit application sync snapshot"
+        return result_cache_error(problem)
+    return sync_record(db and object)

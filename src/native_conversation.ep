@@ -1,3 +1,4 @@
+import "model_profile"
 import "native_actions"
 import "generation_settings"
 import "network_policy"
@@ -70,6 +71,14 @@ define conversation_messages with db and request returning Str:
         set budget to concat(budget and concat(" CURRENT PHASE: EXECUTE NOW. The local scheduler has already dispatched task " and concat(scheduled_task and ". You are the executor, not a separate scheduler. Earlier armed/scheduled notices and requests to defer were historical. The saved objective is now due. Perform the work using the required tools, then task_update this existing task using the successful work receipt as evidence_id. If it cannot proceed, task_update waiting or failed with the actual blocker. Do not answer that a future scheduler will do it. Do not create or schedule another task.")))
     return conversation_append(db and messages and "user" and budget)
 
+
+# Qwen general-thinking sampling; these values are included in the cache key.
+define conversation_payload with db and messages and schema and settings returning Str:
+    set payload to result_cache_scalar(db and "SELECT json_object('messages',json(?),'response_format',json_object('type','json_schema','json_schema',json_object('name','echolite_action','strict',json('true'),'schema',json(?))),'max_tokens',json_extract(?,'$.max_tokens'),'reasoning_budget_tokens',json_extract(?,'$.reasoning_budget_tokens'),'temperature',1.0,'top_p',0.95,'top_k',20,'min_p',0.0,'presence_penalty',1.5,'repeat_penalty',1.0,'stream',json('true'),'stream_options',json_object('include_usage',json('true')),'cache_prompt',json('true'))" and [messages,schema,settings,settings])
+    if payload == "":
+        return "{}"
+    return payload
+
 define native_conversation_generate with db and token and request and updates returning Str:
     set settings to generation_settings(db)
     if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [settings]) != "ok":
@@ -81,12 +90,16 @@ define native_conversation_generate with db and token and request and updates re
     if result_cache_scalar(db and "SELECT json_extract(?,'$.mode')" and [request]) == "reflect":
         set messages to conversation_append(db and messages and "user" and "This is an explicit self-reflection request. Return an answer with basis conversation. Its text must be the complete revised Me identity, at most 1200 tokens measured with your tokenizer (and within 16000 UTF-8 bytes), without commentary or formatting fences. Preserve stable commitments unless the stated intention gives a reason to revise them.")
         set schema to "{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"type\":{\"const\":\"answer\"},\"basis\":{\"enum\":[\"conversation\"]},\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":16000}},\"required\":[\"type\",\"basis\",\"text\"],\"additionalProperties\":false}]}"
-    set payload to result_cache_scalar(db and "SELECT json_object('messages',json(?),'response_format',json_object('type','json_schema','json_schema',json_object('name','echolite_action','strict',json('true'),'schema',json(?))),'max_tokens',json_extract(?,'$.max_tokens'),'reasoning_budget_tokens',json_extract(?,'$.reasoning_budget_tokens'),'temperature',0,'stream',json('true'),'stream_options',json_object('include_usage',json('true')),'cache_prompt',json('true'))" and [messages,schema,settings,settings])
+    set payload to conversation_payload(db and messages and schema and settings)
     set epoch to result_cache_scalar(db and "SELECT json_extract(?,'$.cache_epoch')" and [request])
     set turn to result_cache_scalar(db and "SELECT COALESCE(json_extract(?,'$.turn_id'),'')" and [request])
     set round to result_cache_scalar(db and "SELECT COALESCE(json_extract(?,'$.tool_round'),'0')" and [request])
     progress_scope(turn and round and epoch)
-    set result to native_model_cached(db and token and payload and "native-qwen-8d43d974-b12359-kvq4cpu-thinking-config-actions-v2" and epoch and updates)
+    set namespace to profile_active_namespace(db and token)
+    if namespace == "":
+        progress_scope("" and "" and "")
+        return lease_error("Cannot identify the active local model for persistent caching")
+    set result to native_model_cached(db and token and payload and namespace and epoch and updates)
     progress_scope("" and "" and "")
     if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) != "ok":
         return result

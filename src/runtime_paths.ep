@@ -1,0 +1,63 @@
+import "state_lock"
+import "string"
+import "native_process"
+import "fs"
+import "os"
+
+# Android executes packaged native libraries, while writable assets stay in files/.
+# Resolve the running executable through the kernel rather than trusting argv[0].
+define runtime_native_directory returning Str:
+    set storage to alloc_bytes(4096)
+    set used to native_signed_int(ep_dlcall3(ep_dlsym(native_system() and "readlink") and "/proc/self/exe" and storage and 4095))
+    set directory to ""
+    if used > 0 && used < 4095:
+        poke_byte(storage and used and 0)
+        set directory to path_dirname(ptr_to_str(storage))
+    free_bytes(storage)
+    return directory
+
+define runtime_model_path with root and name returning Str:
+    if native_android():
+        return concat(root and concat("/models/" and name))
+    return concat(root and concat("/models/native/" and name))
+
+define runtime_worker_path with root returning Str:
+    if native_android():
+        set directory to runtime_native_directory()
+        if directory == "":
+            return ""
+        return concat(directory and "/libllama-server.so")
+    return concat(root and "/models/runtime/llama-b12359/llama-server")
+
+define runtime_lock_directory with root and home returning Str:
+    if native_android():
+        return home
+    return concat(root and "/models/runtime")
+
+# Android exposes the same app files through /data/data and /data/user/0 bind
+# mounts. String or realpath equality alone cannot identify those aliases.
+define runtime_same_model with expected and loaded:
+    if string_equals(expected and loaded):
+        return 1
+    if expected == "" || loaded == "":
+        return 0
+    set first to native_open(expected and 256 and 0)
+    if first < 0:
+        return 0
+    set second to native_open(loaded and 256 and 0)
+    set matches to 0
+    if second >= 0:
+        set a to alloc_bytes(256)
+        set b to alloc_bytes(256)
+        set stat to ep_dlsym(native_system() and "fstat")
+        if ep_dlcall2(stat and first and a) == 0 && ep_dlcall2(stat and second and b) == 0:
+            set device_bytes to 4
+            if native_android():
+                set device_bytes to 8
+            if native_stat_mode(a) / 4096 % 16 == 8 && native_stat_mode(b) / 4096 % 16 == 8:
+                set matches to lease_integer(a and 0 and device_bytes) == lease_integer(b and 0 and device_bytes) && lease_integer(a and 8 and 8) == lease_integer(b and 8 and 8)
+        free_bytes(a)
+        free_bytes(b)
+        ep_dlcall1(ep_dlsym(native_system() and "close") and second)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and first)
+    return matches

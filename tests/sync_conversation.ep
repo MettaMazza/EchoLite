@@ -1,0 +1,74 @@
+import "../src/sync_conversation"
+import "os"
+set checks to 0
+
+define turn_sync_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define turn_sync_ok with db and result:
+    set status to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.status'),'ok')" and [result])
+    if status == "error":
+        return 0
+    return 1
+
+define turn_sync_transfer with a and b:
+    set peer to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set cursor to result_cache_scalar(b and "SELECT coalesce((SELECT cursor FROM sync_cursors WHERE peer=?),0)" and [peer])
+    turn_sync_assert(turn_sync_ok(b and sync_import(b and peer and sync_export(a and cursor))) and "conversation frontier transfer")
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: sync_conversation EMPTY_APP_DB_A EMPTY_APP_DB_B"
+        return 1
+    set a to sql_open(get_list(args and 1))
+    set b to sql_open(get_list(args and 2))
+    sql_execute(a and "PRAGMA foreign_keys=ON")
+    sql_execute(b and "PRAGMA foreign_keys=ON")
+    turn_sync_assert(sync_application_init(a) && sync_application_init(b) and "real application schemas")
+    turn_sync_assert(sql_execute(a and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','sync-chat','user-message','Hello from the other device'),('episodic','sync-chat','assistant','Hello 🌱'),('working','sync-chat','session','Synced conversation'); INSERT INTO sessions(memory,project,closed) VALUES(3,'sync-chat','2026-11-19T00:00:00Z'); INSERT INTO turns(project,user_memory,me_version,status) VALUES('sync-chat',1,1,'pending'); INSERT INTO session_turns VALUES(1,3);") == 0 and "pending remote conversation")
+    set user to sync_identity_get(a and "memory" and "1")
+    set reply to sync_identity_get(a and "memory" and "2")
+    set session to sync_identity_get(a and "memory" and "3")
+    set identity to sync_identity_get(a and "identity" and "1")
+    set turn to sync_identity_get(a and "turn" and "1")
+    turn_sync_assert(turn_sync_ok(a and sync_application_capture(a and "memory" and "1")) && turn_sync_ok(a and sync_application_capture(a and "memory" and "2")) && turn_sync_ok(a and sync_application_capture(a and "memory" and "3")) && turn_sync_ok(a and sync_application_capture(a and "identity" and "1")) && turn_sync_ok(a and sync_application_capture(a and "turn" and "1")) and "capture related records")
+    turn_sync_transfer(a and b)
+    turn_sync_assert(turn_sync_ok(b and sync_project_turn(b and turn)) == 0 && result_cache_scalar(b and "SELECT count(*) FROM turns" and []) == "0" and "pending remote work never becomes local executable work")
+    turn_sync_assert(turn_sync_ok(b and sync_project_memory(b and user)) && turn_sync_ok(b and sync_project_memory(b and reply)) && turn_sync_ok(b and sync_project_memory(b and session)) && turn_sync_ok(b and sync_project_me(b and identity)) and "project conversation dependencies")
+    sql_execute(a and "UPDATE turns SET reply_memory=2,status='completed',answer_basis='conversation' WHERE id=1")
+    turn_sync_assert(turn_sync_ok(a and sync_application_capture(a and "turn" and "1")) and "completed remote turn capture")
+    turn_sync_transfer(a and b)
+    set result to sync_project_turn(b and turn)
+    turn_sync_assert(turn_sync_ok(b and result) and concat("project finalized turn: " and result))
+    turn_sync_assert(result_cache_scalar(b and "SELECT count(*) FROM session_turns st JOIN sessions s ON s.memory=st.session JOIN turns t ON t.id=st.turn_id JOIN memories u ON u.id=t.user_memory JOIN memories r ON r.id=t.reply_memory JOIN me_versions m ON m.id=t.me_version WHERE s.project='sync-chat' AND t.status='completed' AND u.body='Hello from the other device' AND r.body='Hello 🌱'" and []) == "1" and "application conversation history resolves both messages and identity")
+    turn_sync_assert(identity_active_id(b) == "1" and "conversation historical identity does not replace active Me")
+    turn_sync_assert(turn_sync_ok(b and sync_project_turn(b and turn)) && result_cache_scalar(b and "SELECT count(*) FROM turns" and []) == "1" and "turn replay does not duplicate chat history")
+    turn_sync_assert(result_cache_scalar(b and "SELECT (SELECT count(*) FROM turn_signals)+(SELECT count(*) FROM turn_limits)+(SELECT count(*) FROM process_operations)" and []) == "0" and "import creates no local execution claims or worker signals")
+    turn_sync_assert(sql_execute(a and "INSERT INTO tool_runs(turn_id,name,arguments,status,request_memory) VALUES(1,'calculator','{\"expression\":\"17*23\"}','running',1)") == 0 and "remote tool operation fixture")
+    set receipt to sync_identity_get(a and "tool_run" and "1")
+    turn_sync_assert(turn_sync_ok(a and sync_application_capture(a and "tool_run" and "1")) and "running receipt captured")
+    turn_sync_transfer(a and b)
+    turn_sync_assert(turn_sync_ok(b and sync_project_receipt(b and receipt)) == 0 && result_cache_scalar(b and "SELECT count(*) FROM tool_runs" and []) == "0" and "running remote operation cannot become a local action")
+    sql_execute(a and "UPDATE tool_runs SET status='completed',observation=2,finished=CURRENT_TIMESTAMP WHERE id=1")
+    turn_sync_assert(turn_sync_ok(a and sync_application_capture(a and "tool_run" and "1")) and "finalized receipt captured")
+    turn_sync_transfer(a and b)
+    set receipt_result to sync_project_receipt(b and receipt)
+    turn_sync_assert(turn_sync_ok(b and receipt_result) and concat("historical receipt projects: " and receipt_result))
+    turn_sync_assert(result_cache_scalar(b and "SELECT count(*) FROM tool_runs r JOIN turns t ON t.id=r.turn_id JOIN memories m ON m.id=r.observation JOIN memories q ON q.id=r.request_memory WHERE r.name='calculator' AND r.arguments='{\"expression\":\"17*23\"}' AND r.status='completed' AND t.project='sync-chat' AND m.body='Hello 🌱' AND q.body='Hello from the other device'" and []) == "1" and "tool name, arguments and request/result relationships preserved")
+    turn_sync_assert(turn_sync_ok(b and sync_project_receipt(b and receipt)) && result_cache_scalar(b and "SELECT count(*) FROM tool_runs" and []) == "1" and "receipt replay is idempotent")
+    turn_sync_assert(result_cache_scalar(b and "SELECT count(*) FROM process_operations" and []) == "0" and "imported receipt creates no executable process state")
+    set payload to result_cache_scalar(a and "SELECT payload FROM sync_versions WHERE object=?" and [turn])
+    set invalid to result_cache_scalar(a and "SELECT json_set(?,'$.images',json_array(json_object('memory','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','sha256',printf('%064d',0))))" and [payload])
+    turn_sync_assert(turn_sync_ok(a and sync_write(a and turn and "turn" and invalid and sync_heads(a and turn))) and "fixture with unavailable attachment")
+    turn_sync_transfer(a and b)
+    turn_sync_assert(turn_sync_ok(b and sync_project_turn(b and turn)) == 0 && result_cache_scalar(b and "SELECT count(*) FROM session_turns" and []) == "1" && result_cache_scalar(b and "SELECT count(*) FROM turn_images" and []) == "0" and "missing attachment leaves prior conversation intact")
+    sql_close(a)
+    sql_close(b)
+    display concat("PASS: " and concat(int_to_string(checks) and " conversation synchronization checks"))
+    return 0

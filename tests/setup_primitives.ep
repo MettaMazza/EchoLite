@@ -1,0 +1,32 @@
+import "../src/setup_common"
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set root to get_list(args and 1)
+    application_directory(root and 0)
+    set path to concat(root and "/source.txt")
+    write_file(path and "abc")
+    set digest to "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    if string_equals(setup_hash(path) and digest) == 0:
+        display "FAIL SHA-256 known answer"
+        return 2
+    if setup_checked(path and digest) == 0 || setup_checked(path and digest) == 0:
+        return 3
+    setup_copy(path and concat(root and "/copy.txt"))
+    if string_equals(setup_hash(concat(root and "/copy.txt")) and digest) == 0:
+        return 4
+    write_file(path and "changed")
+    if setup_checked(path and digest):
+        display "FAIL stale verification accepted"
+        return 5
+    set SETUP_CACHE to root
+    if setup_capture("/usr/bin/printf" and ["%s","argument with spaces $() literal"]) != "argument with spaces $() literal":
+        return 6
+    write_file(path and "prefix:tail")
+    set streamed to concat(root and "/streamed.txt")
+    if setup_stream("/usr/bin/tee" and [streamed] and path and 7) != 0 || read_file(streamed) != "tail":
+        display "FAIL resumable input stream"
+        return 7
+    display "PASS installer SHA-256, persistent verification, mutation invalidation, atomic copy and literal arguments"
+    return 0

@@ -1,0 +1,45 @@
+# Isolated model smoke check; no tool is executed and no conversation is saved.
+import "../src/native_conversation"
+import "os"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set token_path to get_list(args and 1)
+    set token to ""
+    set lock_home to path_dirname(token_path)
+    if token_path == "-":
+        set buffer to alloc_bytes(129)
+        set used to ep_dlcall3(ep_dlsym(native_system() and "read") and 0 and buffer and 128)
+        if used > 0 && used < 128:
+            poke_byte(buffer and used and 0)
+            set token to string_trim(ptr_to_str(buffer))
+        free_bytes(buffer)
+        set lock_home to "/data/local/tmp/echolite-reader"
+    else:
+        set token to string_trim(read_file(token_path))
+    if string_length(token) != 64:
+        return 1
+    set lock to slot_lock(lock_home)
+    if lock < 0:
+        return 1
+    set db to sql_open(":memory:")
+    set request to "{\"identity\":\"I am EchoLite. I use evidence and tools carefully.\",\"context\":\"No previous memories.\",\"input\":\"Please look online for today's main news.\",\"mode\":\"chat\",\"cache_epoch\":\"0\",\"tool_trace\":[],\"tool_budget\":8,\"tool_required\":\"1\",\"allowed_bases\":[],\"validation_feedback\":\"\"}"
+    set messages to conversation_messages(db and request)
+    set schema to action_schemas(db and request)
+    set settings to generation_settings(db)
+    set payload to conversation_payload(db and messages and schema and settings)
+    set response to native_model_generate(db and token and payload and 0)
+    set action to result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [response])
+    display action
+    set valid to result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.finish_reason')='stop'" and [response,response]) == "1"
+    if valid:
+        set decoded to action_decode(db and schema and action)
+        set valid to result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.kind')='tool'" and [decoded,decoded]) == "1"
+    slot_unlock(lock)
+    sql_close(db)
+    if valid == 0:
+        return 1
+    display "PASS: news request completed with a valid tool action"
+    return 0

@@ -1,0 +1,65 @@
+import "../src/sync_me"
+import "os"
+set checks to 0
+
+define me_sync_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define me_sync_ok with db and result:
+    set status to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.status'),'ok')" and [result])
+    if status == "error":
+        return 0
+    return 1
+
+define me_sync_transfer with a and b:
+    set peer to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set cursor to result_cache_scalar(b and "SELECT coalesce((SELECT cursor FROM sync_cursors WHERE peer=?),0)" and [peer])
+    set result to sync_import(b and peer and sync_export(a and cursor))
+    me_sync_assert(me_sync_ok(b and result) and "identity frontier transfer")
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: sync_me EMPTY_APP_DB_A EMPTY_APP_DB_B"
+        return 1
+    set a to sql_open(get_list(args and 1))
+    set b to sql_open(get_list(args and 2))
+    sql_execute(a and "PRAGMA foreign_keys=ON")
+    sql_execute(b and "PRAGMA foreign_keys=ON")
+    me_sync_assert(sync_application_init(a) && sync_application_init(b) && identity_active_init(a) && identity_active_init(b) and "application and active identity schemas")
+    set active to identity_active_id(b)
+    set active_body to result_cache_scalar(b and "SELECT body FROM active_me" and [])
+    me_sync_assert(sql_execute(a and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','test','user','Identity evidence 🌱'); INSERT INTO me_versions(body,reason) VALUES('I remember the garden 🌱.','Recorded experience'); INSERT INTO me_sources(version,memory) VALUES(2,1);") == 0 and "remote self revision with recorded evidence")
+    set memory to sync_identity_get(a and "memory" and "1")
+    set identity to sync_identity_get(a and "identity" and "2")
+    me_sync_assert(me_sync_ok(a and sync_application_capture(a and "memory" and "1")) && me_sync_ok(a and sync_application_capture(a and "identity" and "2")) and "capture source and identity")
+    me_sync_transfer(a and b)
+    me_sync_assert(me_sync_ok(b and sync_project_me(b and identity)) == 0 && result_cache_scalar(b and "SELECT count(*) FROM me_versions" and []) == "1" and "missing evidence defers history without partial insertion")
+    me_sync_assert(me_sync_ok(b and sync_project_memory(b and memory)) and "source memory projects")
+    set result to sync_project_me(b and identity)
+    me_sync_assert(me_sync_ok(b and result) and concat("historical identity projects: " and result))
+    set version to result_cache_scalar(b and "SELECT local_id FROM sync_local_ids WHERE object=?" and [identity])
+    me_sync_assert(identity_active_id(b) == active && result_cache_scalar(b and "SELECT body FROM active_me" and []) == active_body and "import does not replace active Me")
+    me_sync_assert(result_cache_scalar(b and "SELECT body FROM me_versions WHERE id=?" and [version]) == "I remember the garden 🌱." and "Unicode historical identity preserved")
+    me_sync_assert(result_cache_scalar(b and "SELECT count(*) FROM me_sources s JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=s.memory WHERE s.version=? AND i.object=?" and [version,memory]) == "1" and "evidence reference mapped to local memory")
+    me_sync_assert(me_sync_ok(b and sync_project_me(b and identity)) && result_cache_scalar(b and "SELECT count(*) FROM me_versions" and []) == "2" and "repeated history import is idempotent")
+    sql_execute(a and "DELETE FROM me_sources WHERE version=2")
+    me_sync_assert(me_sync_ok(a and sync_application_capture(a and "identity" and "2")) and "source-link removal captured")
+    me_sync_transfer(a and b)
+    me_sync_assert(me_sync_ok(b and sync_project_me(b and identity)) && result_cache_scalar(b and "SELECT count(*) FROM me_sources WHERE version=?" and [version]) == "0" && identity_active_id(b) == active and "evidence links update without changing active identity")
+    sql_execute(a and "UPDATE me_versions SET body='Rewritten historical identity' WHERE id=2")
+    me_sync_assert(me_sync_ok(a and sync_application_capture(a and "identity" and "2")) and "fixture offers an invalid history rewrite")
+    me_sync_transfer(a and b)
+    me_sync_assert(me_sync_ok(b and sync_project_me(b and identity)) == 0 && result_cache_scalar(b and "SELECT body FROM me_versions WHERE id=?" and [version]) == "I remember the garden 🌱." and "existing historical content cannot be silently rewritten")
+    me_sync_assert(result_cache_scalar(b and "SELECT importing FROM identity_control" and []) == "0" && result_cache_scalar(b and "SELECT value FROM sync_meta WHERE key='projecting'" and []) == "0" and "failed import restores control flags")
+    sql_execute(b and "INSERT INTO me_versions(body,reason) VALUES('New local identity','Local self revision')")
+    me_sync_assert(identity_active_id(b) != active && identity_active_id(b) != version and "local self revision still activates after imports")
+    sql_close(a)
+    sql_close(b)
+    display concat("PASS: " and concat(int_to_string(checks) and " historical Me synchronization checks"))
+    return 0

@@ -84,8 +84,19 @@ define slot_connection_state with port:
     set option to alloc_bytes(4)
     set size to alloc_bytes(4)
     set pollfd to alloc_bytes(8)
+    set refused to 61
+    set pending to 36
+    set socket_level to 65535
+    set socket_error to 4103
     poke_byte(address and 0 and 16)
     poke_byte(address and 1 and 2)
+    if native_android():
+        poke_byte(address and 0 and 2)
+        poke_byte(address and 1 and 0)
+        set refused to 111
+        set pending to 115
+        set socket_level to 1
+        set socket_error to 4
     poke_byte(address and 2 and port / 256)
     poke_byte(address and 3 and port % 256)
     poke_byte(address and 4 and 127)
@@ -96,18 +107,18 @@ define slot_connection_state with port:
         set error to transport_errno(libc)
         if result == 0:
             set state to 1
-        else if error == 61:
+        else if error == refused:
             set state to 0
-        else if error == 36:
+        else if error == pending:
             set ready to transport_wait(libc and pollfd and fd and 4 and transport_now(libc) + 1000)
             if ready:
                 transport_u32(size and 0 and 4)
-                set rc to ep_dlcall5(ep_dlsym(libc and "getsockopt") and fd and 65535 and 4103 and option and size)
+                set rc to ep_dlcall5(ep_dlsym(libc and "getsockopt") and fd and socket_level and socket_error and option and size)
                 if rc == 0:
                     set error to lease_integer(option and 0 and 4)
                     if error == 0:
                         set state to 1
-                    else if error == 61:
+                    else if error == refused:
                         set state to 0
     ep_dlcall1(ep_dlsym(libc and "close") and fd)
     free_bytes(address)

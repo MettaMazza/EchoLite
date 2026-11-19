@@ -1,0 +1,38 @@
+import "../src/model_profile"
+import "os"
+set checks to 0
+
+define profile_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    profile_assert(profile_choose(8589934592 and 6442450944 and 1) == 0 and "8 GB device retains 4B")
+    profile_assert(profile_choose(24344604672 and 17179869184 and 1) == 1 and "24 GB device admits full-context 9B")
+    profile_assert(profile_choose(24344604672 and 8589934592 and 1) == 0 and "memory pressure chooses smaller model")
+    profile_assert(profile_choose(24344604672 and 17179869184 and 0) == 0 and "missing large model or projector falls back")
+    profile_assert(profile_choose(0 and 0 and 1) == 0 and "unknown memory never opts into larger model")
+    profile_assert(profile_requested(0 and 24344604672 and 17179869184 and 1) == 0 and "4B default even with large model installed and ample RAM")
+    profile_assert(profile_requested(1 and 24344604672 and 17179869184 and 1) == 1 and "explicit 9B choice admitted with enough memory")
+    profile_assert(profile_requested(1 and 24344604672 and 8589934592 and 1) == 0 and "9B preference retains memory-pressure fallback")
+    profile_assert(profile_requested(1 and 24344604672 and 17179869184 and 0) == 0 and "9B preference requires complete assets")
+    profile_assert(profile_requested(-1 and 24344604672 and 17179869184 and 1) == 0 and "unknown preference defaults to 4B")
+    set info to "MemTotal:       23774028 kB\nMemAvailable:   12410584 kB\nSwapTotal:      12582908 kB\n"
+    profile_assert(profile_memory_field(info and "MemTotal") == 24344604672 and "physical memory parsed independently of swap")
+    profile_assert(profile_memory_field(info and "MemAvailable") == 12708438016 and "available memory parsed in bytes")
+    profile_assert(profile_memory_field(info and "Missing") == 0 and "missing memory field is conservative")
+    profile_assert(profile_index("/data/models/Qwen3.5-9B-Q6_K.gguf") == 1 && profile_index("unknown.gguf") == -1 and "only known profiles recognized")
+    profile_assert(profile_namespace(0) != profile_namespace(1) && profile_namespace(-1) == "" and "model caches isolated and unknown model rejected")
+    set db to sql_open(":memory:")
+    set props to "{\"model_path\":\"/models/Qwen3.5-9B-Q6_K.gguf\",\"build_info\":\"b12359-test\",\"default_generation_settings\":{\"n_ctx\":262144}}"
+    profile_assert(profile_server_index(db and props) == 1 and "actual server model recognized at full context")
+    profile_assert(profile_server_index(db and "{}") == -1 && profile_server_index(db and "not JSON") == -1 and "unverified server rejected")
+    sql_close(db)
+    set memory to profile_memory()
+    display concat("Physical bytes: " and int_to_string(get_list(memory and 0)))
+    display concat("Available bytes: " and int_to_string(get_list(memory and 1)))
+    display concat("PASS: " and concat(int_to_string(checks) and " model profile checks"))
+    return 0

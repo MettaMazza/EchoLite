@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.echolite.android" android:versionCode="1" android:versionName="0.1.0-dev">
+  <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="36" />
+  <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+  <uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+<uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+<uses-permission android:name="android.permission.WAKE_LOCK" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <application android:label="EchoLite" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:hasCode="true" android:debuggable="true" android:allowBackup="false" android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.NoActionBar">
+    <activity android:name="dev.echolite.android.EchoActivity" android:exported="true" android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode" android:windowSoftInputMode="adjustResize">
+      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+    </activity>
+    <activity-alias android:name="org.libsdl.app.SDLActivity" android:targetActivity="dev.echolite.android.EchoActivity" android:exported="true" />
+    <service android:name="dev.echolite.android.SyncService" android:process=":sync" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="connectedDevice" />
+    <receiver android:name="dev.echolite.android.SyncReceiver" android:process=":sync" android:exported="false">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+      </intent-filter>
+    </receiver>
+
+  </application>
+</manifest>

@@ -1,3 +1,4 @@
+import "android/unicode"
 # Local Wiktionary lookup, Unicode normalization and bounded decompression in EP.
 import "result_cache"
 import "native_calls"
@@ -13,6 +14,8 @@ define dictionary_uint with pointer and offset and count:
     return value
 
 define dictionary_normalize with text returning Str:
+    if native_android():
+        return android_dictionary_normalize(text)
     set cf to ep_dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
     set create_fn to ep_dlsym(cf and "CFStringCreateWithCString")
     set release to ep_dlsym(cf and "CFRelease")
@@ -74,6 +77,8 @@ define dictionary_record with sqlite and statement returning Str:
     set length_pointer to alloc_bytes(8)
     native_bytes_write(length_pointer and 0 and 2097152 and 8)
     set zlib to ep_dlopen("/usr/lib/libz.1.dylib")
+    if native_android():
+        set zlib to ep_dlopen("libz.so")
     set rc to ep_dlcall4(ep_dlsym(zlib and "uncompress") and output and length_pointer and compressed and size)
     set result to ""
     if rc == 0:
@@ -105,6 +110,10 @@ define dictionary_lookup with db and library and word and epoch returning Str:
     if file_exists(path) == 0:
         return "{\"status\":\"ok\",\"tool\":\"dictionary\",\"outcome\":\"failed\",\"error_code\":\"unavailable\",\"text\":\"The local dictionary has not been installed.\"}"
     set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+    if native_android():
+        set sqlite to ep_dlcall2(ep_dlsym(ep_dlopen("libdl.so") and "dlopen") and 0 and 1)
+    if sqlite == 0 || ep_dlsym(sqlite and "sqlite3_open_v2") == 0:
+        return result_cache_error("Native dictionary SQLite binding unavailable")
     set handle to alloc_bytes(8)
     set rc to ep_dlcall4(ep_dlsym(sqlite and "sqlite3_open_v2") and path and handle and 1 and 0)
     set reference to dictionary_uint(handle and 0 and 8)

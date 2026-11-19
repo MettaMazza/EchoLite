@@ -1,0 +1,84 @@
+import "../application_paths"
+
+# Host-side packaging; upstream native dependency builds live outside the checkout.
+define android_chat_run with executable and arguments:
+    set status to application_wait(executable and arguments)
+    if status != 0:
+        display concat("Android chat build failed: " and executable)
+        ep_exit(status)
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 4:
+        display "Usage: build_chat CHECKOUT ANDROID_WORK JDK_HOME"
+        return 1
+    set root to get_list(args and 1)
+    set work to get_list(args and 2)
+    set sdk to concat(work and "/sdk")
+    set package to concat(work and "/apk-chat")
+    set abi to concat(package and "/lib/arm64-v8a")
+    set_env("JAVA_HOME" and get_list(args and 3))
+    set compiler to get_env("ERNOS_COMPILER")
+    if compiler == "":
+        set compiler to concat(get_env("HOME") and "/.local/bin/ernos")
+    set clang to concat(work and "/tools/android-ndk-r30/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android28-clang")
+    set build_tools to concat(sdk and "/build-tools/36.0.0")
+    set dependencies to ["/build/sdl/libSDL3.so","/build/raylib-sdl/raylib/libraylib.a","/build/sdl-dex/classes.dex","/build/sqlite3.o","/build/llama/bin/llama-server","/apk/lib/arm64-v8a/libecholite_crypto.so","/vendor/libffi-3.8.1/aarch64-unknown-linux-android/.libs/libffi.so","/signing/debug.keystore"]
+    set reference_sources to ["/vendor/gmp-6.3.0/.libs/libgmp.so","/build/kiwix/libkiwix-serve.so","/vendor/libkiwix_android-arm64-14.2.1/lib/aarch64-linux-android/libkiwix.so","/vendor/libzim_android-arm64-9.8.2/lib/aarch64-linux-android/libzim.so","/tools/android-ndk-r30/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so","/build/libxml2/libxml2.so","/build/curl/lib/libcurl.so"]
+    set reference_names to ["libecholite_gmp.so","libkiwix-serve.so","libkiwix.so","libzim.so","libc++_shared.so","libecholite_xml2.so","libecholite_curl.so"]
+    set i to 0
+    repeat while i < length_list(reference_sources):
+        append_list(dependencies and get_list(reference_sources and i))
+        set i to i + 1
+    set i to 0
+    repeat while i < length_list(dependencies):
+        if file_exists(concat(work and get_list(dependencies and i))) == 0:
+            display concat("Build prerequisite missing: " and get_list(dependencies and i))
+            return 1
+        set i to i + 1
+    if application_directory(abi and 0) == 0:
+        return 1
+    if ep_dlcall1(ep_dlsym(native_system() and "chdir") and root) != 0:
+        return 1
+    android_chat_run(compiler and [concat(root and "/src/interface.ep")])
+    if string_contains(read_file(concat(root and "/src/interface_compiled.c")) and "ep_android_string_byte") == 0:
+        display "Android requires the tagged-string-aware Ernos runtime."
+        return 1
+    android_chat_run(clang and ["-O2","-fwrapv","-DEP_HAS_SQLITE","-Dmain=SDL_main","-fPIC","-shared",concat(root and "/src/interface_compiled.c"),concat(work and "/build/sqlite3.o"),"-o",concat(abi and "/libmain.so"),"-Wl,--whole-archive",concat(work and "/build/raylib-sdl/raylib/libraylib.a"),"-Wl,--no-whole-archive",concat("-L" and concat(work and "/build/sdl")),"-lSDL3","-ldl","-lm","-llog","-landroid","-lEGL","-lGLESv3","-Wl,-rpath,$ORIGIN","-Wl,--no-undefined","-Wl,-z,max-page-size=16384"])
+    android_chat_run("/bin/cp" and [concat(work and "/../voice/android-baseline/jniLibs/arm64-v8a/libsherpa-onnx-c-api.so"),concat(abi and "/libsherpa-onnx-c-api.so")])
+    android_chat_run("/bin/cp" and [concat(work and "/../voice/android-baseline/jniLibs/arm64-v8a/libonnxruntime.so"),concat(abi and "/libonnxruntime.so")])
+    set sources to ["echolite","runtime_manager","../tests/android_services","speech_worker","sync_agent","setup_library"]
+    set binaries to ["libecholite-core.so","libecholite-runtime.so","libecholite-check-services.so","libecholite-speech.so","libecholite-sync.so","libecholite-library.so"]
+    set i to 0
+    repeat while i < length_list(sources):
+        set source to concat(root and concat("/src/" and get_list(sources and i)))
+        android_chat_run(compiler and [concat(source and ".ep")])
+        android_chat_run(clang and ["-O2","-fwrapv","-Wl,--export-dynamic","-DEP_HAS_SQLITE",concat(source and "_compiled.c"),concat(work and "/build/sqlite3.o"),"-ldl","-lm","-Wl,-rpath,$ORIGIN","-Wl,-z,max-page-size=16384","-o",concat(abi and concat("/" and get_list(binaries and i)))])
+        set i to i + 1
+    android_chat_run("/bin/cp" and [concat(work and "/build/sdl/libSDL3.so"),concat(abi and "/libSDL3.so")])
+    android_chat_run("/bin/cp" and [concat(work and "/build/llama/bin/llama-server"),concat(abi and "/libllama-server.so")])
+    android_chat_run("/bin/cp" and [concat(work and "/apk/lib/arm64-v8a/libecholite_crypto.so"),concat(abi and "/libecholite_crypto.so")])
+    android_chat_run("/bin/cp" and [concat(work and "/vendor/libffi-3.8.1/aarch64-unknown-linux-android/.libs/libffi.so"),concat(abi and "/libecholite_ffi.so")])
+    set i to 0
+    repeat while i < length_list(reference_sources):
+        android_chat_run("/bin/cp" and [concat(work and get_list(reference_sources and i)),concat(abi and concat("/" and get_list(reference_names and i)))])
+        set i to i + 1
+    # EP emits framework classes directly; D8 converts them alongside upstream SDL.
+    android_chat_run(compiler and [concat(root and "/src/android/service_classes.ep")])
+    set classes to concat(work and "/build/ep-services")
+    android_chat_run(concat(root and "/src/android/service_classes") and [classes])
+    android_chat_run(concat(build_tools and "/d8") and ["--min-api","31","--lib",concat(sdk and "/platforms/android-36/android.jar"),"--output",package,concat(work and "/build/sdl-classes.jar"),concat(classes and "/SyncService.class"),concat(classes and "/SyncReceiver.class"),concat(classes and "/EchoActivity.class")])
+
+    android_chat_run(concat(build_tools and "/aapt2") and ["compile","--dir",concat(root and "/android/res"),"-o",concat(package and "/resources.zip")])
+    android_chat_run(concat(build_tools and "/aapt2") and ["link","--manifest",concat(root and "/android/AndroidManifest-chat.xml"),"-I",concat(sdk and "/platforms/android-36/android.jar"),"-R",concat(package and "/resources.zip"),"--auto-add-overlay","-A",concat(root and "/android/assets"),"-o",concat(package and "/echolite-unsigned.apk")])
+
+    if ep_dlcall1(ep_dlsym(native_system() and "chdir") and package) != 0:
+        return 1
+    android_chat_run("/usr/bin/zip" and ["-q","echolite-unsigned.apk","classes.dex","lib/arm64-v8a/libecholite-library.so","lib/arm64-v8a/libecholite-sync.so","lib/arm64-v8a/libecholite-speech.so","lib/arm64-v8a/libsherpa-onnx-c-api.so","lib/arm64-v8a/libonnxruntime.so","lib/arm64-v8a/libecholite_gmp.so","lib/arm64-v8a/libecholite-check-services.so","lib/arm64-v8a/libmain.so","lib/arm64-v8a/libSDL3.so","lib/arm64-v8a/libecholite-core.so","lib/arm64-v8a/libecholite-runtime.so","lib/arm64-v8a/libllama-server.so","lib/arm64-v8a/libecholite_crypto.so","lib/arm64-v8a/libecholite_ffi.so","lib/arm64-v8a/libkiwix-serve.so","lib/arm64-v8a/libkiwix.so","lib/arm64-v8a/libzim.so","lib/arm64-v8a/libc++_shared.so","lib/arm64-v8a/libecholite_xml2.so","lib/arm64-v8a/libecholite_curl.so"])
+    android_chat_run(concat(build_tools and "/zipalign") and ["-f","-P","16","4","echolite-unsigned.apk","echolite-aligned.apk"])
+    set_env("JAVA_HOME" and get_list(args and 3))
+    android_chat_run(concat(build_tools and "/apksigner") and ["sign","--ks",concat(work and "/signing/debug.keystore"),"--ks-pass","pass:android","--out","echolite-chat.apk","echolite-aligned.apk"])
+    android_chat_run(concat(build_tools and "/apksigner") and ["verify","echolite-chat.apk"])
+    display concat("Built Android chat APK: " and concat(package and "/echolite-chat.apk"))
+    return 0

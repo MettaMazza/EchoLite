@@ -1,6 +1,6 @@
 # Development status and limits
 
-**Active development / experimental source release.** The application runs on its provisioned development Mac. Tests and demo journeys are useful evidence, not a promise that every interaction on every machine is finished or reliable.
+**Active development / experimental release.** The application runs on Apple Silicon macOS and ARM64 Android. Tests and demo journeys are useful evidence, not a promise that every interaction on every machine is finished or reliable.
 
 ## What has been exercised
 
@@ -25,7 +25,7 @@ A retained full-context experiment processed **262,112 prompt tokens plus a 32-t
 
 ## Current limits
 
-- Manual dependency/library provisioning; no finished installer or general-purpose reference importer in this release.
+- Native EP installers provision the pinned release assets on Apple Silicon Macs and USB-connected ARM64 Android phones. OS approvals remain necessary; Windows/Linux installers and a general-purpose reference importer are not included.
 - macOS ARM64 only in the tested environment. Portability work remains.
 - The small model can choose an inappropriate tool, misunderstand a task or overstate a result. Receipts and checks reduce this; they do not eliminate it.
 - Native canvas text controls now support selection, clipboard operations, caret movement and undo/redo. Broad font fallback, IME composition and accessibility semantics need further work. Stored Unicode can exceed what the installed font renders.
@@ -39,7 +39,7 @@ A retained full-context experiment processed **262,112 prompt tokens plus a 32-t
 
 ## Near-term priorities
 
-1. Make first-time provisioning reproducible and easier.
+1. Expand clean-install coverage across more Macs, Android manufacturers and network conditions.
 2. Continue testing ordinary interaction paths, input methods and accessibility.
 3. Improve recovery feedback and inspectable provenance in the UI.
 4. Measure performance across representative native workloads and more machines.
@@ -56,3 +56,7 @@ Web and browser tools no longer require a mode switch. Existing offline settings
 Web requests reuse eligible cached content, attempt retrieval when needed, and fall back to saved pages on failure. Receipts expose the attempted request, failure, fallback and staleness without inventing a new validation time. Each later refresh may recover online automatically; an unreachable site does not establish that the whole machine is offline. Validation includes real HTTPS retrieval, test-process network denial with saved-page recovery, and successful retrieval after restoring access.
 
 The automatic-connectivity change passed 95 focused checks. Two actual local-model conversations verified live web retrieval and saved-page fallback plus calculator use under test-process network denial. Managed Safari navigation/read/close also completed without a mode switch.
+
+## Native installation and Android distribution
+
+Two native EP setup apps now provision a Mac or a USB-connected Android phone. The APK has a mint adaptive icon, launcher entry and first-launch home-screen pin request. See [installer validation](INSTALLER-VALIDATION.md) for the actual checks and [setup](SETUP.md) for first-time OS approvals and disk requirements. Automatic USB/Wi-Fi sync and Android foreground-service restart checks are recorded in [background sync](android/BACKGROUND.txt).

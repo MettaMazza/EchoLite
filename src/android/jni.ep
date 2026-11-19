@@ -1,0 +1,66 @@
+import "../native_process"
+set ANDROID_JNI_ENV to 0
+set ANDROID_JNI_TABLE to 0
+
+# JNI table slots from the Android NDK jni.h. Calls use the non-variadic A forms.
+define android_jni_function with slot:
+    return process_integer(ANDROID_JNI_TABLE + slot * 8 and 8)
+
+define android_jni_clear:
+    if ep_dlcall1(android_jni_function(228) and ANDROID_JNI_ENV):
+        ep_dlcall1(android_jni_function(17) and ANDROID_JNI_ENV)
+        return 1
+    return 0
+
+define android_jni_release with object:
+    if object != 0:
+        ep_dlcall2(android_jni_function(23) and ANDROID_JNI_ENV and object)
+    return 0
+
+define android_jni_object with object and name and signature and arguments:
+    if object == 0:
+        return 0
+    set kind to ep_dlcall2(android_jni_function(31) and ANDROID_JNI_ENV and object)
+    if kind == 0:
+        android_jni_clear()
+        return 0
+    set method to ep_dlcall4(android_jni_function(33) and ANDROID_JNI_ENV and kind and name and signature)
+    android_jni_release(kind)
+    if method == 0:
+        android_jni_clear()
+        return 0
+    set result to ep_dlcall4(android_jni_function(36) and ANDROID_JNI_ENV and object and method and arguments)
+    if android_jni_clear():
+        android_jni_release(result)
+        return 0
+    return result
+
+define android_keyboard_inset with sdl:
+    set ANDROID_JNI_ENV to ep_dlcall0(ep_dlsym(sdl and "SDL_GetAndroidJNIEnv"))
+    if ANDROID_JNI_ENV == 0:
+        return 0
+    set ANDROID_JNI_TABLE to process_integer(ANDROID_JNI_ENV and 8)
+    set activity to ep_dlcall0(ep_dlsym(sdl and "SDL_GetAndroidActivity"))
+    set window to android_jni_object(activity and "getWindow" and "()Landroid/view/Window;" and 0)
+    set view to android_jni_object(window and "getDecorView" and "()Landroid/view/View;" and 0)
+    set insets to android_jni_object(view and "getRootWindowInsets" and "()Landroid/view/WindowInsets;" and 0)
+    set argument to alloc_bytes(8)
+    # WindowInsets.Type.ime() is the Android public IME bit (8), API 30+.
+    native_bytes_write(argument and 0 and 8 and 4)
+    set ime to android_jni_object(insets and "getInsets" and "(I)Landroid/graphics/Insets;" and argument)
+    free_bytes(argument)
+    set bottom to 0
+    if ime != 0:
+        set kind to ep_dlcall2(android_jni_function(31) and ANDROID_JNI_ENV and ime)
+        set field to ep_dlcall4(android_jni_function(94) and ANDROID_JNI_ENV and kind and "bottom" and "I")
+        if field != 0:
+            set bottom to native_signed_int(ep_dlcall3(android_jni_function(100) and ANDROID_JNI_ENV and ime and field))
+        if android_jni_clear():
+            set bottom to 0
+        android_jni_release(kind)
+    android_jni_release(ime)
+    android_jni_release(insets)
+    android_jni_release(view)
+    android_jni_release(window)
+    android_jni_release(activity)
+    return bottom

@@ -1,0 +1,77 @@
+# UI and CLI share these device operations; no secrets appear in status responses.
+import "sync_devices"
+import "sync_pairing_io"
+import "sync_discovery_service"
+
+define sync_command with db and args and home and runtime_home and token returning Str:
+    if sync_devices_init(db) == 0 || sync_coordinator_init(db) == 0:
+        return result_cache_error("Cannot initialize device synchronization")
+    set command to get_list(args and 1)
+    set count to length_list(args)
+    if (command == "sync-invite" || command == "sync-pair-paste") && count == 3:
+        return sync_pairing_command(db and home and command and get_list(args and 2))
+    if command == "sync-pair-cancel" && count == 2:
+        return sync_pairing_command(db and home and command and "")
+    if command == "sync-devices" && count == 2:
+        return sync_devices_list(db)
+    if command == "sync-unpair" && count == 3:
+        return sync_pair_revoke(db and get_list(args and 2))
+    if command == "sync-pair" && count == 5:
+        set path to get_list(args and 4)
+        if file_exists(path) == 0:
+            return result_cache_error("Pairing credential file does not exist")
+        return sync_pair_install(db and get_list(args and 2) and get_list(args and 3) and string_trim(read_file(path)))
+    if command == "sync-address" && count == 6:
+        return sync_endpoint_set(db and get_list(args and 2) and get_list(args and 3) and transport_number(get_list(args and 4) and 10 and 65535) and get_list(args and 5))
+    if command == "sync-discover" && count == 3:
+        return sync_discovery_find(db and get_list(args and 2))
+    if command == "sync-discovery-listen" && count == 3:
+        return sync_discovery_listen(db and get_list(args and 2) and 8411 and 8410)
+    if command == "sync-now" && count == 3:
+        set peer to get_list(args and 2)
+        set result to sync_device_exchange(db and peer and 1 and home and runtime_home and token and 8400)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok":
+            return result
+        set found to sync_discovery_find(db and peer)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [found]) == "ok":
+            set result to sync_device_exchange(db and peer and 1 and home and runtime_home and token and 8400)
+        return result
+    if command == "sync-listen" && count == 4:
+        set listener to sync_socket_open(get_list(args and 2) and transport_number(get_list(args and 3) and 10 and 65535) and 1)
+        if listener < 0:
+            return result_cache_error("Cannot listen on the selected local sync address")
+        # One bounded accept window; a UI supervisor schedules subsequent ticks.
+        set fd to sync_socket_accept(listener and transport_now(native_system()) + 1000)
+        sync_socket_close(listener)
+        if fd < 0:
+            return "{\"status\":\"ok\",\"connection\":\"idle\"}"
+        set result to sync_service_receive(db and fd and home and runtime_home and token and 8400)
+        sync_socket_close(fd)
+        return result
+    return result_cache_error("Invalid device synchronization command or arguments")
+
+# UI-readable result contains no invitation, ciphertext, key or arbitrary payload.
+define sync_ui_report with db and command and result:
+    if sql_execute(db and "CREATE TABLE IF NOT EXISTS sync_ui_result(singleton INTEGER PRIMARY KEY CHECK(singleton=1),command TEXT NOT NULL,status TEXT NOT NULL,message TEXT NOT NULL,completed INTEGER NOT NULL)") != 0:
+        return 0
+    set status to result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result])
+    set message to "Device settings updated."
+    if command == "sync-invite":
+        set message to "Invitation ready. Copy it to your other device."
+    else if command == "sync-pair-paste":
+        set message to "Pairing code accepted. Follow the instructions above."
+    else if command == "sync-unpair":
+        set message to "Device unpaired."
+    else if command == "sync-pair-cancel":
+        set message to "Pairing code dismissed."
+    else if command == "sync-discover":
+        set message to "Paired device found on this network."
+    else if command == "sync-discovery-listen":
+        set message to "Local discovery checked."
+    else if command == "sync-now":
+        set message to "Transfer received."
+        if result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.local_application.deferred'),0)+coalesce(json_extract(?,'$.peer_application.deferred'),0)>0 OR json_extract(?,'$.local_application.status')='error' OR json_extract(?,'$.peer_application.status')='error'" and [result,result,result,result]) == "1":
+            set message to "Transfer received; some records still need reconciliation."
+    if status != "ok":
+        set message to result_cache_scalar(db and "SELECT substr(coalesce(json_extract(?,'$.text'),'Device operation needs attention'),1,500)" and [result])
+    return sync_execute(db and "INSERT OR REPLACE INTO sync_ui_result VALUES(1,?,?,?,?)" and [command,status,message,int_to_string(transport_now(native_system()))])

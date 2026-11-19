@@ -8,7 +8,12 @@ define identity_budget_error with db and message returning Str:
 define identity_budget with db and token and body and epoch returning Str:
     if string_length(body) == 0 || string_length(body) > 16000 || string_length(string_trim(body)) == 0:
         return identity_budget_error(db and "Me must be nonblank and no larger than the 16000-byte storage bound")
-    set namespace to "qwen35-8d43d974-b12359-me-token-budget-v1"
+    set model_namespace to profile_active_namespace(db and token)
+    if model_namespace == "":
+        return identity_budget_error(db and "Cannot identify the active tokenizer; revision was not applied")
+    set namespace to concat(model_namespace and ":me-token-budget-v1")
+    if model_namespace == profile_namespace(0):
+        set namespace to "qwen35-8d43d974-b12359-me-token-budget-v1"
     set protected to conversation_protect(body)
     set cached to result_cache_get(db and namespace and protected and epoch)
     if cached != "":

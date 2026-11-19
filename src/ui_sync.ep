@@ -1,0 +1,36 @@
+# The listener is independent of the chat worker and restarts after app launch.
+import "native_process"
+import "transport"
+import "android/jni"
+set UI_SYNC_PID to 0
+set UI_SYNC_NEXT to 0
+
+define ui_sync_tick with root and home and native_directory:
+    set now to transport_now(native_system())
+    if now < UI_SYNC_NEXT:
+        return 0
+    set UI_SYNC_NEXT to now + 5000
+    if native_android():
+        if UI_SYNC_PID == -1:
+            return 0
+        set sdl to ep_dlopen("libSDL3.so")
+        set ANDROID_JNI_ENV to ep_dlcall0(ep_dlsym(sdl and "SDL_GetAndroidJNIEnv"))
+        if ANDROID_JNI_ENV != 0:
+            set ANDROID_JNI_TABLE to process_integer(ANDROID_JNI_ENV and 8)
+            set activity to ep_dlcall0(ep_dlsym(sdl and "SDL_GetAndroidActivity"))
+            android_jni_object(activity and "ensureSync" and "()Ljava/lang/Object;" and 0)
+            android_jni_release(activity)
+        set UI_SYNC_PID to 0 - 1
+        return 0
+    if UI_SYNC_PID > 0:
+        if process_poll(UI_SYNC_PID) == -1:
+            return 0
+        set UI_SYNC_PID to 0
+    set executable to concat(root and "/bin/echolite-sync")
+    if native_android():
+        set executable to concat(native_directory and "/libecholite-sync.so")
+    if file_exists(executable):
+        set log to native_open(concat(home and "/sync-agent.log") and 521 and 384)
+        set UI_SYNC_PID to process_detached(executable and [] and log)
+        ep_dlcall1(ep_dlsym(native_system() and "close") and log)
+    return 0

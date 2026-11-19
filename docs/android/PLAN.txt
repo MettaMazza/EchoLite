@@ -1,0 +1,54 @@
+EchoLite native Android and paired-device sync
+Active build goal. No acceptance marker is complete without recorded execution.
+
+Authored application, tool orchestration, memory, sync and platform bindings remain
+Ernos Plain. Generated compiler C and third-party Android/model/graphics libraries
+are build dependencies, not a rewrite of EchoLite into another application language.
+Android must compute locally; a USB-connected Mac is not an inference dependency.
+
+Hardware verified after reboot on 2026-11-19: REDMAGIC 11 Pro / NX809J,
+Android 16 API 36, ARM64, SM8850. Marketed 24 GB physical RAM; Android
+MemTotal 23774028 kB, MemAvailable 17590500 kB at measurement.
+SwapTotal 12582908 kB (12 GiB RAM extension), separate from physical RAM.
+Budget steady-state inference against physical RAM, not physical plus swap.
+Keep the existing Mac full-context evidence; do not repeat that benchmark.
+
+M1 Native foundation
+- Reproducible ARM64 Android build of EP code through the NDK.
+- Install and launch a signed native APK on the actual connected phone.
+- Verify native runtime, filesystem, SQLite, networking and process ABI behavior.
+- Preserve working Mac behavior with focused platform regression checks.
+
+M2 Local intelligence and tools
+- Load the Qwen model, vision projector and embedding model from phone storage.
+- Preserve model context configuration; measure actual memory during normal journeys.
+- Generate, recall and use calculator/reference tools with Mac disconnected.
+- Show model thinking disclosure, sources links and usable touch/keyboard controls.
+- Preserve state through app restart and phone reboot; handle lifecycle interruption.
+- Implement Android-appropriate document, image, web and file/system capabilities
+  within granted Android permissions. Surface unavailable permissions accurately.
+
+M3 Persistent memory and identity
+- Conversations, layered records, embeddings and Me revisions persist on-device.
+- Recall earlier sessions; revise Me; correct, supersede, archive and forget records.
+- Never replace the user's Mac database to make a test pass. Use isolated fixtures.
+
+M4 Pairing and synchronization
+- Explicit local pairing with authenticated encrypted transport and revocation.
+- Both USB forwarding and LAN Wi-Fi use the same versioned sync protocol.
+- Stable device/event identifiers, transactional batches, resumable transfers,
+  deduplication and integrity checks; do not copy a live SQLite database between peers.
+- Sync retained conversations/memory/tasks/Me history and referenced attachments.
+- Keep credentials, OS-specific paths, live process/browser handles and KV cache local.
+- Transfer large immutable model/reference assets separately with hashes and resume.
+- Concurrent edits are preserved with visible resolution; no silent last-write loss.
+- Forgetting propagates tombstones; stale devices cannot resurrect deleted content.
+
+M5 User-experience validation
+- Android-only chat, tool chain, image, recall, Me revision and restart journey.
+- Mac -> Android -> Mac changes converge over USB, then repeat over Wi-Fi.
+- Concurrent edits, deletion vs offline edit, interrupted transfer, reconnect, repeat
+  sync, wrong pairing credential, revoked peer and corrupted payload checks.
+- Compare retained record/attachment integrity and actual user-visible outcomes.
+- Record versions, device-specific resource measurements and reproduction commands.
+- Retain public active-development labeling; exclude private state/signing secrets.

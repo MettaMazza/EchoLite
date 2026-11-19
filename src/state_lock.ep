@@ -19,7 +19,7 @@ define lease_integer with pointer and offset and count:
     return value
 
 define private_lock with home and name:
-    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set libc to native_system()
     set resolved to alloc_bytes(1024)
     set result to ep_dlcall2(ep_dlsym(libc and "realpath") and home and resolved)
     if result == 0:
@@ -30,7 +30,7 @@ define private_lock with home and name:
     set path to concat(canonical and concat("/" and name))
     if string_length(path) >= 1024:
         return 0 - 1
-    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set libc to native_system()
     set fd to native_open(path and 16777990 and 384)
     if fd < 0 || fd > 2147483647:
         return 0 - 1
@@ -39,6 +39,10 @@ define private_lock with home and name:
     set mode to lease_integer(info and 4 and 2)
     set links to lease_integer(info and 6 and 2)
     set owner to lease_integer(info and 16 and 4)
+    if native_android():
+        set mode to lease_integer(info and 16 and 4)
+        set links to lease_integer(info and 20 and 4)
+        set owner to lease_integer(info and 24 and 4)
     free_bytes(info)
     if rc != 0 || mode / 4096 != 8 || links != 1 || owner != ep_dlcall0(ep_dlsym(libc and "getuid")):
         ep_dlcall1(ep_dlsym(libc and "close") and fd)
@@ -53,7 +57,7 @@ define state_lease with home and mode returning Str:
         return lease_error("Invalid state lease request")
     if STATE_LEASE_FD >= 0:
         return lease_error("State lease already acquired in this process")
-    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set libc to native_system()
     set close_fn to ep_dlsym(libc and "close")
     set fd to private_lock(home and "state.lock")
     if fd < 0:
@@ -71,7 +75,7 @@ define state_lease with home and mode returning Str:
             return lease_error("State path is too long")
         set info to alloc_bytes(144)
         set rc to ep_dlcall2(ep_dlsym(libc and "lstat") and marker and info)
-        set errno_ptr to ep_dlcall0(ep_dlsym(libc and "__error"))
+        set errno_ptr to native_errno_pointer()
         set error_number to lease_integer(errno_ptr and 0 and 4)
         free_bytes(info)
         if rc == 0 || error_number != 2:
@@ -89,3 +93,34 @@ define state_lease with home and mode returning Str:
         set WORKER_LEASE_FD to worker
     set STATE_LEASE_FD to fd
     return "{\"status\":\"ok\"}"
+
+# File layouts are Darwin arm64 or Android arm64; callers use named fields.
+define native_stat_mode with info:
+    if native_android():
+        return lease_integer(info and 16 and 4)
+    return lease_integer(info and 4 and 2)
+
+define native_stat_links with info:
+    if native_android():
+        return lease_integer(info and 20 and 4)
+    return lease_integer(info and 6 and 2)
+
+define native_stat_owner with info:
+    if native_android():
+        return lease_integer(info and 24 and 4)
+    return lease_integer(info and 16 and 4)
+
+define native_stat_size with info:
+    if native_android():
+        return lease_integer(info and 48 and 8)
+    return lease_integer(info and 96 and 8)
+
+define native_stat_time with info and darwin_offset:
+    if native_android():
+        return lease_integer(info and darwin_offset + 40 and 8)
+    return lease_integer(info and darwin_offset and 8)
+
+define native_available_bytes with info:
+    if native_android():
+        return lease_integer(info and 32 and 8) * lease_integer(info and 8 and 8)
+    return lease_integer(info and 24 and 4) * lease_integer(info and 8 and 8)

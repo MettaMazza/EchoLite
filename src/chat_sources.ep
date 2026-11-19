@@ -64,7 +64,15 @@ define source_open with url:
     set target to source_target(url)
     if target == "":
         return 0
+    if native_android():
+        if starts_with(target and "file:///"):
+            return 0
+        set sdl to ep_dlopen("libSDL3.so")
+        if sdl != 0 && ep_dlcall1(ep_dlsym(sdl and "SDL_OpenURL") and target):
+            return 0 - 1
+        return 0
     if starts_with(target and "file:///"):
+
         set path to get_list(string_split(target and "#") and 0)
         if ends_with(path and ".pdf") || ends_with(path and ".docx") || ends_with(path and ".png") || ends_with(path and ".jpg") || ends_with(path and ".jpeg"):
             return process_start("/usr/bin/open" and [target])

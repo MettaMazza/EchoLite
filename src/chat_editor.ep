@@ -1,7 +1,9 @@
+import "ui_viewport"
 # Native EP editor: byte-safe Unicode caret, selection, clipboard and bounded undo.
 import "text_layout"
 import "chat_view"
 import "transport"
+import "android/input"
 import "../stdlib/bridge/raylib"
 set EDIT_TEXT to ""
 set EDIT_CARET to 0
@@ -27,6 +29,8 @@ set EDIT_MENU to 0
 set EDIT_MENU_X to 0
 set EDIT_MENU_Y to 0
 set EDIT_MENU_USED to 0
+set EDIT_MENU_WIDTH to 190
+set EDIT_MENU_HEIGHT to 160
 
 define editor_previous with text and position:
     if position <= 0:
@@ -176,11 +180,13 @@ define editor_handle with draft and x and y and width and height and enabled ret
         set EDIT_UNDO to create_list()
         set EDIT_REDO to create_list()
     set EDIT_MENU_USED to 0
-    if EDIT_MENU && raylib_is_mouse_button_pressed(0):
-        set mx to raylib_get_mouse_x()
-        set my to raylib_get_mouse_y()
-        if mx >= EDIT_MENU_X && mx <= EDIT_MENU_X + 190 && my >= EDIT_MENU_Y && my < EDIT_MENU_Y + 160:
+    if EDIT_MENU && ui_mouse_pressed():
+        set mx to ui_mouse_x()
+        set my to ui_mouse_y()
+        if mx >= EDIT_MENU_X && mx < EDIT_MENU_X + EDIT_MENU_WIDTH && my >= EDIT_MENU_Y && my < EDIT_MENU_Y + EDIT_MENU_HEIGHT:
             set item to (my - EDIT_MENU_Y) / 32
+            if native_android():
+                set item to (mx - EDIT_MENU_X) / (EDIT_MENU_WIDTH / 5)
             if item == 0:
                 if EDIT_FOCUS:
                     ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and editor_selected(EDIT_TEXT and EDIT_CARET and EDIT_ANCHOR))
@@ -209,9 +215,9 @@ define editor_handle with draft and x and y and width and height and enabled ret
     set command to raylib_is_key_down(343) || raylib_is_key_down(347) || raylib_is_key_down(341) || raylib_is_key_down(345)
     set word to raylib_is_key_down(342) || raylib_is_key_down(346)
     set rows to layout_ranges(EDIT_TEXT and width and 18)
-    set mx to raylib_get_mouse_x()
-    set my to raylib_get_mouse_y()
-    set clicked to raylib_is_mouse_button_pressed(0)
+    set mx to ui_mouse_x()
+    set my to ui_mouse_y()
+    set clicked to ui_mouse_pressed()
     if enabled && mx >= x && mx <= x + width && my >= y && my <= y + height:
         ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetMouseCursor") and 2)
     if raylib_is_mouse_button_pressed(1) && enabled && mx >= x && mx <= x + width && my >= y && my <= y + height:
@@ -219,6 +225,8 @@ define editor_handle with draft and x and y and width and height and enabled ret
         editor_menu_open(mx and my)
     if clicked:
         set EDIT_FOCUS to enabled && mx >= x && mx <= x + width && my >= y && my <= y + height
+        if native_android():
+            android_keyboard(EDIT_FOCUS)
         set EDIT_DRAG to EDIT_FOCUS
         if EDIT_FOCUS:
             set SELECT_TEXT to ""
@@ -233,6 +241,13 @@ define editor_handle with draft and x and y and width and height and enabled ret
                 set EDIT_CARET to get_list(bounds and 1)
             set EDIT_CLICK_TIME to now
             set EDIT_CLICK_POS to EDIT_CARET
+    if native_android() && EDIT_DRAG && EDIT_MENU == 0 && raylib_is_mouse_button_down(0) && UI_TOUCH_MOVED == 0 && transport_now(native_system()) - EDIT_CLICK_TIME >= 550:
+        if EDIT_CARET == EDIT_ANCHOR && EDIT_TEXT != "":
+            set bounds to editor_word(EDIT_TEXT and EDIT_CARET)
+            set EDIT_ANCHOR to get_list(bounds and 0)
+            set EDIT_CARET to get_list(bounds and 1)
+        set EDIT_DRAG to 0
+        editor_menu_open(mx and my)
     if EDIT_DRAG && raylib_is_mouse_button_down(0) && clicked == 0:
         if my < y:
             set EDIT_SCROLL to editor_max(0 and EDIT_SCROLL - 8)
@@ -262,7 +277,7 @@ define editor_handle with draft and x and y and width and height and enabled ret
             if editor_key(get_list(keys and i)):
                 editor_move(get_list(keys and i) and shift and command and word and width)
             set i to i + 1
-        if editor_key(259) || editor_key(261):
+        if native_android() == 0 && (editor_key(259) || editor_key(261)):
             if EDIT_CARET == EDIT_ANCHOR:
                 if editor_key(259):
                     set EDIT_ANCHOR to editor_previous(EDIT_TEXT and EDIT_CARET)
@@ -279,9 +294,13 @@ define editor_handle with draft and x and y and width and height and enabled ret
             ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and editor_selected(SELECT_TEXT and SELECT_CARET and SELECT_ANCHOR))
     set code to raylib_get_char_pressed()
     repeat while code > 0:
-        if enabled && EDIT_FOCUS && command == 0 && code >= 32:
+        if native_android() == 0 && enabled && EDIT_FOCUS && command == 0 && code >= 32:
             editor_insert(chat_character(code))
         set code to raylib_get_char_pressed()
+    if native_android():
+        set input_events to android_input_events()
+        if enabled && EDIT_FOCUS:
+            editor_android_events(input_events)
     if clicked || raylib_get_key_pressed() != 0:
         set EDIT_BLINK to transport_now(native_system())
     return EDIT_TEXT
@@ -311,6 +330,8 @@ define editor_draw with x and y and width and height and tint and caret_color:
         set EDIT_SCROLL to line * 27 + 23 - height
     set EDIT_SCROLL to editor_max(0 and EDIT_SCROLL)
     editor_paint(EDIT_TEXT and rows and x and y - EDIT_SCROLL and 18 and tint and EDIT_ANCHOR and EDIT_CARET and EDIT_FOCUS)
+    if EDIT_FOCUS:
+        editor_handle_register(1 and EDIT_TEXT and rows and x and y - EDIT_SCROLL and width and 18 and y and y + height and EDIT_ANCHOR and EDIT_CARET)
     if EDIT_FOCUS && ((transport_now(native_system()) - EDIT_BLINK) / 500) % 2 == 0:
         set row to get_list(rows and line)
         set px to font_measure(substring(EDIT_TEXT and get_list(row and 0) and EDIT_CARET - get_list(row and 0)) and 18)
@@ -320,13 +341,13 @@ define editor_draw with x and y and width and height and tint and caret_color:
 # Read-only selectable text uses the same lossless layout as the composer.
 define selectable_text with text and x and y and width and size and tint:
     set rows to layout_ranges(text and width - 1 and size)
-    set mx to raylib_get_mouse_x()
-    set my to raylib_get_mouse_y()
+    set mx to ui_mouse_x()
+    set my to ui_mouse_y()
     set bottom to y + length_list(rows) * (size + 9)
     set inside to mx >= x && mx <= x + width && my >= y && my < bottom && my >= SELECT_TOP && my < SELECT_BOTTOM
     if inside:
         ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetMouseCursor") and 2)
-    if raylib_is_mouse_button_pressed(0) && inside && EDIT_MENU == 0 && EDIT_MENU_USED == 0:
+    if ui_mouse_pressed() && inside && EDIT_MENU == 0 && EDIT_MENU_USED == 0:
         set SELECT_TEXT to text
         set SELECT_ANCHOR to editor_hit(text and rows and mx - x and my - y and size)
         set SELECT_CARET to SELECT_ANCHOR
@@ -339,7 +360,17 @@ define selectable_text with text and x and y and width and size and tint:
         set SELECT_CLICK_POS to SELECT_CARET
         set SELECT_DRAG to 1
         set EDIT_FOCUS to 0
-    if SELECT_DRAG && raylib_is_mouse_button_down(0) && raylib_is_mouse_button_pressed(0) == 0 && string_equals(SELECT_TEXT and text):
+    if native_android() && SELECT_DRAG && string_equals(SELECT_TEXT and text):
+        if UI_TOUCH_MOVED:
+            set SELECT_DRAG to 0
+        else if EDIT_MENU == 0 && raylib_is_mouse_button_down(0) && transport_now(native_system()) - SELECT_CLICK_TIME >= 550:
+            set bounds to editor_word(text and SELECT_CARET)
+            set SELECT_ANCHOR to get_list(bounds and 0)
+            set SELECT_CARET to get_list(bounds and 1)
+            set SELECT_DRAG to 0
+            editor_menu_open(mx and my)
+    if native_android() == 0 && SELECT_DRAG && raylib_is_mouse_button_down(0) && ui_mouse_pressed() == 0 && string_equals(SELECT_TEXT and text):
+
         set SELECT_CARET to editor_hit(text and rows and mx - x and my - y and size)
     if raylib_is_mouse_button_pressed(1) && inside:
         set EDIT_FOCUS to 0
@@ -348,6 +379,8 @@ define selectable_text with text and x and y and width and size and tint:
             set SELECT_ANCHOR to 0
             set SELECT_CARET to string_length(text)
         editor_menu_open(mx and my)
+    if EDIT_FOCUS == 0 && string_equals(SELECT_TEXT and text) && SELECT_ANCHOR != SELECT_CARET:
+        editor_handle_register(2 and text and rows and x and y and width - 1 and size and SELECT_TOP and SELECT_BOTTOM and SELECT_ANCHOR and SELECT_CARET)
     return editor_paint(text and rows and x and y and size and tint and SELECT_ANCHOR and SELECT_CARET and (EDIT_FOCUS == 0 && string_equals(SELECT_TEXT and text)))
 
 define editor_min with a and b:
@@ -378,20 +411,204 @@ define editor_word with text and position:
 
 define editor_menu_open with x and y:
     set EDIT_MENU to 1
-    set EDIT_MENU_X to editor_min(x and raylib_get_screen_width() - 200)
-    set EDIT_MENU_Y to editor_max(10 and editor_min(y and raylib_get_screen_height() - 170))
+    set EDIT_MENU_WIDTH to 190
+    set EDIT_MENU_HEIGHT to 160
+    if native_android():
+        set EDIT_MENU_WIDTH to (editor_min(380 and ui_screen_width() - 24) / 5) * 5
+        set EDIT_MENU_HEIGHT to 44
+    set EDIT_MENU_X to editor_min(x and ui_screen_width() - 200)
+    set EDIT_MENU_Y to editor_max(10 and editor_min(y and ui_screen_height() - 170))
+    if native_android():
+        set EDIT_MENU_Y to editor_max(10 and y - 70)
     return 0
 
+# Keep the compact touch toolbar outside the text and the 24px handle targets.
+define editor_menu_touch_y with top and bottom and screen_height:
+    if top - 60 >= 10:
+        return top - 60
+    if bottom + 28 + 44 <= screen_height - 10:
+        return bottom + 28
+    return -1
+
 define editor_menu_draw:
+    editor_handles_draw()
     if EDIT_MENU == 0:
         return 0
-    raylib_draw_rectangle(EDIT_MENU_X and EDIT_MENU_Y and 190 and 160 and 4281218857)
+    if native_android():
+        set EDIT_MENU_X to (ui_screen_width() - EDIT_MENU_WIDTH) / 2
+        set top to ui_screen_height()
+        set bottom to 0
+        set h to 0
+        repeat while h < length_list(HANDLE_POINTS):
+            set point to get_list(HANDLE_POINTS and h)
+            set py to get_list(point and 1)
+            if py >= HANDLE_TOP && py <= HANDLE_BOTTOM + 18:
+                set top to editor_min(top and py - HANDLE_SIZE - 13)
+                set bottom to editor_max(bottom and py)
+            set h to h + 1
+        if bottom > 0:
+            set EDIT_MENU_Y to editor_menu_touch_y(top and bottom and ui_screen_height())
+        if EDIT_MENU_Y < 0 || HANDLE_DRAG > 0:
+            set EDIT_MENU to 0
+            return 0
+    raylib_draw_rectangle(EDIT_MENU_X and EDIT_MENU_Y and EDIT_MENU_WIDTH and EDIT_MENU_HEIGHT and 4281218857)
     set items to ["Copy", "Cut", "Paste", "Select all", "Undo"]
     set i to 0
     repeat while i < 5:
         set tint to 4293848808
         if EDIT_FOCUS == 0 && (i == 1 || i == 2 || i == 4):
             set tint to 4286545791
-        font_draw(get_list(items and i) and EDIT_MENU_X + 14 and EDIT_MENU_Y + i * 32 + 7 and 16 and tint)
+        if native_android():
+            set label to get_list(items and i)
+            set cell to EDIT_MENU_WIDTH / 5
+            font_draw(label and EDIT_MENU_X + i * cell + (cell - font_measure(label and 13)) / 2 and EDIT_MENU_Y + 15 and 13 and tint)
+        else:
+            font_draw(get_list(items and i) and EDIT_MENU_X + 14 and EDIT_MENU_Y + i * 32 + 7 and 16 and tint)
+        set i to i + 1
+    return 0
+
+# Apply every native IME event once, including press/release pairs within a frame.
+define editor_android_events with events:
+    if length_list(events) > 0:
+        set EDIT_MENU to 0
+        set EDIT_DRAG to 0
+    set i to 0
+    repeat while i < length_list(events):
+        set event to get_list(events and i)
+        if get_list(event and 0) == "text":
+            editor_insert(get_list(event and 1))
+        else:
+            set key to string_to_int(get_list(event and 1))
+            if key == 42 || key == 76:
+                if EDIT_CARET == EDIT_ANCHOR:
+                    if key == 42:
+                        set EDIT_ANCHOR to editor_previous(EDIT_TEXT and EDIT_CARET)
+                    else:
+                        set EDIT_ANCHOR to editor_next(EDIT_TEXT and EDIT_CARET)
+                editor_insert("")
+        set EDIT_BLINK to transport_now(native_system())
+        set i to i + 1
+    return 0
+
+# Android touch handles use the same byte offsets and wrapped rows as selection.
+set HANDLE_TARGET to 0
+set HANDLE_DRAG to 0
+set HANDLE_SINGLE to 0
+set HANDLE_X to 0
+set HANDLE_Y to 0
+set HANDLE_WIDTH to 0
+set HANDLE_SIZE to 18
+set HANDLE_TOP to 0
+set HANDLE_BOTTOM to 0
+set HANDLE_POINTS to create_list()
+
+define editor_handle_point with text and rows and position and x and y and size:
+    set line to editor_row(rows and position)
+    set start to get_list(get_list(rows and line) and 0)
+    set px to x + font_measure(substring(text and start and position - start) and size)
+    return [px,y + line * (size + 9) + size + 13]
+
+define editor_handle_register with target and text and rows and x and y and width and size and top and bottom and anchor and caret:
+    if native_android() == 0 || text == "":
+        return 0
+    set HANDLE_TARGET to target
+    set HANDLE_X to x
+    set HANDLE_Y to y
+    set HANDLE_WIDTH to width
+    set HANDLE_SIZE to size
+    set HANDLE_TOP to top
+    set HANDLE_BOTTOM to bottom
+    set HANDLE_POINTS to create_list()
+    if anchor != caret:
+        append_list(HANDLE_POINTS and editor_handle_point(text and rows and anchor and x and y and size))
+    else:
+        append_list(HANDLE_POINTS and [0 - 1000,0 - 1000])
+    append_list(HANDLE_POINTS and editor_handle_point(text and rows and caret and x and y and size))
+    return 0
+
+define editor_handle_pick with points and x and y and top and bottom:
+    set best to 0
+    set distance to 577
+    set i to 0
+    repeat while i < length_list(points):
+        set point to get_list(points and i)
+        set px to get_list(point and 0)
+        set py to get_list(point and 1)
+        set dx to x - px
+        set dy to y - py
+        set squared to dx * dx + dy * dy
+        if py >= top && py <= bottom + 18 && squared < distance:
+            set best to i + 1
+            set distance to squared
+        set i to i + 1
+    return best
+
+define editor_handle_move with target and endpoint and position:
+    if target == 1:
+        set position to layout_boundary(EDIT_TEXT and editor_min(string_length(EDIT_TEXT) and editor_max(0 and position)))
+        if endpoint == 1:
+            set EDIT_ANCHOR to position
+        else:
+            if HANDLE_SINGLE:
+                set EDIT_ANCHOR to position
+            set EDIT_CARET to position
+        set EDIT_FOCUS to 1
+        set EDIT_BLINK to transport_now(native_system())
+    else:
+        set position to layout_boundary(SELECT_TEXT and editor_min(string_length(SELECT_TEXT) and editor_max(0 and position)))
+        if endpoint == 1:
+            set SELECT_ANCHOR to position
+        else:
+            set SELECT_CARET to position
+    return 0
+
+# Runs before navigation, scroll and composer hit-testing. A handle owns its touch
+# until release, including when the finger leaves the text's rectangle.
+define editor_handles_update:
+    set UI_TOUCH_CAPTURE to 0
+    if native_android() == 0:
+        return 0
+    if HANDLE_TARGET != 0 && ui_mouse_pressed():
+        set HANDLE_DRAG to editor_handle_pick(HANDLE_POINTS and ui_mouse_x() and ui_mouse_y() and HANDLE_TOP and HANDLE_BOTTOM)
+        if HANDLE_DRAG > 0:
+            set HANDLE_SINGLE to HANDLE_TARGET == 1 && EDIT_ANCHOR == EDIT_CARET
+            set EDIT_MENU to 0
+            set EDIT_DRAG to 0
+            set SELECT_DRAG to 0
+    if HANDLE_DRAG > 0:
+        set UI_TOUCH_CAPTURE to 1
+        set text to SELECT_TEXT
+        if HANDLE_TARGET == 1:
+            set text to EDIT_TEXT
+        set rows to layout_ranges(text and HANDLE_WIDTH and HANDLE_SIZE)
+        set position to editor_hit(text and rows and ui_mouse_x() - HANDLE_X and ui_mouse_y() - HANDLE_Y - HANDLE_SIZE - 13 and HANDLE_SIZE)
+        editor_handle_move(HANDLE_TARGET and HANDLE_DRAG and position)
+        if raylib_is_mouse_button_down(0) == 0:
+            set HANDLE_DRAG to 0
+            if (HANDLE_TARGET == 1 && EDIT_ANCHOR != EDIT_CARET) || (HANDLE_TARGET == 2 && SELECT_ANCHOR != SELECT_CARET):
+                editor_menu_open(ui_mouse_x() and ui_mouse_y() - 190)
+    # Rendering registers only the currently visible selected text for next frame.
+    if HANDLE_DRAG == 0:
+        set HANDLE_TARGET to 0
+        set HANDLE_POINTS to create_list()
+    return 0
+
+define editor_handles_draw:
+    if native_android() == 0:
+        return 0
+    set i to 0
+    repeat while i < length_list(HANDLE_POINTS):
+        set point to get_list(HANDLE_POINTS and i)
+        set px to get_list(point and 0)
+        set py to get_list(point and 1)
+        if py >= HANDLE_TOP && py <= HANDLE_BOTTOM + 18:
+            raylib_draw_rectangle(px - 1 and py - HANDLE_SIZE - 13 and 2 and HANDLE_SIZE + 13 and 4290379449)
+            set dy to -7
+            repeat while dy <= 7:
+                set dx to 0
+                repeat while (dx + 1) * (dx + 1) + dy * dy <= 49:
+                    set dx to dx + 1
+                raylib_draw_rectangle(px - dx and py + dy and dx * 2 + 1 and 1 and 4290379449)
+                set dy to dy + 1
         set i to i + 1
     return 0

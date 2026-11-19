@@ -1,0 +1,55 @@
+import "../src/sync_discovery_service"
+set checks to 0
+
+define discovery_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define discovery_ok with db and result:
+    return result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN coalesce(json_extract(?,'$.status'),'ok') ELSE 'error' END" and [result,result]) == "ok"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3 || file_exists(get_list(args and 1)) || file_exists(get_list(args and 2)):
+        return 1
+    set a to sql_open(get_list(args and 1))
+    set b to sql_open(get_list(args and 2))
+    discovery_assert(sync_devices_init(a) && sync_devices_init(b) and "discovery device schemas")
+    set aid to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set bid to result_cache_scalar(b and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set secret to sync_random_secret()
+    discovery_assert(discovery_ok(a and sync_pair_install(a and bid and "Phone" and secret)) && discovery_ok(b and sync_pair_install(b and aid and "Mac" and secret)) and "paired discovery peers")
+    discovery_assert(discovery_ok(a and sync_discovery_search(a and "unknown" and ["127.0.0.1"] and 18419)) == 0 and "unpaired search rejected before sending")
+    discovery_assert(discovery_ok(a and sync_discovery_search(a and bid and [] and 18419)) == 0 && discovery_ok(a and sync_discovery_search(a and bid and ["127.0.0.1"] and 80)) == 0 and "missing destinations and invalid port rejected")
+    discovery_assert(discovery_ok(a and sync_discovery_listen(a and "8.8.8.8" and 18419 and 8410)) == 0 and "public advertised service rejected")
+    set started to transport_now(native_system())
+    set absent to sync_discovery_search(a and bid and ["127.0.0.1"] and 18419)
+    discovery_assert(discovery_ok(a and absent) == 0 && transport_now(native_system()) - started < 3000 && result_cache_scalar(a and "SELECT count(*) FROM sync_endpoints" and []) == "0" and "unavailable search ends within budget without saving an address")
+    discovery_assert(sync_discovery_reply(b and "invalid" and "192.168.1.20" and 8410) == "" and "invalid probe receives no response")
+    set probe to sync_discovery_probe(a and bid)
+    set nonce to result_cache_scalar(a and "SELECT json_extract(?,'$.nonce')" and [probe])
+    set reply to sync_discovery_reply(b and probe and "192.168.1.20" and 8410)
+    discovery_assert(reply != "" && string_length(reply) < 4096 && string_contains(reply and secret) == 0 && string_contains(reply and "192.168.1.20") == 0 and "bounded encrypted discovery reply")
+    discovery_assert(sync_discovery_reply(b and probe and "192.168.1.20" and 8410) == "" and "replayed probe receives no response")
+    discovery_assert(discovery_ok(a and sync_discovery_accept(a and bid and "000000000000000000000000" and reply and "192.168.1.20")) == 0 and "wrong challenge rejected")
+    discovery_assert(discovery_ok(a and sync_discovery_accept(a and bid and nonce and reply and "192.168.1.20")) && result_cache_scalar(a and "SELECT host||':'||port FROM sync_endpoints" and []) == "192.168.1.20:8410" and "fresh challenge learns peer endpoint")
+    discovery_assert(discovery_ok(a and sync_discovery_accept(a and bid and nonce and reply and "192.168.1.20")) == 0 and "replayed response rejected")
+    set probe to sync_discovery_probe(a and bid)
+    set nonce to result_cache_scalar(a and "SELECT json_extract(?,'$.nonce')" and [probe])
+    set reply to sync_discovery_reply(b and probe and "192.168.1.30" and 8410)
+    discovery_assert(discovery_ok(a and sync_discovery_accept(a and bid and nonce and reply and "192.168.1.99")) == 0 && result_cache_scalar(a and "SELECT count(*) FROM sync_endpoints" and []) == "1" and "source-address mismatch cannot save endpoint")
+    sql_close(a)
+    set a to sql_open(get_list(args and 1))
+    set probe to sync_discovery_probe(a and bid)
+    set nonce to result_cache_scalar(a and "SELECT json_extract(?,'$.nonce')" and [probe])
+    set reply to sync_discovery_reply(b and probe and "192.168.1.30" and 8410)
+    discovery_assert(discovery_ok(a and sync_discovery_accept(a and bid and nonce and reply and "192.168.1.30")) && result_cache_scalar(a and "SELECT count(*) FROM sync_endpoints" and []) == "2" and "new address discovered after process restart")
+    discovery_assert(discovery_ok(b and sync_pair_revoke(b and aid)) && sync_discovery_reply(b and sync_discovery_probe(a and bid) and "192.168.1.30" and 8410) == "" and "revoked peer receives no discovery response")
+    discovery_assert(result_cache_scalar(a and "SELECT count(*) FROM sync_changes" and []) == "0" and "discovered addresses are never replicated as memories")
+    sql_close(a)
+    sql_close(b)
+    display concat("PASS: " and concat(int_to_string(checks) and " authenticated discovery checks"))
+    return 0

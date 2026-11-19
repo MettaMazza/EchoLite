@@ -18,13 +18,16 @@ define main:
     set home to get_list(args and 1)
     set mode to get_list(args and 2)
     assert_lease(file_exists(concat(home and "/state.lock")) == 0 and "isolated fixture")
-    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set libc to native_system()
     set close_fn to ep_dlsym(libc and "close")
     set lock to private_lock(home and "state.lock")
     assert_lease(lock >= 0 and "private regular lock opened")
     set info to alloc_bytes(144)
     ep_dlcall2(ep_dlsym(libc and "fstat") and lock and info)
-    assert_lease(lease_integer(info and 4 and 2) % 4096 == 384 and "0600 permissions")
+    set mode_offset to 4
+    if native_android():
+        set mode_offset to 16
+    assert_lease(lease_integer(info and mode_offset and 2) % 4096 == 384 and "0600 permissions")
     free_bytes(info)
     assert_lease(ep_dlcall2(ep_dlsym(libc and "flock") and lock and 6) == 0 and "exclusive lock held")
     assert_lease(string_contains(state_lease(home and "shared") and "busy") and "exclusive lock blocks normal access")
@@ -34,9 +37,14 @@ define main:
     assert_lease(ep_dlcall2(ep_dlsym(libc and "symlink") and target and alias) == 0 and "symlink fixture")
     assert_lease(private_lock(home and "alias.lock") < 0 and "symlink lock rejected")
     remove_file(alias)
-    assert_lease(ep_dlcall2(ep_dlsym(libc and "link") and target and alias) == 0 and "hardlink fixture")
-    assert_lease(private_lock(home and "state.lock") < 0 and "multiply linked lock rejected")
-    remove_file(alias)
+    set linked to ep_dlcall2(ep_dlsym(libc and "link") and target and alias)
+    if linked == 0:
+        assert_lease(private_lock(home and "state.lock") < 0 and "multiply linked lock rejected")
+        remove_file(alias)
+    else:
+        set link_error to lease_integer(native_errno_pointer() and 0 and 4)
+        assert_lease(native_android() && (link_error == 1 || link_error == 13) and "Android policy prohibits hardlink fixture")
+        display "Android kernel policy denies hardlink creation in this execution context."
     write_file(concat(home and "/.restore.pending") and "pending")
     assert_lease(string_contains(state_lease(home and "shared") and "Interrupted restore") and "restore marker blocks state access")
     remove_file(concat(home and "/.restore.pending"))

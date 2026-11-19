@@ -24,14 +24,19 @@ define main:
     set pending to concat(home and "/Me.txt.pending")
     set target to concat(home and "/protected.txt")
     set libc to native_system()
+    set mode_offset to 4
+    set nonblock_bit to 4
+    if native_android():
+        set mode_offset to 16
+        set nonblock_bit to 2048
     set info to alloc_bytes(144)
     set fd to native_open(target and 514 and 384)
     assert_identity(fd >= 0 and "typed variadic file creation")
     ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info)
-    assert_identity(lease_integer(info and 4 and 2) % 4096 == 384 and "private mode at creation before chmod")
+    assert_identity(lease_integer(info and mode_offset and 2) % 4096 == 384 and "private mode at creation before chmod")
     assert_identity(native_fcntl_int(fd and 4 and 4) == 0 and "nonblocking flag set")
     set flags to native_fcntl_int(fd and 3 and 0)
-    assert_identity(flags / 4 % 2 == 1 and "nonblocking flag actually applied")
+    assert_identity(flags / nonblock_bit % 2 == 1 and "nonblocking flag actually applied")
     assert_identity(native_fcntl_int(fd and 2 and 1) == 0 and "close-on-exec flag set")
     assert_identity(native_fcntl_int(fd and 1 and 0) == 1 and "close-on-exec flag actually applied")
     ep_dlcall1(ep_dlsym(libc and "close") and fd)
@@ -41,7 +46,7 @@ define main:
     assert_identity(file_exists(pending) == 0 and "staging name removed by rename")
     set fd to native_open(path and 0 and 0)
     ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info)
-    assert_identity(lease_integer(info and 4 and 2) % 4096 == 384 and "published identity is private")
+    assert_identity(lease_integer(info and mode_offset and 2) % 4096 == 384 and "published identity is private")
     ep_dlcall1(ep_dlsym(libc and "close") and fd)
     write_file(pending and "stale partial text")
     assert_identity(identity_ok(publish_identity(home and "New Me.")) and "stale staging file recovered")
@@ -56,13 +61,21 @@ define main:
     assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "staging symlink rejected")
     assert_identity(read_file(path) == "Preserve me." && read_file(target) == "untouched" and "failed publication preserves both files")
     remove_file(pending)
-    ep_dlcall2(ep_dlsym(libc and "link") and target and pending)
-    assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "multiply linked staging rejected")
+    set linked to ep_dlcall2(ep_dlsym(libc and "link") and target and pending)
+    if linked == 0:
+        assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "multiply linked staging rejected")
+    else:
+        set link_error to lease_integer(native_errno_pointer() and 0 and 4)
+        assert_identity(native_android() && (link_error == 1 || link_error == 13) and "Android policy prohibits staging hardlink")
     assert_identity(read_file(target) == "untouched" and "hardlink target unchanged")
     remove_file(pending)
     remove_file(path)
-    ep_dlcall2(ep_dlsym(libc and "link") and target and path)
-    assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "multiply linked destination rejected")
+    set linked to ep_dlcall2(ep_dlsym(libc and "link") and target and path)
+    if linked == 0:
+        assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "multiply linked destination rejected")
+    else:
+        set link_error to lease_integer(native_errno_pointer() and 0 and 4)
+        assert_identity(native_android() && (link_error == 1 || link_error == 13) and "Android policy prohibits destination hardlink")
     remove_file(path)
     create_directory(path)
     assert_identity(identity_ok(publish_identity(home and "bad")) == 0 and "destination directory rejected")

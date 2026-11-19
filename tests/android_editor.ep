@@ -1,0 +1,37 @@
+import "../src/chat_editor"
+import "os"
+set checks to 0
+
+define android_edit_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set EDIT_TEXT to "abc🌱"
+    set EDIT_CARET to string_length(EDIT_TEXT)
+    set EDIT_ANCHOR to EDIT_CARET
+    editor_android_events([["key","42"]])
+    android_edit_assert(EDIT_TEXT == "abc" && EDIT_CARET == 3 and "backspace removes a complete UTF-8 codepoint")
+    editor_android_events([["key","42"],["key","42"],["text","xy"]])
+    android_edit_assert(EDIT_TEXT == "axy" && EDIT_CARET == 3 and "burst deletions remain ordered before committed text")
+    set EDIT_MENU to 1
+    set EDIT_DRAG to 1
+    set EDIT_CARET to 1
+    set EDIT_ANCHOR to 3
+    editor_android_events([["key","42"]])
+    android_edit_assert(EDIT_TEXT == "a" && EDIT_CARET == 1 && EDIT_ANCHOR == 1 and "backspace deletes highlighted selection once")
+    android_edit_assert(EDIT_MENU == 0 && EDIT_DRAG == 0 and "keyboard editing dismisses the selection menu")
+    editor_android_events([["text","bc"]])
+    set EDIT_CARET to 1
+    set EDIT_ANCHOR to 1
+    editor_android_events([["key","76"]])
+    android_edit_assert(EDIT_TEXT == "ac" && EDIT_CARET == 1 and "forward deletion uses the moved caret")
+    editor_android_events([["text","🌱"],["key","42"],["text","B"]])
+    android_edit_assert(EDIT_TEXT == "aBc" && EDIT_CARET == 2 and "mixed text and delete events retain ordering")
+    editor_history(0)
+    android_edit_assert(EDIT_TEXT == "ac" and "native editing participates in undo")
+    display concat("PASS: " and concat(int_to_string(checks) and " Android editor event checks"))
+    return 0

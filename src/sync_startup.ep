@@ -1,0 +1,66 @@
+# Acquire the requested command lease only after pending forgetting is finished.
+import "sync_cleanup"
+import "backup_create"
+
+define sync_release_state:
+    slot_unlock(WORKER_LEASE_FD)
+    slot_unlock(STATE_LEASE_FD)
+    set WORKER_LEASE_FD to 0 - 1
+    set STATE_LEASE_FD to 0 - 1
+    return 0
+
+# Missing database is a fresh installation. Any unreadable existing database or
+# malformed marker is an error, never permission to reuse retained context.
+define sync_cleanup_pending with home:
+    set path to concat(home and "/memory.sqlite3")
+    if file_exists(path) == 0:
+        return 0
+    set db to backup_sql_open(path and 16777217)
+    if db == 0:
+        return 0 - 1
+    set present to health_scalar(db and "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sync_cleanup'" and 16)
+    set pending to "0"
+    if present == "1":
+        set pending to health_scalar(db and "SELECT CASE WHEN count(*)=0 THEN 0 WHEN count(*)=1 AND min(singleton=1 AND typeof(epoch)='text' AND length(epoch)>0 AND epoch NOT GLOB '*[^0-9]*') THEN 1 ELSE -1 END FROM sync_cleanup" and 16)
+    else if present != "0":
+        set pending to ""
+    sql_close(db)
+    if pending == "0":
+        return 0
+    if pending == "1":
+        return 1
+    return 0 - 1
+
+define sync_command_lease with home and mode and runtime_home and token and port returning Str:
+    set attempt to 0
+    repeat while attempt < 3:
+        set leased to state_lease(home and mode)
+        if string_contains(leased and "\"status\":\"ok\"") == 0:
+            return leased
+        set pending to sync_cleanup_pending(home)
+        if pending == 0:
+            return leased
+        if pending < 0:
+            sync_release_state()
+            return lease_error("Cannot inspect pending synchronized forgetting")
+        if mode != "maintenance":
+            sync_release_state()
+            set leased to state_lease(home and "maintenance")
+            if string_contains(leased and "\"status\":\"ok\"") == 0:
+                return leased
+        set db to backup_sql_open(concat(home and "/memory.sqlite3") and 16777218)
+        if db == 0:
+            sync_release_state()
+            return lease_error("Cannot open pending synchronized cleanup")
+        set finished to sync_cleanup_finish(db and home and runtime_home and token and port)
+        sql_close(db)
+        if string_contains(finished and "\"status\":\"ok\"") == 0:
+            sync_release_state()
+            return finished
+        if mode == "maintenance":
+            return finished
+        sync_release_state()
+        # Recheck after reacquiring shared ownership: another sync operation may
+        # have run in the gap. Never downgrade by assuming the marker stayed clear.
+        set attempt to attempt + 1
+    return lease_error("State changed during synchronized cleanup; retry the command")

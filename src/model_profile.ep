@@ -1,0 +1,159 @@
+# Device-local generation profiles. Swap is deliberately excluded from capacity.
+import "runtime_paths"
+import "transport"
+import "result_cache"
+
+set PROFILE_CONTEXT to "262144"
+
+define profile_name with profile returning Str:
+    if profile == 1:
+        return "Qwen3.5-9B-Q6_K.gguf"
+    return "Qwen3.5-4B-Q4_K_M.gguf"
+
+define profile_projector with profile returning Str:
+    if profile == 1:
+        return "mmproj-Qwen3.5-9B-F16.gguf"
+    return "mmproj-Qwen3.5-4B-Q8_0.gguf"
+
+define profile_label with profile returning Str:
+    if profile == 1:
+        return "Qwen3.5 9B / 262K context"
+    return "Qwen3.5 4B / 262K context"
+
+define profile_index with name:
+    if string_equals(path_basename(name) and profile_name(1)):
+        return 1
+    if string_equals(path_basename(name) and profile_name(0)):
+        return 0
+    return 0 - 1
+
+# Fixed complete sizes exclude interrupted downloads from automatic selection.
+define profile_file_complete with path and expected:
+    set fd to native_open(path and 256 and 0)
+    if fd < 0:
+        return 0
+    set info to alloc_bytes(256)
+    set valid to ep_dlcall2(ep_dlsym(native_system() and "fstat") and fd and info) == 0
+    if valid:
+        set valid to native_stat_mode(info) / 4096 % 16 == 8 && native_stat_size(info) == expected
+    free_bytes(info)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    return valid
+
+define profile_installed with root and profile:
+    set model_bytes to 3032091584
+    set vision_bytes to 366894560
+    if profile == 1:
+        set model_bytes to 7458301152
+        set vision_bytes to 918166080
+    return profile_file_complete(runtime_model_path(root and profile_name(profile)) and model_bytes) && profile_file_complete(runtime_model_path(root and profile_projector(profile)) and vision_bytes)
+
+define profile_memory_field with text and key:
+    set lines to string_split(text and "\n")
+    set i to 0
+    repeat while i < length_list(lines):
+        set line to get_list(lines and i)
+        if starts_with(line and concat(key and ":")):
+            set value to string_trim(substring(line and string_length(key) + 1 and string_length(line) - string_length(key) - 1))
+            set digits to ""
+            set j to 0
+            repeat while j < string_length(value):
+                set ch to get_character(value and j)
+                if ch < 48 || ch > 57:
+                    break
+                set digits to concat(digits and substring(value and j and 1))
+                set j to j + 1
+            return string_to_int(digits) * 1024
+        set i to i + 1
+    return 0
+
+define profile_memory:
+    set total to 0
+    set available to 0
+    if native_android():
+        set fd to native_open("/proc/meminfo" and 256 and 0)
+        if fd >= 0:
+            set bytes to alloc_bytes(8193)
+            set used to native_signed_int(ep_dlcall3(ep_dlsym(native_system() and "read") and fd and bytes and 8192))
+            if used > 0:
+                poke_byte(bytes and used and 0)
+                set info to ptr_to_str(bytes)
+                set total to profile_memory_field(info and "MemTotal")
+                set available to profile_memory_field(info and "MemAvailable")
+            free_bytes(bytes)
+            ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    else:
+        set bytes to alloc_bytes(8)
+        set size to alloc_bytes(8)
+        native_bytes_write(size and 0 and 8 and 8)
+        if ep_dlcall5(ep_dlsym(native_system() and "sysctlbyname") and "hw.memsize" and bytes and size and 0 and 0) == 0:
+            set total to process_integer(bytes and 8)
+        free_bytes(bytes)
+        free_bytes(size)
+        # Larger Mac profiles need their own measured available-memory admission.
+        # The established 8 GB desktop profile remains available here.
+    return [total,available]
+
+# Budget includes weights, full-context KV, vision, workspace and OS headroom.
+# Evaluate before loading. Never swap engines halfway through a user turn.
+define profile_choose with total and available and large_installed:
+    if large_installed && total >= 21474836480 && available >= 17179869184:
+        return 1
+    return 0
+
+# Actual server identity also separates response, tokenizer and native-slot caches.
+define profile_server_index with db and props:
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.default_generation_settings.n_ctx')=262144 AND json_extract(?,'$.build_info') LIKE 'b12359-%' ELSE 0 END" and [props,props,props]) != "1":
+        return 0 - 1
+    return profile_index(result_cache_scalar(db and "SELECT json_extract(?,'$.model_path')" and [props]))
+
+define profile_namespace with profile returning Str:
+    if profile == 1:
+        return "native-qwen-91898433cf5ce0a8-b12359-kvq4cpu-thinking-config-actions-v2"
+    if profile == 0:
+        return "native-qwen-8d43d974-b12359-kvq4cpu-thinking-config-actions-v2"
+    return ""
+
+define profile_active_namespace with db and token returning Str:
+    # The startup manager writes this only after authenticating the loaded engine.
+    # Keep replay local: an exact persistent cache hit needs no HTTP request.
+    set credential to get_env("ECHOLITE_NATIVE_TOKEN_FILE")
+    if credential != "":
+        set selected to concat(path_dirname(credential) and "/runtime-model.txt")
+        if file_exists(selected):
+            set profile to profile_index(string_trim(read_file(selected)))
+            if profile >= 0:
+                return profile_namespace(profile)
+    set props to transport_get(8400 and "/props" and token)
+    return profile_namespace(profile_server_index(db and props))
+
+# Preference is device-local, separate from the identity of a resident engine.
+# No preference (including installations upgrading from automatic selection) is 4B.
+define profile_preference with directory:
+    set path to concat(directory and "/model-preference.txt")
+    if file_exists(path) && string_trim(read_file(path)) == "9b":
+        return 1
+    return 0
+
+define profile_preference_save with directory and profile:
+    if profile != 0 && profile != 1:
+        return 0
+    set fd to private_lock(directory and "model-preference.txt")
+    if fd < 0:
+        return 0
+    set libc to native_system()
+    set valid to ep_dlcall2(ep_dlsym(libc and "flock") and fd and 2) == 0
+    set value to "4b\n"
+    if profile == 1:
+        set value to "9b\n"
+    if valid:
+        set valid to ep_dlcall2(ep_dlsym(libc and "ftruncate") and fd and 0) == 0
+    if valid:
+        set valid to ep_dlcall3(ep_dlsym(libc and "write") and fd and value and 3) == 3 && ep_dlcall1(ep_dlsym(libc and "fsync") and fd) == 0
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    return valid
+
+define profile_requested with preference and total and available and large_installed:
+    if preference == 1:
+        return profile_choose(total and available and large_installed)
+    return 0

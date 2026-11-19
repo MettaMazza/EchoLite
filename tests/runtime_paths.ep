@@ -1,0 +1,41 @@
+import "../src/runtime_paths"
+import "string"
+set checks to 0
+
+define paths_assert with condition and label:
+    if condition == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: runtime_paths FIXTURE_DIRECTORY"
+        return 1
+    set fixture to get_list(args and 1)
+    set first to concat(fixture and "/model.gguf")
+    set second to concat(fixture and "/other.gguf")
+    write_file(first and "model fixture")
+    write_file(second and "model fixture")
+    paths_assert(runtime_same_model(first and concat(fixture and "/./model.gguf")) and "same inode through path alias")
+    paths_assert(runtime_same_model(first and second) == 0 and "different inode with same contents rejected")
+    paths_assert(runtime_same_model(first and concat(fixture and "/missing.gguf")) == 0 and "missing model rejected")
+    set linked to concat(fixture and "/linked.gguf")
+    paths_assert(ep_dlcall2(ep_dlsym(native_system() and "symlink") and first and linked) == 0 and "symlink fixture created")
+    paths_assert(runtime_same_model(first and linked) == 0 and "symlink model rejected")
+    set root to "/fixture/assets"
+    set home to "/fixture/private-state"
+    if native_android():
+        paths_assert(runtime_model_path(root and "model.gguf") == "/fixture/assets/models/model.gguf" and "Android private model location")
+        paths_assert(string_equals(runtime_lock_directory(root and home) and home) and "Android lock is in writable state")
+        set directory to runtime_native_directory()
+        paths_assert(directory != "" && is_directory(directory) and "kernel resolves executable directory")
+        paths_assert(string_equals(runtime_worker_path(root) and concat(directory and "/libllama-server.so")) and "worker is alongside packaged executable")
+    else:
+        paths_assert(runtime_model_path(root and "model.gguf") == "/fixture/assets/models/native/model.gguf" and "Mac model location preserved")
+        paths_assert(runtime_lock_directory(root and home) == "/fixture/assets/models/runtime" and "Mac startup lock preserved")
+        paths_assert(runtime_worker_path(root) == "/fixture/assets/models/runtime/llama-b12359/llama-server" and "Mac pinned worker location preserved")
+    display concat("PASS: " and concat(int_to_string(checks) and " runtime path checks"))
+    return 0

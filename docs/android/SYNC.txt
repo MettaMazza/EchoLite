@@ -1,0 +1,515 @@
+Android background service update: see BACKGROUND.txt. The service supersedes
+the initial UI-owned Android listener described in earlier checkpoints.
+
+Automatic synchronization update — 2026-11-19
+
+The paired Mac and Android installations now run a native Ernos Plain sync agent.
+The UI starts it automatically and checks its process every five seconds. This
+Mac also runs it through a per-user LaunchAgent so closing its window does not
+stop synchronization. Android now owns the worker through an EP-generated foreground service in a
+separate process, with boot and package-update receivers. See BACKGROUND.txt
+for lifecycle, device settings and explicit user-stop behavior.
+
+The Mac refreshes its authorized ADB forward every three seconds and initiates
+bidirectional USB exchanges. Android initiates Wi-Fi exchanges after USB receipt
+has been quiet for fifteen seconds, using saved endpoints and authenticated LAN
+discovery. Active chat workers defer maintenance; finalized records transfer in
+bounded batches. The agent does not load an additional language model.
+
+Pairing keys remain private in each local database. Mac USB configuration lives
+in data/sync-usb.json with adb (absolute executable path) and serial fields.
+Those machine-specific values, keys, and databases must not be committed.
+For an already paired installation, normal builds now include echolite-sync;
+Android APK builds include libecholite-sync.so. The UI starts the worker itself.
+The optional Mac login service must set ECHOLITE_HOME and invoke bin/echolite-sync.
+
+Open conversations on different devices no longer block history imports. An
+incoming open session is stored as history when a different local session is
+active, preserving the local conversation selection. This does not turn two
+independent active conversations into one shared live generation.
+
+Validation on the actual installations:
+- Recovery snapshots saved before pairing and merging history.
+- Both installations list six conversations after automatic exchange.
+- Removing EchoLite's USB forward caused automatic recreation without a UI action.
+- With USB forwarding paused, Android completed an automatic Wi-Fi transfer.
+- USB configuration restored after that check.
+- Concurrent-open-session regression passes; 21 coordinator checks pass.
+
+Scope: session history, finalized turns, memories, tasks, Me revisions, and tool
+receipts use the existing replicated record pipeline. Model files and machine
+configuration remain local. Attachment file transfer is separate and is not
+implemented by this agent; dependent records require verified local assets.
+
+Earlier checkpoints below are historical, not the current deployment status.
+
+EchoLite native sync implementation checkpoint — 2026-11-19
+
+Application implementation: Ernos Plain.
+
+Transport verified on the connected Android and Mac:
+- Authenticated AES-256-GCM framed TCP exchange through ADB USB forwarding.
+- Direct Wi-Fi exchange to the phone's LAN interface, without USB forwarding.
+- Both exchanges sent records in both directions and used persistent cursors.
+- After USB and Wi-Fi exchanges, sorted exported record JSON was byte-identical
+  on both devices (four records, 521 bytes). Both listeners exited successfully.
+- Fixtures were isolated from the user's application databases. This proves
+  transport and replica convergence, not yet synchronization of app sessions.
+
+Implementation modules:
+sync_store.ep: vector-clock frontiers, concurrent versions, atomic page import,
+permanent deletion tombstones, bounded export and persisted incoming/outgoing
+cursors. Deleted payloads are not retained in the change journal.
+sync_crypto.ep: OpenSSL AES-256-GCM, random nonces, authenticated device/direction
+binding, failed-decryption buffer clearing, bounded encrypted frames.
+sync_pair.ep: explicit local pairing, persistent directional replay counters,
+request-bound responses, revocation and retired-key fingerprints.
+sync_socket.ep: bounded framed TCP, private numeric IPv4 addresses, deadlines,
+small authenticated handshake before accepting larger exchange frames.
+sync_exchange.ep: paired bidirectional exchange with durable acknowledgements.
+
+Prior native test runs on Mac and Android:
+32 frontier checks; 53 durable resume checks; 14 cryptographic checks including
+an upstream AES-GCM known-answer vector; 19 pairing and replay checks.
+The cross-device transport run additionally exercised the compiled Android
+binary and the Mac binary against each other over both physical transports.
+
+Remaining integration work:
+Map application records to stable replicated IDs and preserve relationships;
+project received versions into sessions, turns, memories, tasks and Me history;
+expose concurrent edits for resolution; propagate forgetting through derived
+records and caches; transfer attachments with integrity and interruption recovery;
+add pairing, discovery and connection lifecycle to the app; validate complete
+user-facing journeys, including offline edits, revocation and reconnects.
+
+No pairing keys, device identifiers, LAN addresses or private databases belong
+in the public repository. Test artifacts and secrets remain outside the checkout.
+
+Application identity checkpoint:
+sync_identity.ep assigns stable random IDs to existing and new memories,
+Me revisions, turns and tool runs. SQL triggers track edits and cascading
+removals in the same transaction as application mutations. Tracking stores
+identifiers and flags, never body text. Numeric IDs remain local to each device.
+The module is not yet invoked by application initialization; projection and
+relationship serialization must be connected before enabling live sync.
+
+Executed tests/sync_identity.ep on Mac and native Android: 15 checks passed on
+each. Covered existing-row migration, repeat initialization, entity ID separation,
+ordinary mutation tracking, rollback of deletion and cascades, committed cascading
+forgetting, nonresolution of deleted references, new IDs after recreation, and
+allowlisting of SQL identifiers used to install triggers.
+
+Atomic application capture checkpoint:
+sync_capture.ep evaluates a trusted application snapshot SELECT while holding
+BEGIN IMMEDIATE, writes the replica revision and clears the dirty flag in the
+same commit. Failed snapshots retain the dirty row and previous frontier.
+An unapplied remote revision prevents automatic capture from silently resolving
+that revision. Local content remains available for explicit reconciliation.
+Deletion capture removes prior payloads even when a remote edit is unapplied.
+This is the capture primitive; schema-specific serialization, projection and
+user-facing conflict resolution still require integration.
+
+Executed tests/sync_capture.ep: 11 checks passed on Mac and native Android.
+Rebuilt and ran tests/sync_store.ep after extracting its transaction-level write
+helper: all 32 existing frontier checks passed on Mac.
+
+Portable application serialization checkpoint:
+sync_application.ep captures primary memories, Me revisions, turns and tool
+receipts. References to memories, identity revisions, sessions and turns use
+stable object IDs. Memory snapshots include derivation parents, session metadata,
+task pointers and protection; turns include image/document references and hashes.
+Auxiliary triggers capture relationship insert/update/delete changes, including
+both owners when a link moves. Runtime credentials and executable configuration
+are not serialized. Historical tool arguments remain historical text.
+
+Executed tests/sync_application.ep against an empty database initialized by the
+actual EchoLite core: 22 checks passed on Mac and the native Android build.
+Covered Unicode content, stable relationship references, session closure, removal
+of Me evidence and derivation links, and identifier allowlisting.
+
+Serialization coverage still to extend: belief/correction histories, schedules,
+attachment descriptors/content, and generation history. Remote application
+projection, Me head selection/conflict resolution and live app activation remain
+next integration work. These component checks do not claim live conversation
+sync is enabled yet.
+
+Receiving application projection checkpoint:
+sync_projection.ep applies a single unambiguous live memory frontier in a write
+transaction. It validates payload shape and portable references, allocates a new
+local ID, restores derivation links and protection/session/task metadata, and
+acknowledges the applied frontier. Existing application triggers maintain recall
+indices. Missing parents defer application; dirty local edits are preserved;
+repeating an acknowledged frontier does not rewrite application state. Session
+uniqueness failures roll back content, identity allocation and tracking state.
+Concurrent frontiers and tombstones require the reconciliation path, rather than
+being silently applied by this live-memory projector.
+
+Executed tests/sync_projection.ep on two actual-schema fixture databases:
+23 checks passed on Mac and 23 on native Android. Covered independent numeric
+IDs, Unicode, dependency arrival order, lineage remapping, the existing recall
+index, idempotent replay, offline edit preservation, late session conflicts and
+successful retry once the remote session closes. User databases were untouched.
+
+Remaining projection work includes Me revision/head semantics, conversations and
+tool receipts, deletion closure and cache cleanup, and explicit conflict resolution.
+Live synchronization is not enabled in the application yet.
+
+Explicit active Me selection checkpoint:
+identity_active.ep migrates legacy local revisions into an ordered selection
+history and exposes active_me. Local revision inserts select themselves; history
+imports can suppress selection transactionally. Removing a selected revision
+falls back through prior actual selections, not through imported history.
+If no selected revision remains, core initialization/forgetting creates a local
+reset identity. Reinitialization does not adopt unselected imported rows.
+
+Updated core identity reads and edit-version checks, the UI Me reader and restore
+identity verification. Older databases remain readable by the UI/restore path.
+Core and UI compiled. tests/identity_active.ep passed 14 checks on both Mac and
+native Android. Existing tests/restore.ep passed all 62 isolated backup/restore
+and crash-recovery journey checks using the updated core and local tokenizer.
+The core's me command returned the restored active version after that journey.
+
+These changes prepare safe imported history; paired active-head reconciliation
+and the remote identity projection still need to be connected. No app restart
+or Android APK update was performed for this checkpoint.
+
+Historical Me receiver checkpoint:
+sync_me.ep projects an unambiguous identity revision into local history with
+stable source-memory references. Missing source memories defer the transaction.
+Imported history never activates itself. Source-link changes can update a retained
+revision, but its body/reason/creation text cannot be silently rewritten under
+the same identity. Dirty local records and concurrent frontiers await reconciliation.
+Import/projection suppression flags reset atomically, including on failed imports.
+
+Executed tests/sync_me.ep: 19 checks passed on Mac and 19 on native Android with
+fresh actual application schemas. Verified source dependency order, Unicode,
+active identity isolation, idempotent replay, source-link deletion, rejection of
+historical rewrites, and subsequent local self revision. The real core's me command
+then selected that local revision and published its exact content to fixture Me.txt.
+Active-head exchange/resolution and live UI/service integration are still pending.
+
+Finalized conversation receiver checkpoint:
+sync_conversation.ep projects completed, failed and abandoned turns into local
+conversation history. It resolves user/reply memories, historical Me and session
+membership through stable IDs. Attachment links require matching retained asset
+hashes. Unfinished remote turns remain in the replica frontier, without creating
+local turn signals, execution claims or worker state. Dirty local records,
+concurrent frontiers and unresolved dependencies defer application atomically.
+
+Executed tests/sync_conversation.ep: 16 checks passed on Mac and 16 on native
+Android against actual application schemas. Covered pending-to-completed transfer,
+message and identity relationships, session history, active-Me preservation,
+idempotent replay, no execution-state creation and unavailable attachment retry.
+The real core's session-open command returned the imported completed turn.
+
+Tool-receipt projection, generation/thinking history, visible pending remote-work
+status and live service/UI integration remain to connect. These are fixture-level
+application checks, not yet the complete paired user journey.
+
+Tool-receipt receiver checkpoint:
+Finalized tool receipts now project through the conversation history transaction.
+Tool names, argument text, statuses, timestamps and stable request/observation/turn
+references are retained. Running operations wait for finalization. Imported
+receipts cannot replace an operation with locally managed process state and never
+create process_operations, worker signals or execution claims.
+
+Expanded tests/sync_conversation.ep: all 26 checks passed on Mac and native
+Android, including running-to-completed receipt transfer and idempotent replay.
+The actual core's tool-history command returned the imported fixture receipt with
+its exact historical argument text and linked observation. This verifies history
+transport; the fixture intentionally does not execute its named tool.
+
+Bounded thinking-history capture checkpoint:
+sync_generation.ep splits saved generation JSON into 8192-character UTF-8-safe
+chunks, each below the 64 KiB revision limit, and writes a manifest containing
+ordered part IDs, full SHA-256, character count and byte count. A single capture
+transaction commits all parts, manifest and acknowledgement. Responses are capped
+at the existing 8 MiB transfer bound. Unchanged captures reuse recorded revisions.
+ID-only ownership tables link every queued part to its generation record.
+Deletion, replacement or turn cascade tombstones the manifest and owned chunks,
+removing their retained payloads and seen hashes in the same transaction.
+
+Executed tests/sync_generation.ep: 15 checks passed on Mac and native Android.
+Covered long Unicode text, exact byte/hash reconstruction, per-record bounds,
+retry reuse, injected mid-capture storage failure, transaction rollback,
+forgetting from an old export cursor, fresh IDs after recreation and turn cascade.
+This checkpoint covers sender capture/forgetting; receiver assembly and restored
+thinking-dropdown history are the next integration step.
+
+Thinking-history receiver checkpoint:
+sync_generation_receive.ep validates manifest shape, chunk identities and ordinal
+positions, declared byte/character bounds and full-response SHA-256. It assembles
+one bounded chunk at a time and publishes generation_rounds only after complete
+verification. Partial ownership links roll back on missing data or bad hashes.
+An applied-head receipt avoids repeating completed assembly. Root/owned-chunk
+forgetting removes the assembled response and queued chunk ownership together.
+
+Executed tests/sync_thinking.ep: 30 checks passed on Mac and native Android with
+actual application schemas. Covered a manifest arriving before all chunks,
+interruption with database close/reopen, persisted page cursors, bad digest and
+corrected retry, byte-exact reconstruction, idempotence, forgetting and stale-page
+replay. The real chat_turns view function returned the restored reasoning and
+completion-token count, then empty reasoning/zero tokens after forgetting.
+This validates the dropdown's data path; the live rendered paired-app journey
+still needs service/UI integration. The 15 sender capture/forgetting checks also
+passed again on Mac after extending deletion cleanup to assembly receipts.
+
+Received-memory forgetting checkpoint:
+sync_local_ids deletion now immediately tombstones its replica object and purges
+queued payloads/seen hashes in the same transaction. This closes the interval
+between local deletion and a later sync capture. Existing deleted mappings are
+swept when the tracking schema initializes.
+
+sync_forgetting.ep applies a received memory tombstone through the local recursive
+derivation graph, removes linked Me revisions and cascading conversation/tool
+records, clears thinking and inference caches, and resets active Me if necessary.
+It preserves unrelated memories. A durable sync_cleanup epoch records required
+managed-backup/native-slot cleanup and Me publication; database_done is explicitly
+not the final cleanup acknowledgement. The service must perform that runtime
+cleanup under its maintenance lease before confirming full forgetting.
+
+Executed tests/sync_forgetting.ep: 13 checks passed on Mac and native Android,
+including an injected late deletion failure, rollback, retained unrelated memory,
+derived tombstones, queued-content purge, active-Me reset and idempotent retry.
+After the tracking change, 15 identity and 11 capture regressions passed on Mac.
+Runtime cleanup orchestration and non-memory tombstone reconciliation remain to
+connect before live sync is enabled.
+
+Native backup prerequisite (2026-11-19):
+- Added shared native_sqlite binding: Android resolves the SQLite already linked
+  into the native executable; Mac retains its system SQLite binding.
+- Health, snapshot creation and snapshot checking use that binding.
+- All 23 snapshot creation/crash checks passed on Mac and ARM64 Android fixtures.
+
+Received-forgetting runtime cleanup checkpoint (2026-11-19):
+- sync_cleanup.ep requires the caller's exclusive maintenance lease and acquires
+  the runtime slot lease. It holds an immediate database transaction while
+  rotating recovery authority, purging managed backups/restore preparations,
+  deleting saved native contexts, erasing a resident slot with its credential,
+  and atomically publishing the current active Me.txt.
+- Only after these steps succeed does it acknowledge the exact pending epoch.
+  Failures leave the marker intact; repeat cleanup is idempotent. An absent
+  credential permits cleanup only when the kernel confirms no listener.
+- tests/sync_cleanup.ep: 13 checks passed on Mac and ARM64 Android. Covered
+  maintenance/slot contention, stale backup/context/Me fixtures, injected final
+  acknowledgement failure, retained marker, successful retry and no-op replay.
+  These are isolated fixtures; no user conversations or running model state were
+  modified. Live service integration and command guards remain the next step.
+
+Pending-cleanup command guard checkpoint (2026-11-19):
+- The real core command entry point now uses sync_command_lease before backup
+  checking/staging, initialization, model inference or ordinary state commands.
+  Existing pending forgetting upgrades to exclusive maintenance, completes runtime
+  cleanup, and reacquires/rechecks the requested shared lease. Restore keeps its
+  maintenance lease. Errors release leases and prevent the command from running.
+- Read-only marker inspection distinguishes fresh/legacy state from unreadable or
+  malformed existing cleanup data. No model startup or benchmark is required.
+- tests/sync_startup.ep: 10 checks passed on Mac and native ARM64 Android,
+  including failed cleanup, reopened marker inspection, successful retry,
+  shared/maintenance ownership and malformed schema rejection.
+- Built the real Mac core and exercised isolated init/status commands. A pending
+  marker with no credential correctly prevented status while a real model listener
+  existed, retained epoch 7, and left the user's model untouched. Ordinary status
+  succeeded after explicitly clearing only the disposable fixture's marker.
+- Source integration is committed; refreshed application packaging and live sync
+  orchestration remain to perform together. No user-state sync is enabled yet.
+
+Application coordinator checkpoint (2026-11-19):
+- sync_coordinator.ep captures at most 64 dirty objects per batch, including
+  chunked generation history. Persistent attempt ordering prevents one deferred
+  object from occupying the front of every later batch.
+- Receiver batches apply memories, Me history, finalized conversations, tool
+  receipts and thinking manifests through their existing validating projectors.
+  Dependencies/conflicts remain durable with ID-only work tracking and diagnostic
+  issues. Imported records never launch tools or workers. Memory tombstones run
+  the recursive deletion and runtime cleanup before the batch returns success.
+- Projection requires the exclusive maintenance lease. Unsupported standalone
+  non-memory tombstones with live local records remain explicitly deferred;
+  transport acknowledgement alone is not application completion.
+- tests/sync_coordinator.ep: 21 checks passed on Mac and native ARM64 Android,
+  using fresh actual application schemas. Covered complete conversation data,
+  receipts/thinking, dependency passes, concurrent local edits, database reopen,
+  received forgetting including runtime cleanup, and 70 edits split into 64+6.
+- The coordinator is ready for the service loop; authenticated network exchange,
+  pairing UI, active-identity conflict resolution and remaining domain records
+  still need to be connected to the complete paired-app user journey.
+
+Application-aware network service checkpoint (2026-11-19):
+- sync_service.ep connects bounded capture/projection to the existing paired
+  encrypted exchange. Shared receive/reply helpers keep authenticated hello,
+  direction/replay checks, frame limits and nonce-bound responses unchanged.
+- Durable transport receipt and local/peer application reconciliation are separate
+  result fields. A received forgetting operation rebuilds the outgoing page after
+  its derivation closure is deleted; pending root deletion or failed cleanup
+  returns an error for safe retry rather than sending a stale pre-cleanup page.
+- tests/sync_service.ep is an isolated actual-schema network harness. Ran native
+  Mac <-> ARM64 Android over USB, then direct private Wi-Fi, then resumed USB with
+  restarted processes and persisted counters/cursors. Each device originated a
+  memory. Wi-Fi added another phone memory and propagated a Mac deletion. Both
+  application tables matched after every successful exchange, with zero deferred
+  records and zero pending cleanup. The resumed USB exchange did not resurrect
+  the deletion. Temporary test forwarding was removed and listeners exited.
+- Mac fixture crypto dependency was explicitly configured from the existing local
+  native-tools build; packaging must install that dependency before enabling the
+  service. No personal app state was paired or exchanged by these checks.
+- Pairing/discovery UI, periodic lifecycle integration, active Me reconciliation,
+  remaining domain records and full paired-app interaction remain in scope.
+
+Device management/core integration checkpoint (2026-11-19):
+- sync_devices.ep persists up to four validated private endpoints per paired
+  device. USB loopback is preferred, then Wi-Fi; background callers respect
+  bounded persisted retry delays and manual requests may retry immediately.
+  Revocation removes connection targets. Device status never includes secrets.
+- The real core now exposes sync-devices, sync-pair, sync-address, sync-unpair,
+  sync-now and bounded sync-listen through sync_commands.ep. These operations
+  acquire maintenance ownership and reuse pending-cleanup startup handling.
+- tests/sync_devices.ep: 12 checks passed on Mac and native ARM64 Android,
+  covering unknown/revoked peers, address validation, persisted failure delay,
+  successful retry reset, secret-free views and unpair cleanup.
+- Exercised real Mac core sync-address/devices/now commands against the isolated
+  paired Android fixture. A deliberately absent USB endpoint failed, then direct
+  Wi-Fi succeeded in the same sync-now call. Persistent status recorded USB
+  unavailable and Wi-Fi transferred, with both application results reporting zero
+  deferred records. This did not pair or alter personal app state.
+- Visible Devices controls, end-user credential exchange/discovery and periodic
+  app lifecycle integration remain to connect; the CLI commands are not the
+  final user-facing pairing experience.
+
+Devices UI checkpoint (2026-11-19):
+- Shared native interface now has a Devices navigation item and device cards with
+  last transfer route/time, Refresh, Sync now and two-click confirmed Unpair.
+  Actions use the real core commands and are disabled while another foreground
+  operation or model-control child is active. No credentials are displayed.
+- Added a devices pixel icon and --devices preview entry point. Native Mac build
+  succeeded. Rendered and visually inspected paired and empty states, including
+  the minimum 900x600 desktop layout. Fixed tied-timestamp status ordering so a
+  successful Wi-Fi fallback is shown ahead of the same-second USB failure.
+- Screenshots use isolated fixtures. Interactive button journeys, Android visual
+  validation, pairing creation/import and final installed packaging remain to
+  exercise together. Existing installed apps were not restarted for these previews.
+
+User pairing handshake checkpoint (2026-11-19):
+- sync_invitation.ep creates one explicit ten-minute invitation containing a fresh
+  256-bit pairing secret. Replacement/cancellation clears the previous pending
+  invitation. Invitations are local-only records, excluded from replicated data.
+- The accepting device validates the invitation and returns an encrypted,
+  authenticated confirmation bound to both device identities and the invitation
+  ID. The origin installs the peer only after validating that confirmation, then
+  consumes its pending invitation. Installation is idempotent across interruption
+  without resetting the existing anti-replay counters.
+- tests/sync_invitation.ep: 12 checks passed on Mac and native ARM64 Android:
+  malformed/expired invitations, self-pairing, tampered confirmations, restart,
+  consumed-confirmation replay, cancellation, secret-free encrypted confirmation,
+  exclusion from replica changes, and an actual authenticated sync frame after
+  completing the pairing handshake.
+- UI transfer/copy/paste controls and private child-process input/output still
+  need to be connected. Invitation bearer secrets must not be printed to ordinary
+  status logs or passed in process command-line arguments during that integration.
+
+Pairing controls/private handoff checkpoint (2026-11-19):
+- Devices now provides New pairing, Paste code, Copy code and Dismiss, with
+  separate invitation/confirmation instructions. Secret-bearing payloads are
+  copied only by the explicit Copy action and are not rendered in the panel.
+- sync_pairing_io.ep uses a bounded owned mode-0600 .pairing-input file for the
+  UI/core handoff. Processing consumes it, including malformed input. Non-private
+  input is rejected. Core command output contains only sanitized status; temporary
+  UI output stays in local expiring tables, outside the replica stream.
+- Real core sync-invite produced a sanitized ready response. Native Mac interface
+  compiled and invitation-stage layout was rendered/inspected at 900x600. Button
+  widths and instruction-derived spacing now accommodate the narrower Android
+  logical viewport as well.
+- tests/sync_pairing_io.ep: 12 checks passed on Mac and native ARM64 Android,
+  covering reciprocal named pairing, secret-free command output, encrypted reply,
+  staging/consumption, malformed paste, permission rejection and display dismissal.
+- Interactive installed-app clipboard/button journeys and Android rendered layout
+  remain to validate with packaging; no personal devices have been paired yet.
+
+Installed Android pairing UI checkpoint (2026-11-19):
+- Built and installed the updated native APK after verifying an empty composer and
+  completed turn. Opened Devices on the actual phone and visually inspected the
+  narrow layout. New pairing created the invitation controls; Copy code followed
+  by Paste code exercised the real Android clipboard/private-input/core path.
+- That journey exposed generic child-exit feedback. Added sanitized sync_ui_result
+  reporting and monotonic completion timestamps, so UI feedback belongs to the
+  current command instead of an earlier attempt. Core results now give specific
+  pairing errors and distinguish transfer receipt with deferred reconciliation.
+- Rebuilt/reinstalled and repeated the actual phone journey. The panel displayed
+  "Cannot pair a device with itself". Dismiss removed invitation controls and
+  displayed "Pairing code dismissed." No peer was installed during this check.
+  Saved chats remained present; the phone still selected 9B / 262K context.
+- Final Mac binaries were atomically installed with libecholite_crypto.dylib in
+  models/runtime. A fresh actual-core fixture also confirmed the specific error
+  and positive completion timestamp. Existing Mac windows were not closed.
+- Remaining: Mac button/clipboard journey, reciprocal user pairing, endpoint
+  discovery and automatic lifecycle sync, remaining domain/conflict integration,
+  and full paired-app validation. These phone checks do not replace those steps.
+
+Mac interaction and network enumeration checkpoint (2026-11-19):
+- Used the running Mac application's Devices screen for New pairing -> Copy code
+  -> Paste code. The real clipboard/core path displayed the specific self-pairing
+  rejection. Dismiss cleared the invitation controls and showed the dismissal
+  result. Existing conversations and the empty composer were preserved.
+- sync_network.ep enumerates current ARM64 getifaddrs records directly, using
+  layouts verified against both installed SDK headers. It bounds work to 256
+  entries/eight results, selects active private IPv4 broadcast interfaces, and
+  excludes loopback, public/non-IPv4/down/non-broadcast interfaces. No packets are
+  sent by enumeration; it is a prerequisite for authenticated LAN discovery.
+- tests/sync_network.ep: nine checks passed on Mac and native ARM64 Android,
+  including actual connected-device enumeration and address/flag filtering.
+- Next integration remains the authenticated discovery exchange and automatic
+  listener/sync lifecycle; interface enumeration alone does not discover peers.
+
+Authenticated discovery message checkpoint (2026-11-19):
+- sync_discovery.ep builds bounded encrypted discovery probes and nonce-bound
+  replies using existing paired-device keys and persistent replay counters.
+  Unknown/revoked or malformed probes get no discovery reply. A learned endpoint
+  must match the source address and authenticated advertised service port.
+- tests/sync_discovery.ep: 12 checks passed on Mac and native ARM64 Android,
+  covering encrypted bounded replies, wrong challenges, replayed probes/replies,
+  source-address mismatch, new-address discovery after restart, revocation and
+  exclusion of discovered endpoints from replicated memories.
+- This checkpoint validates discovery message semantics. UDP delivery/broadcast,
+  app-owned listener lifecycle and automatic connection scheduling remain to be
+  connected and exercised on the actual LAN before automatic discovery is ready.
+
+Native discovery transport checkpoint (2026-11-19):
+- sync_datagram.ep implements bounded nonblocking IPv4 UDP with ephemeral or
+  explicit local binds, broadcast sending, source-address decoding, deadlines,
+  a 4096-byte frame limit and rejection of embedded NUL/oversized input. It logs
+  no packet contents. All application logic remains Ernos Plain.
+- tests/sync_datagram.ep passed 11 checks on Mac and native ARM64 Android,
+  covering invalid binds, actual loopback delivery/source identity, the maximum
+  frame, oversized incoming/outgoing packets, embedded NUL and idle deadlines.
+- tests/sync_discovery_wire.ep exercised existing isolated reciprocal pairing
+  databases on the actual Wi-Fi LAN. Mac-to-phone direct UDP discovery succeeded;
+  phone-to-LAN broadcast discovery received the Mac's authenticated response and
+  saved its endpoint. Both listener and initiator reported success.
+- Mac-originated broadcasts did not reach the phone in two bounded attempts;
+  direct UDP succeeded. The cause is not yet established. Do not depend on Android
+  receiving broadcasts: phone-initiated discovery is the verified direction.
+- These are native shell-harness checks, not installed-app lifecycle evidence.
+  App-owned discovery/listener scheduling, reciprocal UI pairing and automatic
+  USB/Wi-Fi synchronization remain the next integration work.
+
+Bounded discovery operations checkpoint (2026-11-19):
+- sync_discovery_service.ep supplies a paired-device search over up to eight
+  current interface broadcasts. It uses one fresh challenge, a 1.5-second total
+  receive deadline and at most 32 incoming datagrams; only an authenticated reply
+  matching its source can save an endpoint. Unknown peers fail before sending.
+- A one-second listener tick processes up to 32 packets, ignoring unauthenticated
+  traffic without ending the receive window. The app supervisor will schedule
+  these ticks; this does not yet install a background discovery service.
+- Core commands: sync-discover PEER and sync-discovery-listen HOST (UDP 8411,
+  advertised sync TCP 8410). They use the existing maintenance lease, serializing
+  replay counters against other core sync operations. Sync now tries saved
+  endpoints first, then discovery and a transfer retry if discovery succeeds.
+- All 16 authenticated discovery/service checks passed on Mac and native Android,
+  including unpaired search, invalid destinations/ports, public advertisement
+  rejection and bounded unavailable-peer behavior without endpoint creation.
+- The production search/listener functions completed authenticated discovery over
+  actual phone-originated Wi-Fi broadcast using isolated reciprocal test DBs.
+  The final Mac core compiled; its listener returned an idle success and its
+  unpaired search returned the specific error with exit status 1.
+- Current installed UI packages have not been replaced for this checkpoint.
+  Automatic app listener lifecycle and end-to-end Sync now discovery/transfer
+  validation remain to be connected; transport harness success is not that proof.

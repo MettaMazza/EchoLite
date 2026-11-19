@@ -32,7 +32,7 @@ define document_child with db and executable and path and page and output_budget
                     set peak to rss
                 if rss > 268435456:
                     set problem to "document extraction exceeded sampled 256 MiB resident memory budget"
-            if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0 || lease_integer(info and 96 and 8) > output_budget:
+            if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0 || native_stat_size(info) > output_budget:
                 set problem to "document extraction exceeded its output budget"
             if transport_now(libc) >= deadline:
                 set problem to "document extraction exceeded 20-second deadline"

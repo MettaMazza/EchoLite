@@ -1,0 +1,71 @@
+# Bounded, restartable application work above the authenticated replica transport.
+import "sync_cleanup"
+
+define sync_coordinator_init with db:
+    if sync_application_init(db) == 0 || sync_generation_init(db) == 0 || sync_forgetting_init(db) == 0:
+        return 0
+    set code to sql_execute(db and "CREATE TABLE IF NOT EXISTS sync_work(direction TEXT NOT NULL,object TEXT NOT NULL,attempt INTEGER NOT NULL,issue TEXT NOT NULL DEFAULT '',PRIMARY KEY(direction,object)); INSERT OR IGNORE INTO sync_meta VALUES('work_sequence','0');")
+    return code == 0
+
+define sync_work_result with db and direction and object and result:
+    set issue to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN CASE WHEN json_extract(?,'$.status')='error' THEN coalesce(json_extract(?,'$.text'),'Synchronization deferred') ELSE '' END ELSE 'Invalid synchronization result' END" and [result,result,result])
+    if sql_execute(db and "BEGIN IMMEDIATE; UPDATE sync_meta SET value=CAST(value AS INTEGER)+1 WHERE key='work_sequence';") != 0:
+        sql_execute(db and "ROLLBACK")
+        return 0
+    if sync_execute(db and "INSERT INTO sync_work(direction,object,attempt,issue) SELECT ?,?,CAST(value AS INTEGER),? FROM sync_meta WHERE key='work_sequence' ON CONFLICT(direction,object) DO UPDATE SET attempt=excluded.attempt,issue=excluded.issue" and [direction,object,issue]) == 0 || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return 0
+    return 1
+
+# Oldest-attempt-first prevents a conflicting record from starving later edits.
+# Snapshot builders own their transactions and preserve uncaptured local branches.
+define sync_capture_batch with db returning Str:
+    set rows to sql_query_params(db and "SELECT c.kind,c.local_id,c.object,c.round FROM (SELECT kind,CAST(local_id AS TEXT) local_id,object,'' round FROM sync_local_ids WHERE dirty=1 UNION ALL SELECT 'generation',CAST(turn_id AS TEXT),object,CAST(round AS TEXT) FROM sync_generation_rows WHERE dirty=1) c LEFT JOIN sync_work w ON w.direction='capture' AND w.object=c.object ORDER BY coalesce(w.attempt,0),c.object LIMIT 64" and [])
+    set index to 0
+    repeat while index < length_list(rows):
+        set row to get_list(rows and index)
+        set kind to get_list(row and 0)
+        set result to ""
+        if kind == "generation":
+            set result to sync_generation_capture(db and get_list(row and 1) and get_list(row and 3))
+        else:
+            set result to sync_application_capture(db and kind and get_list(row and 1))
+        if sync_work_result(db and "capture" and get_list(row and 2) and result) == 0:
+            return result_cache_error("Cannot persist synchronization capture progress")
+        set index to index + 1
+    return result_cache_scalar(db and "SELECT json_object('status','ok','examined',CAST(? AS INTEGER),'pending',(SELECT count(*) FROM sync_local_ids WHERE dirty=1)+(SELECT count(*) FROM sync_generation_rows WHERE dirty=1))" and [int_to_string(index)])
+
+define sync_project_batch with db and home and runtime_home and token and port returning Str:
+    if STATE_LEASE_FD < 0 || WORKER_LEASE_FD < 0:
+        return result_cache_error("Sync application projection requires exclusive maintenance")
+    # Chunks are assembled by their owning generation manifest, never separately.
+    set rows to sql_query_params(db and "SELECT o.id,o.kind,CAST(o.deleted AS TEXT) FROM sync_objects o LEFT JOIN sync_work w ON w.direction='project' AND w.object=o.id WHERE o.kind!='generation_chunk' ORDER BY coalesce(w.attempt,0),CASE o.kind WHEN 'memory' THEN 0 WHEN 'identity' THEN 1 WHEN 'turn' THEN 2 WHEN 'tool_run' THEN 3 ELSE 4 END,o.id LIMIT 64" and [])
+    set index to 0
+    repeat while index < length_list(rows):
+        set row to get_list(rows and index)
+        set object to get_list(row and 0)
+        set kind to get_list(row and 1)
+        set deleted to get_list(row and 2)
+        set result to result_cache_error("Record requires additional reconciliation")
+        if kind == "generation":
+            set result to sync_project_generation(db and object)
+        else if deleted == "1":
+            if kind == "memory":
+                set result to sync_apply_memory_tombstone(db and object)
+            else if result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE object=? AND deleted=0" and [object]) == "0":
+                set result to "{\"status\":\"ok\"}"
+        else if kind == "memory":
+            set result to sync_project_memory(db and object)
+        else if kind == "identity":
+            set result to sync_project_me(db and object)
+        else if kind == "turn":
+            set result to sync_project_turn(db and object)
+        else if kind == "tool_run":
+            set result to sync_project_receipt(db and object)
+        if sync_work_result(db and "project" and object and result) == 0:
+            return result_cache_error("Cannot persist synchronization projection progress")
+        set index to index + 1
+    set cleaned to sync_cleanup_finish(db and home and runtime_home and token and port)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [cleaned]) != "ok":
+        return cleaned
+    return result_cache_scalar(db and "SELECT json_object('status','ok','examined',CAST(? AS INTEGER),'deferred',(SELECT count(*) FROM sync_work WHERE direction='project' AND issue!=''))" and [int_to_string(index)])

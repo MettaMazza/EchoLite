@@ -20,7 +20,7 @@ define backup_inventory with home and operation and identifier returning Str:
             return "{\"status\":\"ok\",\"backups\":[]}"
         return backup_check_error("Backup directory is unavailable or is a symlink")
     set info to alloc_bytes(144)
-    set owned to ep_dlcall2(ep_dlsym(libc and "fstat") and dir and info) == 0 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid"))
+    set owned to ep_dlcall2(ep_dlsym(libc and "fstat") and dir and info) == 0 && native_stat_owner(info) == ep_dlcall0(ep_dlsym(libc and "getuid"))
     free_bytes(info)
     if owned == 0:
         ep_dlcall1(ep_dlsym(libc and "close") and dir)
@@ -66,7 +66,7 @@ define backup_scan with dir returning Str:
     set count to 0
     set finished to 0
     set info to alloc_bytes(144)
-    set errno_pointer to ep_dlcall0(ep_dlsym(libc and "__error"))
+    set errno_pointer to native_errno_pointer()
     repeat while valid == 1 && finished == 0:
         native_bytes_write(errno_pointer and 0 and 0 and 4)
         set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and stream)
@@ -78,15 +78,15 @@ define backup_scan with dir returning Str:
             set scanned to scanned + 1
             if scanned > 10000:
                 set valid to 0
-            set name to ptr_to_str(entry + 21)
+            set name to native_dirent_name(entry)
             if string_length(name) == 47 && starts_with(name and "backup-") && ends_with(name and ".sqlite3"):
                 set identifier to substring(name and 7 and 32)
                 if snapshot_hex(identifier and 32):
                     set count to count + 1
-                    if count > 3 || ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and 32) != 0 || lease_integer(info and 4 and 2) / 4096 != 8:
+                    if count > 3 || ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and native_at_nofollow()) != 0 || native_stat_mode(info) / 4096 != 8:
                         set valid to 0
                     else:
-                        set bytes to int_to_string(lease_integer(info and 96 and 8))
+                        set bytes to int_to_string(native_stat_size(info))
                         set modified to int_to_string(lease_integer(info and 48 and 8))
                         if sql_execute_params(db and "INSERT INTO inventory VALUES(?,CAST(? AS INTEGER),CAST(? AS INTEGER))" and [identifier,bytes,modified]) != 101:
                             set valid to 0

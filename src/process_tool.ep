@@ -57,7 +57,7 @@ define process_run with db and home and helper and expression and epoch and oper
                 if writer >= 0:
                     ep_dlcall1(ep_dlsym(libc and "close") and writer)
                     set writer to 0 - 1
-            if ep_dlcall2(ep_dlsym(libc and "fstat") and output and info) != 0 || lease_integer(info and 96 and 8) > 32768:
+            if ep_dlcall2(ep_dlsym(libc and "fstat") and output and info) != 0 || native_stat_size(info) > 32768:
                 set problem to "Supervisor receipt exceeds its byte budget"
                 if writer >= 0:
                     ep_dlcall1(ep_dlsym(libc and "close") and writer)

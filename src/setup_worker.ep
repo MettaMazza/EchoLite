@@ -1,0 +1,246 @@
+# One-action installation for supported Apple Silicon Macs and connected Android.
+import "setup_common"
+import "sync_crypto"
+set SETUP_ADB to ""
+set SETUP_SERIAL to ""
+set SETUP_PHONE_CORE to ""
+
+define setup_adb_args with args:
+    set out to ["-s",SETUP_SERIAL]
+    set i to 0
+    repeat while i < length_list(args):
+        append_list(out and get_list(args and i))
+        set i to i + 1
+    return out
+
+define setup_phone with command returning Str:
+    set arguments to ["shell","run-as","dev.echolite.android","sh","-c"]
+    append_list(arguments and concat("'" and concat(command and "'")))
+    return setup_capture(SETUP_ADB and setup_adb_args(arguments))
+
+define setup_phone_core with args returning Str:
+    return setup_phone(concat("export ECHOLITE_HOME=/data/user/0/dev.echolite.android/files/data; " and concat(SETUP_PHONE_CORE and concat(" " and args))))
+
+define setup_asset with item:
+    set key to get_list(item and 0)
+    set url to get_list(item and 1)
+    set hash to get_list(item and 2)
+    set size to string_to_int(get_list(item and 3))
+    set relative to get_list(item and 4)
+    set kind to get_list(item and 5)
+    if string_length(hash) != 64 || size <= 0 || string_contains(key and "/") || string_contains(key and "..") || starts_with(relative and "/") || string_contains(relative and ".."):
+        setup_fail("Invalid release manifest")
+    set cached to concat(SETUP_CACHE and concat("/" and concat(key and ".asset")))
+    if setup_checked(cached and hash) == 0:
+        set partial to concat(cached and ".part")
+        set mirror to get_env("ECHOLITE_SETUP_ASSET_BASE")
+        if mirror != "" && starts_with(url and "https://github.com/MettaMazza/EchoLite/releases/download/"):
+            set url to concat(mirror and concat("/" and path_basename(url)))
+        setup_status(concat("Downloading " and key))
+        write_file(concat(SETUP_PROGRESS and ".download") and partial)
+        if file_exists(partial) == 0 || file_size(partial) != size:
+            setup_wait("/usr/bin/curl" and ["--fail","--location","--retry","3","--connect-timeout","30","--continue-at","-","--output",partial,url])
+        if file_size(partial) != size || setup_checked(partial and hash) == 0:
+            remove_file(partial)
+            setup_fail(concat("Download failed its checksum: " and key))
+        if ep_dlcall2(ep_dlsym(native_system() and "rename") and partial and cached) != 0:
+            setup_fail("Cannot publish verified download")
+        remove_file(concat(SETUP_PROGRESS and ".download"))
+        setup_checked(cached and hash)
+    if kind == "archive":
+        set stamp to concat(SETUP_ROOT and concat("/.installed/" and key))
+        if file_exists(stamp) == 0 || string_equals(read_file(stamp) and hash) == 0:
+            setup_status(concat("Installing " and key))
+            setup_wait("/usr/bin/tar" and ["-xzf",cached,"-C",SETUP_ROOT])
+            application_directory(path_dirname(stamp) and 0)
+            write_file(stamp and hash)
+    else:
+        set destination to concat(SETUP_ROOT and concat("/" and relative))
+        if setup_checked(destination and hash) == 0:
+            setup_status(concat("Installing " and key))
+            setup_copy(cached and destination)
+            if setup_checked(destination and hash) == 0:
+                setup_fail(concat("Installed file checksum failed: " and key))
+    return 0
+
+# Resume a large phone file by its pinned-hash-specific temporary filename.
+define setup_phone_file with source and relative and hash:
+    set remote to concat("files/" and relative)
+    set existing to setup_phone(concat("sha256sum " and remote))
+    if starts_with(existing and hash):
+        return 0
+    set partial to concat(remote and concat("." and concat(hash and ".part")))
+    setup_status(concat("Copying to phone: " and path_basename(source)))
+    setup_phone(concat("mkdir -p " and path_dirname(remote)))
+    set offset to string_to_int(setup_phone(concat("stat -c %s " and partial)))
+    if offset < 0 || offset > file_size(source):
+        setup_phone(concat("rm -f " and partial))
+        set offset to 0
+    set command to concat("cat >> " and partial)
+    if setup_stream(SETUP_ADB and setup_adb_args(["exec-in","run-as","dev.echolite.android","sh","-c",command]) and source and offset) != 0:
+        setup_fail("Phone disconnected during transfer. Reconnect and reopen to resume.")
+    setup_status(concat("Verifying on phone: " and path_basename(source)))
+    if starts_with(setup_phone(concat("sha256sum " and partial)) and hash) == 0:
+        setup_phone(concat("rm -f " and partial))
+        setup_fail("Phone transfer failed its checksum; reopen to retry")
+    setup_phone(concat("mv " and concat(partial and concat(" " and remote))))
+    return 0
+
+define setup_phone_install with manifest:
+    set SETUP_ADB to concat(SETUP_ROOT and "/tools/platform-tools/adb")
+    setup_status("Connect one Android phone. Enable USB debugging and approve this Mac on the phone.")
+    set ready to 0
+    repeat while ready == 0:
+        set devices to setup_capture(SETUP_ADB and ["devices"])
+        set lines to string_split(devices and "\n")
+        set count to 0
+        set i to 1
+        repeat while i < length_list(lines):
+            set line to get_list(lines and i)
+            if ends_with(line and "\tdevice"):
+                set parts to string_split(line and "\t")
+                set SETUP_SERIAL to get_list(parts and 0)
+                set count to count + 1
+            set i to i + 1
+        if count > 1:
+            setup_fail("Connect only the phone you want to install EchoLite on")
+        if count == 1:
+            set ready to 1
+        else:
+            ep_dlcall1(ep_dlsym(native_system() and "sleep") and 2)
+    setup_status("Installing the Android app")
+    setup_wait(SETUP_ADB and setup_adb_args(["install","--no-incremental","-r",concat(SETUP_ROOT and "/android/EchoLite.apk")]))
+    set package to setup_capture(SETUP_ADB and setup_adb_args(["shell","pm","path","dev.echolite.android"]))
+    if starts_with(package and "package:/data/app/") == 0 || string_contains(package and "\n") || string_contains(package and "'"):
+        setup_fail("Android did not return a valid app location")
+    set native to concat(path_dirname(substring(package and 8 and string_length(package) - 8)) and "/lib/arm64")
+    set SETUP_PHONE_CORE to concat(native and "/libecholite-core.so")
+    setup_phone("mkdir -p files/data files/models files/library files/config")
+    set support_hash to result_cache_scalar(SETUP_DB and "SELECT json_extract(value,'$.sha256') FROM json_each(?,'$.assets') WHERE json_extract(value,'$.key')='support'" and [manifest])
+    set receipt to setup_phone("cat files/.support-installed")
+    if string_equals(receipt and support_hash) == 0:
+        setup_status("Installing offline dictionary and voice resources on phone")
+        if setup_stream(SETUP_ADB and setup_adb_args(["exec-in","run-as","dev.echolite.android","tar","-xzf","-","-C","files"]) and concat(SETUP_CACHE and "/support.asset") and 0) != 0:
+            setup_fail("Phone resource transfer interrupted. Reconnect and reopen to resume.")
+        setup_phone(concat("printf %s " and concat(support_hash and " > files/.support-installed")))
+    set files to sql_query_params(SETUP_DB and "SELECT json_extract(value,'$.path'),json_extract(value,'$.android_path'),json_extract(value,'$.sha256') FROM json_each(?,'$.assets') WHERE json_type(value,'$.android_path')='text'" and [manifest])
+    set i to 0
+    repeat while i < length_list(files):
+        set item to get_list(files and i)
+        setup_phone_file(concat(SETUP_ROOT and concat("/" and get_list(item and 0))) and get_list(item and 1) and get_list(item and 2))
+        set i to i + 1
+    # The reference metadata records each filesystem's own modification time.
+    set template to concat(SETUP_ROOT and "/config/wikipedia-source.json")
+    setup_phone_file(template and "config/wikipedia-source.json" and setup_hash(template))
+    set result to setup_phone(concat(native and "/libecholite-library.so files/library files/config/wikipedia-source.json"))
+    if result_cache_scalar(SETUP_DB and "SELECT json_extract(?,'$.status')" and [result]) != "ok":
+        setup_fail("Android reference-library registration failed")
+    setup_phone_core("init")
+    set phone to setup_phone_core("sync-devices")
+    set phone_id to result_cache_scalar(SETUP_DB and "SELECT json_extract(?,'$.device')" and [phone])
+    set core to concat(SETUP_ROOT and "/bin/echolite-core")
+    set mac to setup_capture(core and ["sync-devices"])
+    set mac_id to result_cache_scalar(SETUP_DB and "SELECT json_extract(?,'$.device')" and [mac])
+    if string_length(phone_id) != 32 || string_length(mac_id) != 32:
+        setup_fail("Cannot read pairing identities")
+    set paired to result_cache_scalar(SETUP_DB and "SELECT count(*) FROM json_each(?,'$.peers') WHERE json_extract(value,'$.id')=? AND json_extract(value,'$.enabled')=1" and [mac,phone_id])
+    set reciprocal to result_cache_scalar(SETUP_DB and "SELECT count(*) FROM json_each(?,'$.peers') WHERE json_extract(value,'$.id')=? AND json_extract(value,'$.enabled')=1" and [phone,mac_id])
+    if paired != "1" || reciprocal != "1":
+        setup_status("Pairing the connected phone with this Mac")
+        set secret_path to concat(SETUP_CACHE and "/pair.key")
+        set random to alloc_bytes(32)
+        ep_dlcall2(ep_dlsym(native_system() and "arc4random_buf") and random and 32)
+        set secret to sync_hex(random and 32)
+        free_bytes(random)
+        write_file(secret_path and secret)
+        if setup_stream(SETUP_ADB and setup_adb_args(["exec-in","run-as","dev.echolite.android","sh","-c","cat > files/data/setup-pair.key"]) and secret_path and 0) != 0:
+            remove_file(secret_path)
+            setup_fail("Pairing transfer interrupted")
+        set a to setup_capture(core and ["sync-pair",phone_id,"Android",secret_path])
+        set b to setup_phone_core(concat("sync-pair " and concat(mac_id and " Mac /data/user/0/dev.echolite.android/files/data/setup-pair.key")))
+        remove_file(secret_path)
+        setup_phone("rm -f files/data/setup-pair.key")
+        if result_cache_scalar(SETUP_DB and "SELECT json_extract(?,'$.status')" and [a]) != "ok" || result_cache_scalar(SETUP_DB and "SELECT json_extract(?,'$.status')" and [b]) != "ok":
+            setup_fail("Pairing did not complete; reopen to retry")
+    setup_wait(core and ["sync-address",phone_id,"127.0.0.1","18410","usb"])
+    set config to result_cache_scalar(SETUP_DB and "SELECT json_object('adb',?,'serial',?)" and [SETUP_ADB,SETUP_SERIAL])
+    write_file(concat(SETUP_ROOT and "/data/sync-usb.json") and config)
+    setup_wait(SETUP_ADB and setup_adb_args(["forward","tcp:18410","tcp:8410"]))
+    setup_wait(SETUP_ADB and setup_adb_args(["shell","am","start","-n","dev.echolite.android/org.libsdl.app.SDLActivity"]))
+    return 0
+
+# Register the paired sync worker at user login; no administrator access needed.
+define setup_login_sync:
+    set directory to concat(get_env("HOME") and "/Library/LaunchAgents")
+    application_directory(directory and 0)
+    set path to concat(directory and "/dev.echolite.sync.plist")
+    set log to concat(SETUP_ROOT and "/data/sync-agent.log")
+    set plist to result_cache_scalar(SETUP_DB and "SELECT json_object('Label','dev.echolite.sync','ProgramArguments',json_array(?),'EnvironmentVariables',json_object('ECHOLITE_HOME',?),'RunAtLoad',json('true'),'KeepAlive',json('true'),'ThrottleInterval',10,'StandardOutPath',?,'StandardErrorPath',?)" and [concat(SETUP_ROOT and "/bin/echolite-sync"),concat(SETUP_ROOT and "/data"),log,log])
+    set temporary to concat(path and ".installing")
+    write_file(temporary and plist)
+    setup_wait("/usr/bin/plutil" and ["-convert","xml1",temporary])
+    set domain to concat("gui/" and int_to_string(ep_dlcall0(ep_dlsym(native_system() and "getuid"))))
+    setup_capture("/bin/launchctl" and ["bootout",concat(domain and "/dev.echolite.sync")])
+    if ep_dlcall2(ep_dlsym(native_system() and "rename") and temporary and path) != 0:
+        setup_fail("Cannot install background sync registration")
+    setup_wait("/bin/launchctl" and ["bootstrap",domain,path])
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 6:
+        display "Usage: setup_worker mac|android INSTALL_ROOT CACHE PROGRESS MANIFEST"
+        return 1
+    ep_dlcall1(ep_dlsym(native_system() and "umask") and 63)
+    set mode to get_list(args and 1)
+    if mode != "mac" && mode != "android":
+        return 1
+    set SETUP_ROOT to get_list(args and 2)
+    set SETUP_CACHE to get_list(args and 3)
+    set SETUP_PROGRESS to get_list(args and 4)
+    application_directory(SETUP_ROOT and 0)
+    application_directory(SETUP_CACHE and 0)
+    set lock to private_lock(SETUP_CACHE and "install.lock")
+    if lock < 0 || ep_dlcall2(ep_dlsym(native_system() and "flock") and lock and 6) != 0:
+        return 2
+    set SETUP_DB to sql_open(":memory:")
+    set manifest to read_file(get_list(args and 5))
+    if result_cache_scalar(SETUP_DB and "SELECT json_extract(?,'$.schema')" and [manifest]) != "1":
+        setup_fail("Unsupported or missing release manifest")
+    if setup_capture("/usr/bin/uname" and ["-m"]) != "arm64":
+        setup_fail("This installer supports Apple Silicon Macs")
+    set assets to sql_query_params(SETUP_DB and "SELECT json_extract(value,'$.key'),json_extract(value,'$.url'),json_extract(value,'$.sha256'),CAST(json_extract(value,'$.bytes') AS TEXT),coalesce(json_extract(value,'$.path'),''),json_extract(value,'$.kind') FROM json_each(?,'$.assets') WHERE json_extract(value,'$.target')='all' OR json_extract(value,'$.target')=? ORDER BY CAST(key AS INTEGER)" and [manifest,mode])
+    if length_list(assets) < 6:
+        setup_fail("Release manifest is missing required assets")
+    set missing to 5368709120
+    set i to 0
+    repeat while i < length_list(assets):
+        set item to get_list(assets and i)
+        if file_exists(concat(SETUP_CACHE and concat("/" and concat(get_list(item and 0) and ".asset")))) == 0:
+            set missing to missing + string_to_int(get_list(item and 3))
+        set i to i + 1
+    set info to alloc_bytes(256)
+    if ep_dlcall2(ep_dlsym(native_system() and "statvfs") and SETUP_ROOT and info) != 0 || native_available_bytes(info) < missing:
+        free_bytes(info)
+        setup_fail("Not enough disk space for the full offline installation (about 60 GB on a fresh Mac)")
+    free_bytes(info)
+    set i to 0
+    repeat while i < length_list(assets):
+        setup_asset(get_list(assets and i))
+        set i to i + 1
+    setup_status("Registering the offline reference library")
+    setup_wait(concat(SETUP_ROOT and "/bin/echolite-library") and [concat(SETUP_ROOT and "/library"),concat(SETUP_ROOT and "/config/wikipedia-source.json")])
+    application_directory(concat(SETUP_ROOT and "/data") and 0)
+    set_env("ECHOLITE_HOME" and concat(SETUP_ROOT and "/data"))
+    setup_wait(concat(SETUP_ROOT and "/bin/echolite-core") and ["init"])
+    if mode == "android":
+        setup_phone_install(manifest)
+    if get_env("ECHOLITE_SETUP_NO_LAUNCH") != "1":
+        setup_login_sync()
+        application_directory(concat(get_env("HOME") and "/Applications") and 0)
+        set link to concat(get_env("HOME") and "/Applications/EchoLite.app")
+        if file_exists(link) == 0:
+            ep_dlcall2(ep_dlsym(native_system() and "symlink") and concat(SETUP_ROOT and "/EchoLite.app") and link)
+        setup_wait("/usr/bin/open" and [concat(SETUP_ROOT and "/EchoLite.app")])
+    setup_status("DONE: EchoLite is installed. Offline assets are ready.")
+    return 0

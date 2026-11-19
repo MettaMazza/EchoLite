@@ -35,11 +35,11 @@ define wiki_manifest with db and library returning Str:
     set header to alloc_bytes(80)
     set digest to alloc_bytes(16)
     set problem to ""
-    if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0 || lease_integer(info and 4 and 2) / 4096 != 8:
+    if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0 || native_stat_mode(info) / 4096 != 8:
         set problem to "Wikipedia archive is not a readable regular file"
     else:
-        set size to lease_integer(info and 96 and 8)
-        set modified to lease_integer(info and 48 and 8) * 1000000000 + lease_integer(info and 56 and 8)
+        set size to native_stat_size(info)
+        set modified to native_stat_time(info and 48) * 1000000000 + native_stat_time(info and 56)
         if result_cache_scalar(db and "SELECT json_extract(?,'$.bytes')=CAST(? AS INTEGER) AND json_extract(?,'$.mtime_ns')=CAST(? AS INTEGER)" and [manifest,int_to_string(size),manifest,int_to_string(modified)]) != "1":
             set problem to "Wikipedia archive changed since installation; verify it before use"
         else if ep_dlcall4(ep_dlsym(libc and "pread") and fd and header and 80 and 0) != 80:

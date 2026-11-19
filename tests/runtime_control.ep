@@ -1,0 +1,30 @@
+import "../src/runtime_control"
+import "os"
+
+define main:
+    set pid to ep_dlcall0(ep_dlsym(native_system() and "getpid"))
+    set args to runtime_process_args(pid)
+    if length_list(args) == 0:
+        display "FAIL: cannot read own native argv"
+        return 1
+    if runtime_process_matches("/missing" and "/missing/token" and args) != 0:
+        display "FAIL: unrelated process matched"
+        return 1
+    if runtime_arg_value(["worker","--port","8400","--model","test"] and "--port") != "8400":
+        display "FAIL: exact argv option extraction"
+        return 1
+    if runtime_arg_value(["worker","--port"] and "--port") != "":
+        display "FAIL: truncated argv accepted"
+        return 1
+    set pids to runtime_processes()
+    set found to 0
+    set i to 0
+    repeat while i < length_list(pids):
+        if get_list(pids and i) == pid:
+            set found to 1
+        set i to i + 1
+    if found == 0:
+        display "FAIL: process inventory missed self"
+        return 1
+    display "PASS: native argv, exact ownership exclusion, option parsing and process inventory"
+    return 0

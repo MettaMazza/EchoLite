@@ -1,0 +1,41 @@
+# Portable application snapshots. Local filesystem paths and runtime credentials
+# are deliberately not a peer's executable configuration.
+import "sync_capture"
+
+define sync_application_query with kind returning Str:
+    if kind == "memory":
+        return "SELECT json_object('schema',1,'layer',m.layer,'project',m.project,'source',m.source,'body',m.body,'status',m.status,'created',m.created,'parents',json((SELECT json_group_array(object) FROM (SELECT i.object FROM derivations d JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=d.parent AND i.deleted=0 WHERE d.child=m.id ORDER BY i.object))),'session',json((SELECT json_object('project',s.project,'closed',s.closed) FROM sessions s WHERE s.memory=m.id)),'task',json((SELECT json_object('project',t.project,'current',i.object,'revision',t.revision,'status',t.status) FROM tasks t JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=t.current_memory AND i.deleted=0 WHERE t.memory=m.id)),'protection',(SELECT reason FROM memory_protection WHERE memory=m.id)) FROM memories m WHERE m.id=?"
+    if kind == "identity":
+        return "SELECT json_object('schema',1,'body',m.body,'reason',m.reason,'created',m.created,'sources',json((SELECT json_group_array(object) FROM (SELECT i.object FROM me_sources s JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=s.memory AND i.deleted=0 WHERE s.version=m.id ORDER BY i.object)))) FROM me_versions m WHERE m.id=?"
+    if kind == "turn":
+        return "SELECT json_object('schema',1,'project',t.project,'user',(SELECT object FROM sync_local_ids WHERE kind='memory' AND local_id=t.user_memory AND deleted=0),'reply',(SELECT object FROM sync_local_ids WHERE kind='memory' AND local_id=t.reply_memory AND deleted=0),'identity',(SELECT object FROM sync_local_ids WHERE kind='identity' AND local_id=t.me_version AND deleted=0),'status',t.status,'created',t.created,'answer_basis',t.answer_basis,'session',(SELECT i.object FROM session_turns s JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=s.session AND i.deleted=0 WHERE s.turn_id=t.id),'images',json((SELECT json_group_array(json(item)) FROM (SELECT json_object('memory',i.object,'sha256',x.sha256) item FROM turn_images x JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=x.image AND i.deleted=0 WHERE x.turn_id=t.id ORDER BY i.object))),'documents',json((SELECT json_group_array(json(item)) FROM (SELECT json_object('memory',i.object,'sha256',x.sha256) item FROM turn_documents x JOIN sync_local_ids i ON i.kind='memory' AND i.local_id=x.document AND i.deleted=0 WHERE x.turn_id=t.id ORDER BY i.object)))) FROM turns t WHERE t.id=?"
+    if kind == "tool_run":
+        return "SELECT json_object('schema',1,'turn',(SELECT object FROM sync_local_ids WHERE kind='turn' AND local_id=t.turn_id AND deleted=0),'name',t.name,'arguments',t.arguments,'status',t.status,'observation',(SELECT object FROM sync_local_ids WHERE kind='memory' AND local_id=t.observation AND deleted=0),'request',(SELECT object FROM sync_local_ids WHERE kind='memory' AND local_id=t.request_memory AND deleted=0),'started',t.started,'finished',t.finished) FROM tool_runs t WHERE t.id=?"
+    return ""
+
+# Auxiliary row changes dirty their owning portable object. UPDATE marks both
+# owners when a relationship moves. These hooks never duplicate content.
+define sync_application_track with db and table and column and kind:
+    set allowed to "|derivations:child:memory|sessions:memory:memory|tasks:memory:memory|memory_protection:memory:memory|me_sources:version:identity|session_turns:turn_id:turn|turn_images:turn_id:turn|turn_documents:turn_id:turn|"
+    set key to concat("|" and concat(table and concat(":" and concat(column and concat(":" and concat(kind and "|"))))))
+    if string_contains(allowed and key) == 0:
+        return 0
+    set prefix to concat("sync_aux_" and table)
+    set old_change to concat("UPDATE sync_local_ids SET dirty=1 WHERE kind='" and concat(kind and concat("' AND local_id=old." and concat(column and " AND (SELECT value FROM sync_meta WHERE key='projecting')='0';"))))
+    set new_change to concat("UPDATE sync_local_ids SET dirty=1 WHERE kind='" and concat(kind and concat("' AND local_id=new." and concat(column and " AND (SELECT value FROM sync_meta WHERE key='projecting')='0';"))))
+    set statement to concat("CREATE TRIGGER IF NOT EXISTS " and concat(prefix and concat("_insert AFTER INSERT ON " and concat(table and concat(" BEGIN " and concat(new_change and " END;"))))))
+    set statement to concat(statement and concat("CREATE TRIGGER IF NOT EXISTS " and concat(prefix and concat("_update AFTER UPDATE ON " and concat(table and concat(" BEGIN " and concat(old_change and concat(new_change and " END;"))))))))
+    set statement to concat(statement and concat("CREATE TRIGGER IF NOT EXISTS " and concat(prefix and concat("_delete AFTER DELETE ON " and concat(table and concat(" BEGIN " and concat(old_change and " END;")))))))
+    set code to sql_execute(db and statement)
+    return code == 0
+
+define sync_application_init with db:
+    if sync_identity_init(db) == 0:
+        return 0
+    return sync_application_track(db and "derivations" and "child" and "memory") && sync_application_track(db and "sessions" and "memory" and "memory") && sync_application_track(db and "tasks" and "memory" and "memory") && sync_application_track(db and "memory_protection" and "memory" and "memory") && sync_application_track(db and "me_sources" and "version" and "identity") && sync_application_track(db and "session_turns" and "turn_id" and "turn") && sync_application_track(db and "turn_images" and "turn_id" and "turn") && sync_application_track(db and "turn_documents" and "turn_id" and "turn")
+
+define sync_application_capture with db and kind and local_id returning Str:
+    set statement to sync_application_query(kind)
+    if statement == "":
+        return result_cache_error("Unsupported application sync kind")
+    return sync_capture_record(db and kind and local_id and statement)

@@ -4,6 +4,15 @@ import "../src/state_lock"
 import "os"
 
 define main:
+    set encoded to alloc_bytes(8)
+    native_bytes_write(encoded and 0 and 0 - 1 and 8)
+    set byte_index to 0
+    repeat while byte_index < 8:
+        if peek_byte(encoded and byte_index) != 255:
+            display "FAIL: signed native word encoding"
+            return 1
+        set byte_index to byte_index + 1
+    free_bytes(encoded)
     set args to get_args()
     if length_list(args) > 1:
         if get_list(args and 1) == "detached-check":
@@ -23,11 +32,22 @@ define main:
     if result != 23:
         display concat("FAIL: child exit " and int_to_string(result))
         return 1
-    if process_start("/no/such/echolite-program" and []) != 0:
-        return 1
+    set missing to process_start("/no/such/echolite-program" and [])
+    if missing != 0:
+        # POSIX permits exec failure to be reported as child exit 127.
+        set failed to process_poll(missing)
+        repeat while failed == 0 - 1:
+            ep_dlcall1(ep_dlsym(native_system() and "usleep") and 1000)
+            set failed to process_poll(missing)
+        if failed != 127:
+            display "FAIL: missing executable did not report launch failure"
+            return 1
     set filename to concat("echolite-process-" and concat(int_to_string(ep_dlcall0(ep_dlsym(native_system() and "getpid"))) and ".log"))
-    set path to concat("/private/tmp/" and filename)
-    set fd to private_lock("/private/tmp" and filename)
+    set temporary to "/private/tmp"
+    if native_android():
+        set temporary to "."
+    set path to concat(temporary and concat("/" and filename))
+    set fd to private_lock(temporary and filename)
     if fd < 0:
         return 1
     set pid to process_launch(get_list(args and 0) and ["spaces ; $(no-shell) 🌱"] and fd)
@@ -46,6 +66,11 @@ define main:
     set pid to process_detached(get_list(args and 0) and ["detached-check"] and 0 - 1)
     if pid == 0:
         return 1
+    # Android may return from spawn before the child applies its attributes.
+    set waited to 0
+    repeat while ep_dlcall1(ep_dlsym(native_system() and "getsid") and pid) != pid && waited < 200:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 1000)
+        set waited to waited + 1
     if ep_dlcall1(ep_dlsym(native_system() and "getsid") and pid) != pid || ep_dlcall1(ep_dlsym(native_system() and "getpgid") and pid) != pid:
         display "FAIL: detached child did not receive its own session/group"
         return 1

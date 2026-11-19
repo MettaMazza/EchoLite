@@ -1,0 +1,36 @@
+# Database half of received memory forgetting. The service must hold the runtime
+# maintenance lease, purge managed backups/native slots, and publish Me.txt before
+# acknowledging the cleanup marker. Never present database_done as full cleanup.
+import "sync_generation_receive"
+
+define sync_forgetting_init with db:
+    set code to sql_execute(db and "CREATE TABLE IF NOT EXISTS sync_cleanup(singleton INTEGER PRIMARY KEY CHECK(singleton=1),epoch TEXT NOT NULL);")
+    return code == 0
+
+define sync_apply_memory_tombstone with db and object returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot lock synchronized forgetting")
+    set problem to ""
+    if result_cache_scalar(db and "SELECT count(*) FROM sync_objects WHERE id=? AND kind='memory' AND deleted=1" and [object]) != "1":
+        set problem to "Expected a received memory tombstone"
+    if problem == "" && (sync_forgetting_init(db) == 0 || identity_active_init(db) == 0):
+        set problem to "Cannot initialize synchronized forgetting"
+    set local_id to result_cache_scalar(db and "SELECT local_id FROM sync_local_ids WHERE object=? AND kind='memory' AND deleted=0" and [object])
+    if problem == "" && local_id != "":
+        if sql_execute(db and "CREATE TEMP TABLE IF NOT EXISTS sync_forgotten_memories(id INTEGER PRIMARY KEY); DELETE FROM sync_forgotten_memories;") != 0:
+            set problem to "Cannot prepare forgetting closure"
+        else if sync_execute(db and "INSERT INTO sync_forgotten_memories WITH RECURSIVE descendants(id) AS (SELECT id FROM memories WHERE id=? UNION SELECT d.child FROM derivations d JOIN descendants r ON d.parent=r.id) SELECT id FROM descendants" and [local_id]) == 0:
+            set problem to "Cannot resolve derived memories"
+        if problem == "" && sql_execute(db and "DELETE FROM response_cache; DELETE FROM prompt_cache; DELETE FROM generation_rounds; DELETE FROM model_progress; UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='cache_epoch'; DELETE FROM me_versions WHERE id IN (SELECT version FROM me_sources WHERE memory IN (SELECT id FROM sync_forgotten_memories)); DELETE FROM memories WHERE id IN (SELECT id FROM sync_forgotten_memories);") != 0:
+            set problem to "Cannot forget derived application records"
+        if problem == "" && result_cache_scalar(db and "SELECT count(*) FROM active_me" and []) == "0":
+            if sync_execute(db and "INSERT INTO me_versions(body,reason) VALUES(?,?)" and ["I am EchoLite. My memory has been intentionally revised. I will reconstruct my perspective from retained evidence.","Identity reset following synchronized forgetting"]) == 0:
+                set problem to "Cannot reset forgotten active identity"
+        if problem == "" && sql_execute(db and "INSERT INTO sync_cleanup(singleton,epoch) SELECT 1,value FROM metadata WHERE key='cache_epoch' ON CONFLICT(singleton) DO UPDATE SET epoch=excluded.epoch;") != 0:
+            set problem to "Cannot persist required runtime cleanup"
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        if problem == "":
+            set problem to "Cannot commit synchronized forgetting"
+        return result_cache_error(problem)
+    return result_cache_scalar(db and "SELECT json_object('status','ok','database_done',json('true'),'runtime_cleanup_required',json(CASE WHEN EXISTS(SELECT 1 FROM sync_cleanup) THEN 'true' ELSE 'false' END))" and [])

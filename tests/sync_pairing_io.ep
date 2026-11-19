@@ -1,0 +1,44 @@
+import "../src/sync_pairing_io"
+set checks to 0
+
+define pairing_io_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define pairing_io_ok with db and result:
+    return result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set ahome to get_list(args and 1)
+    set bhome to get_list(args and 2)
+    set a to sql_open(concat(ahome and "/memory.sqlite3"))
+    set b to sql_open(concat(bhome and "/memory.sqlite3"))
+    pairing_io_assert(sync_pairing_ui_init(a) && sync_pairing_ui_init(b) and "private pairing UI schemas")
+    set created to sync_pairing_command(a and ahome and "sync-invite" and "Mac")
+    set invite to result_cache_scalar(a and "SELECT payload FROM sync_pairing_output" and [])
+    set secret to result_cache_scalar(a and "SELECT json_extract(?,'$.secret')" and [invite])
+    pairing_io_assert(pairing_io_ok(a and created) && string_contains(created and secret) == 0 and "ordinary command output contains no invitation secret")
+    pairing_io_assert(sync_pairing_stage(bhome and invite) and "clipboard invitation privately staged")
+    set accepted to sync_pairing_command(b and bhome and "sync-pair-paste" and "Android")
+    pairing_io_assert(pairing_io_ok(b and accepted) && file_exists(concat(bhome and "/.pairing-input")) == 0 && string_contains(accepted and secret) == 0 and "accept consumes temporary input without logging it")
+    set response to result_cache_scalar(b and "SELECT payload FROM sync_pairing_output WHERE stage='confirmation'" and [])
+    pairing_io_assert(response != "" && string_contains(response and secret) == 0 && sync_pairing_stage(ahome and response) and "encrypted confirmation privately staged")
+    set finished to sync_pairing_command(a and ahome and "sync-pair-paste" and "Mac")
+    pairing_io_assert(pairing_io_ok(a and finished) && file_exists(concat(ahome and "/.pairing-input")) == 0 && result_cache_scalar(a and "SELECT count(*) FROM sync_pairing_output" and []) == "0" and "confirmation completes and clears invitation display")
+    pairing_io_assert(result_cache_scalar(a and "SELECT label FROM sync_peers WHERE enabled=1" and []) == "Android" && result_cache_scalar(b and "SELECT label FROM sync_peers WHERE enabled=1" and []) == "Mac" and "reciprocal named devices installed")
+    pairing_io_assert(sync_pairing_stage(ahome and "invalid") && pairing_io_ok(a and sync_pairing_command(a and ahome and "sync-pair-paste" and "Mac")) == 0 && file_exists(concat(ahome and "/.pairing-input")) == 0 and "invalid paste is consumed and rejected")
+    pairing_io_assert(sync_pairing_stage(ahome and invite) and "unsafe permission fixture staged")
+    ep_dlcall2(ep_dlsym(native_system() and "chmod") and concat(ahome and "/.pairing-input") and 420)
+    pairing_io_assert(sync_pairing_take(ahome) == "" && file_exists(concat(ahome and "/.pairing-input")) == 0 and "non-private input rejected and removed")
+    pairing_io_assert(pairing_io_ok(b and sync_pairing_command(b and bhome and "sync-pair-cancel" and "")) && result_cache_scalar(b and "SELECT count(*) FROM sync_pairing_output" and []) == "0" and "dismiss clears confirmation output")
+    pairing_io_assert(result_cache_scalar(a and "SELECT count(*) FROM sync_changes" and []) == "0" && result_cache_scalar(b and "SELECT count(*) FROM sync_changes" and []) == "0" and "clipboard handoff never enters synchronized content")
+    sql_close(a)
+    sql_close(b)
+    display concat("PASS: " and concat(int_to_string(checks) and " private pairing handoff checks"))
+    return 0

@@ -1,0 +1,61 @@
+import "../src/sync_pair"
+set checks to 0
+
+define pair_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define pair_ok with db and result:
+    set status to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN coalesce(json_extract(?,'$.status'),'ok') ELSE 'error' END" and [result,result])
+    if status == "error":
+        return 0
+    return 1
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3 || file_exists(get_list(args and 1)) || file_exists(get_list(args and 2)):
+        display "Usage: sync_pair NEW_MAC_DB NEW_PHONE_DB"
+        return 1
+    set a to sql_open(get_list(args and 1))
+    set b to sql_open(get_list(args and 2))
+    pair_assert(sync_pair_init(a) && sync_pair_init(b) and "pairing schema initialized")
+    set device_a to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set device_b to result_cache_scalar(b and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set secret to sync_random_secret()
+    pair_assert(pair_ok(a and sync_pair_install(a and device_b and "Phone" and secret)) && pair_ok(b and sync_pair_install(b and device_a and "Mac" and secret)) and "explicit reciprocal provisioning")
+    pair_assert(pair_ok(a and sync_pair_install(a and device_a and "Self" and sync_random_secret())) == 0 and "self pairing rejected")
+    set request to sync_pair_wrap(a and device_b and "request" and "" and "{\"action\":\"exchange\"}")
+    set opened to sync_pair_unwrap(b and device_a and "request" and "" and request)
+    pair_assert(pair_ok(b and opened) && result_cache_scalar(b and "SELECT json_extract(?,'$.body.action')" and [opened]) == "exchange" and "paired request authenticated")
+    pair_assert(pair_ok(b and sync_pair_unwrap(b and device_a and "request" and "" and request)) == 0 and "exact captured request replay rejected")
+    set nonce to result_cache_scalar(b and "SELECT json_extract(?,'$.nonce')" and [opened])
+    set response to sync_pair_wrap(b and device_a and "response" and nonce and "{\"status\":\"ok\"}")
+    pair_assert(pair_ok(a and sync_pair_unwrap(a and device_b and "response" and "000000000000000000000000" and response)) == 0 and "response must bind to the outstanding request")
+    pair_assert(pair_ok(a and sync_pair_unwrap(a and device_b and "response" and nonce and response)) and "bound response accepted after wrong-binding rejection")
+    sql_close(a)
+    sql_close(b)
+    set a to sql_open(get_list(args and 1))
+    set b to sql_open(get_list(args and 2))
+    pair_assert(sync_pair_init(a) && sync_pair_init(b) and "pairing survives restart")
+    pair_assert(pair_ok(b and sync_pair_unwrap(b and device_a and "request" and "" and request)) == 0 and "anti-replay state survives restart")
+    pair_assert(pair_ok(a and sync_pair_install(a and device_b and "Phone" and secret)) && result_cache_scalar(a and "SELECT tx_request FROM sync_peers WHERE peer=?" and [device_b]) == "1" and "repeated provisioning never resets counters")
+    set retry to sync_pair_wrap(a and device_b and "request" and "" and "{\"action\":\"exchange\"}")
+    pair_assert(pair_ok(b and sync_pair_unwrap(b and device_a and "request" and "" and retry)) and "lost acknowledgement can retry with a fresh frame")
+    pair_assert(pair_ok(b and sync_pair_revoke(b and device_a)) and "receiver revocation committed")
+    set revoked to sync_pair_wrap(a and device_b and "request" and "" and "{\"action\":\"exchange\"}")
+    pair_assert(pair_ok(b and sync_pair_unwrap(b and device_a and "request" and "" and revoked)) == 0 and "revoked peer cannot authenticate new frames")
+    pair_assert(result_cache_scalar(b and "SELECT secret FROM sync_peers WHERE peer=?" and [device_a]) == "" and "revocation removes active secret")
+    pair_assert(pair_ok(b and sync_pair_install(b and device_a and "Mac" and secret)) == 0 and "retired secret cannot reactivate pairing")
+    set replacement to sync_random_secret()
+    pair_assert(pair_ok(a and sync_pair_revoke(a and device_b)) && pair_ok(a and sync_pair_install(a and device_b and "Phone" and replacement)) && pair_ok(b and sync_pair_install(b and device_a and "Mac" and replacement)) and "deliberate new-key pairing succeeds")
+    pair_assert(pair_ok(b and sync_pair_unwrap(b and device_a and "request" and "" and revoked)) == 0 and "old key remains invalid after re-pairing")
+    set fresh to sync_pair_wrap(a and device_b and "request" and "" and "{\"action\":\"exchange\"}")
+    pair_assert(pair_ok(b and sync_pair_unwrap(b and device_a and "request" and "" and fresh)) and "new pairing exchanges authenticated frames")
+    pair_assert(result_cache_scalar(a and "SELECT count(*) FROM sync_changes" and []) == "0" && string_contains(sync_export(a and "0") and replacement) == 0 and "pairing credentials and counters never enter replicated records")
+    sql_close(a)
+    sql_close(b)
+    display concat("PASS: " and concat(int_to_string(checks) and " persistent pairing and replay checks"))
+    return 0

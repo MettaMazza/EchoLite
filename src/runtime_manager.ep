@@ -1,10 +1,13 @@
 import "native_process"
+import "runtime_control"
 import "wikipedia_runtime"
 import "state_lock"
 import "transport"
 import "result_cache"
 import "fs"
 import "os"
+
+set RUNTIME_PROFILE to 0
 
 # Read or provision a private persistent credential without exposing it in argv.
 define runtime_credential with path returning Str:
@@ -51,16 +54,18 @@ define runtime_probe with db and port and token and model and context returning 
     set props to transport_get(port and "/props" and token)
     if string_contains(props and "Local connection failed"):
         return "absent"
-    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.model_path')=? AND json_extract(?,'$.default_generation_settings.n_ctx')=CAST(? AS INTEGER) AND json_extract(?,'$.build_info') LIKE 'b12359-%' ELSE 0 END" and [props,props,model,props,context,props]) == "1":
-        return "ready"
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.default_generation_settings.n_ctx')=CAST(? AS INTEGER) AND json_extract(?,'$.build_info') LIKE 'b12359-%' ELSE 0 END" and [props,props,context,props]) == "1":
+        set loaded_model to result_cache_scalar(db and "SELECT json_extract(?,'$.model_path')" and [props])
+        if runtime_same_model(model and loaded_model):
+            return "ready"
     return "occupied"
 
 define runtime_arguments with root and token_path and embedding:
-    set model to concat(root and "/models/native/Qwen3.5-4B-Q4_K_M.gguf")
+    set model to runtime_model_path(root and profile_name(RUNTIME_PROFILE))
     set port to "8400"
     set context to "262144"
     if embedding == 1:
-        set model to concat(root and "/models/native/all-minilm-l6-v2_f16.gguf")
+        set model to runtime_model_path(root and "all-minilm-l6-v2_f16.gguf")
         set port to "8401"
         set context to "512"
     set arguments to ["--model",model,"--host","127.0.0.1","--port",port,"--api-key-file",token_path,"--ctx-size",context,"--parallel","1","--cache-ram","0","--log-colors","off"]
@@ -68,11 +73,17 @@ define runtime_arguments with root and token_path and embedding:
     if embedding == 1:
         set extra to ["--embedding","--pooling","mean","--batch-size","512","--ubatch-size","512","--gpu-layers","0","--threads","2","--no-warmup"]
     else:
-        set projector to concat(root and "/models/native/mmproj-Qwen3.5-4B-Q8_0.gguf")
+        set projector to runtime_model_path(root and profile_projector(RUNTIME_PROFILE))
+        set checkpoints to "1"
+        if RUNTIME_PROFILE == 1:
+            set checkpoints to "4"
         set slots to concat(path_dirname(token_path) and "/native-slots")
         if is_directory(slots) == 0:
             ep_dlcall2(ep_dlsym(native_system() and "mkdir") and slots and 448)
-        set extra to ["--mmproj",projector,"--cache-type-k","q4_0","--cache-type-v","q4_0","--flash-attn","on","--batch-size","256","--ubatch-size","64","--ctx-checkpoints","1","--no-kv-offload","--no-mmproj-offload","--slot-save-path",slots,"--reasoning","on","--reasoning-format","deepseek","--reasoning-budget","-1","--timeout","86400"]
+        set extra to ["--mmproj",projector,"--cache-type-k","q4_0","--cache-type-v","q4_0","--flash-attn","on","--batch-size","256","--ubatch-size","64","--ctx-checkpoints",checkpoints,"--no-kv-offload","--no-mmproj-offload","--slot-save-path",slots,"--reasoning","on","--reasoning-format","deepseek","--reasoning-budget","-1","--timeout","86400"]
+    if native_android() && embedding == 0:
+        append_list(extra and "--threads")
+        append_list(extra and "4")
     set i to 0
     repeat while i < length_list(extra):
         append_list(arguments and get_list(extra and i))
@@ -80,30 +91,42 @@ define runtime_arguments with root and token_path and embedding:
     return arguments
 
 define runtime_ensure with root and home and token_path returning Str:
-    set lock to private_lock(concat(root and "/models/runtime") and "native-start.lock")
+    set lock to private_lock(runtime_lock_directory(root and home) and "native-start.lock")
     if lock < 0:
         return "Cannot open the private runtime startup lock"
     set libc to native_system()
     if ep_dlcall2(ep_dlsym(libc and "flock") and lock and 2) != 0:
         ep_dlcall1(ep_dlsym(libc and "close") and lock)
         return "Cannot acquire the runtime startup lock"
+    if file_exists(concat(path_dirname(token_path) and "/models-unloaded")):
+        ep_dlcall1(ep_dlsym(libc and "close") and lock)
+        return "Models are unloaded; use Load models to resume"
     set token to runtime_credential(token_path)
     set problem to ""
     if token == "":
         set problem to "Cannot read or create the private runtime credential"
     set db to sql_open(":memory:")
-    set executable to concat(root and "/models/runtime/llama-b12359/llama-server")
+    set executable to runtime_worker_path(root)
     if file_exists(executable) == 0:
         set problem to "The pinned native model runtime is missing"
     ep_dlcall3(ep_dlsym(libc and "setenv") and "ECHOLITE_REQUEST_TIMEOUT_MS" and "1500" and 1)
+    set memory to profile_memory()
+    set RUNTIME_PROFILE to profile_requested(profile_preference(path_dirname(token_path)) and get_list(memory and 0) and get_list(memory and 1) and profile_installed(root and 1))
+    # Reuse an authenticated, recognized resident engine without mid-session churn.
+    set resident_props to transport_get(8400 and "/props" and token)
+    set resident_profile to profile_server_index(db and resident_props)
+    if resident_profile >= 0:
+        if runtime_probe(db and 8400 and token and runtime_model_path(root and profile_name(resident_profile)) and PROFILE_CONTEXT) == "ready":
+            set RUNTIME_PROFILE to resident_profile
+    display concat("Selected local model: " and profile_name(RUNTIME_PROFILE))
     set index to 0
     repeat while index < 2 && problem == "":
         set port to 8400 + index
         set context to "262144"
-        set model to concat(root and "/models/native/Qwen3.5-4B-Q4_K_M.gguf")
+        set model to runtime_model_path(root and profile_name(RUNTIME_PROFILE))
         if index == 1:
             set context to "512"
-            set model to concat(root and "/models/native/all-minilm-l6-v2_f16.gguf")
+            set model to runtime_model_path(root and "all-minilm-l6-v2_f16.gguf")
         if file_exists(model) == 0:
             set problem to "A required local model file is missing"
         else:
@@ -126,6 +149,11 @@ define runtime_ensure with root and home and token_path returning Str:
                     repeat while ready == 0 && problem == "":
                         set exited to process_poll(pid)
                         if exited != 0 - 1:
+                            if index == 0 && RUNTIME_PROFILE == 1:
+                                set RUNTIME_PROFILE to 0
+                                set index to -1
+                                display "Larger model could not start; falling back to the installed 4B model"
+                                break
                             set problem to concat("Native runtime exited during startup: " and int_to_string(exited))
                         else:
                             set status to runtime_probe(db and port and token and model and context)
@@ -143,14 +171,31 @@ define runtime_ensure with root and home and token_path returning Str:
         if library == "":
             set library to concat(root and "/library")
         set problem to wikipedia_start(root and home and library)
+    if problem == "":
+        if write_file(concat(path_dirname(token_path) and "/runtime-model.txt") and profile_name(RUNTIME_PROFILE)) != 1:
+            set problem to "Cannot record the active model for the interface"
     sql_close(db)
     ep_dlcall1(ep_dlsym(libc and "close") and lock)
     return problem
 
 define main:
     set args to get_args()
-    if length_list(args) != 4:
+    if length_list(args) < 4 || length_list(args) > 5:
         display "Usage: echolite-runtime ROOT STATE_DIRECTORY TOKEN_FILE"
+        return 1
+    set command to "ensure"
+    if length_list(args) == 5:
+        set command to get_list(args and 4)
+    if command == "unload":
+        set problem to runtime_unload(get_list(args and 1) and get_list(args and 2) and get_list(args and 3))
+        if problem != "":
+            display problem
+            return 1
+        display "Models unloaded; downloaded files and persistent memory retained"
+        return 0
+    if command == "load":
+        ep_dlcall1(ep_dlsym(native_system() and "unlink") and concat(path_dirname(get_list(args and 3)) and "/models-unloaded"))
+    else if command != "ensure":
         return 1
     set problem to runtime_ensure(get_list(args and 1) and get_list(args and 2) and get_list(args and 3))
     if problem != "":

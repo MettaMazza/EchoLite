@@ -1,0 +1,132 @@
+# Shared native installer primitives. No shell interpreter is used on macOS.
+import "application_paths"
+import "result_cache"
+import "state_lock"
+import "transport"
+set SETUP_DB to 0
+set SETUP_PROGRESS to ""
+set SETUP_CACHE to ""
+set SETUP_ROOT to ""
+
+define setup_status with message:
+    display message
+    ep_dlcall1(ep_dlsym(native_system() and "fflush") and 0)
+    if SETUP_PROGRESS != "":
+        write_file(SETUP_PROGRESS and message)
+    return 0
+
+define setup_fail with message:
+    setup_status(concat("ERROR: " and message))
+    ep_exit(1)
+    return 0
+
+define setup_wait with executable and args:
+    set result to application_wait(executable and args)
+    if result != 0:
+        setup_fail(concat("A setup step failed. Reopen the installer to resume. See install.log. Program: " and path_basename(executable)))
+    return 0
+
+define setup_capture with executable and args returning Str:
+    set path to concat(SETUP_CACHE and "/command-output.txt")
+    set fd to native_open(path and 1537 and 384)
+    set pid to process_launch(executable and args and fd)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    if pid == 0:
+        return ""
+    set status to process_poll(pid)
+    repeat while status == -1:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 20000)
+        set status to process_poll(pid)
+    set output to ""
+    if status == 0 && file_size(path) < 1048576:
+        set output to string_trim(read_file(path))
+    remove_file(path)
+    return output
+
+define setup_fingerprint with path returning Str:
+    set info to alloc_bytes(144)
+    set status to ep_dlcall2(ep_dlsym(native_system() and "stat") and path and info)
+    set result to ""
+    if status == 0 && native_stat_mode(info) / 4096 == 8:
+        set result to concat(int_to_string(native_stat_size(info)) and concat(":" and concat(int_to_string(native_stat_time(info and 48)) and concat(":" and int_to_string(native_stat_time(info and 56))))))
+    free_bytes(info)
+    return result
+
+define setup_hash with path returning Str:
+    set fd to native_open(path and 16777476 and 0)
+    if fd < 0:
+        return ""
+    set before to setup_fingerprint(path)
+    set crypto to ep_dlopen("/usr/lib/system/libcommonCrypto.dylib")
+    set ctx to alloc_bytes(256)
+    set buffer to alloc_bytes(1048576)
+    set digest to alloc_bytes(32)
+    set ok to ep_dlcall1(ep_dlsym(crypto and "CC_SHA256_Init") and ctx) == 1
+    set count to 1
+    repeat while ok && count > 0:
+        set count to native_signed_int(ep_dlcall3(ep_dlsym(native_system() and "read") and fd and buffer and 1048576))
+        if count > 0:
+            set ok to ep_dlcall3(ep_dlsym(crypto and "CC_SHA256_Update") and ctx and buffer and count) == 1
+        else if count < 0:
+            set ok to 0
+    set ok to ok && ep_dlcall2(ep_dlsym(crypto and "CC_SHA256_Final") and digest and ctx) == 1
+    set value to create_builder()
+    set digits to "0123456789abcdef"
+    set i to 0
+    repeat while ok && i < 32:
+        set byte to peek_byte(digest and i)
+        builder_append(value and substring(digits and byte / 16 and 1))
+        builder_append(value and substring(digits and byte % 16 and 1))
+        set i to i + 1
+    free_bytes(ctx)
+    free_bytes(buffer)
+    free_bytes(digest)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    if ok && before != "" && string_equals(before and setup_fingerprint(path)):
+        return builder_to_string(value)
+    return ""
+
+define setup_checked with path and hash:
+    if file_exists(path) == 0:
+        return 0
+    set stamp to concat(path and ".verified")
+    set fingerprint to setup_fingerprint(path)
+    set expected to concat(hash and concat("\n" and fingerprint))
+    if fingerprint != "" && file_exists(stamp) && string_equals(read_file(stamp) and expected):
+        return 1
+    setup_status(concat("Verifying " and path_basename(path)))
+    if string_equals(setup_hash(path) and hash):
+        write_file(stamp and expected)
+        return 1
+    return 0
+
+define setup_copy with source and destination:
+    application_directory(path_dirname(destination) and 0)
+    set temporary to concat(destination and ".installing")
+    if application_wait("/bin/cp" and ["-c",source,temporary]) != 0:
+        setup_wait("/bin/cp" and [source,temporary])
+    if ep_dlcall2(ep_dlsym(native_system() and "rename") and temporary and destination) != 0:
+        setup_fail("Cannot publish an installed asset")
+    return 0
+
+# ADB exec-in inherits the opened input file; no command interpolation on host.
+define setup_stream with executable and args and source and offset:
+    set system to native_system()
+    set input to native_open(source and 16777476 and 0)
+    if input < 0:
+        return 1
+    ep_dlcall3(ep_dlsym(system and "lseek") and input and offset and 0)
+    set saved to ep_dlcall1(ep_dlsym(system and "dup") and 0)
+    ep_dlcall2(ep_dlsym(system and "dup2") and input and 0)
+    set pid to process_start(executable and args)
+    if saved >= 0:
+        ep_dlcall2(ep_dlsym(system and "dup2") and saved and 0)
+        ep_dlcall1(ep_dlsym(system and "close") and saved)
+    ep_dlcall1(ep_dlsym(system and "close") and input)
+    if pid == 0:
+        return 1
+    set status to process_poll(pid)
+    repeat while status == -1:
+        ep_dlcall1(ep_dlsym(system and "usleep") and 20000)
+        set status to process_poll(pid)
+    return status

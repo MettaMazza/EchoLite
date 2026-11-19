@@ -20,7 +20,11 @@ define process_spawn_streams with executable and arguments and output_fd and err
         set argument to get_list(arguments and i)
         native_bytes_write(argv and (i + 1) * 8 and str_to_ptr(argument) and 8)
         set i to i + 1
-    set environment_pointer to ep_dlcall0(ep_dlsym(system and "_NSGetEnviron"))
+    set environment_pointer to 0
+    if native_android():
+        set environment_pointer to ep_dlsym(system and "environ")
+    else:
+        set environment_pointer to ep_dlcall0(ep_dlsym(system and "_NSGetEnviron"))
     set environment to process_integer(environment_pointer and 8)
     set pid_pointer to alloc_bytes(4)
     set actions to 0
@@ -55,7 +59,10 @@ define process_spawn_streams with executable and arguments and output_fd and err
         set rc to ep_dlcall1(ep_dlsym(system and "posix_spawnattr_init") and attributes)
         if rc == 0:
             set attribute_ready to 1
-            set rc to ep_dlcall2(ep_dlsym(system and "posix_spawnattr_setflags") and attributes and 1024)
+            set session_flag to 1024
+            if native_android():
+                set session_flag to 128
+            set rc to ep_dlcall2(ep_dlsym(system and "posix_spawnattr_setflags") and attributes and session_flag)
     if rc == 0:
         set rc to ep_dlcall6(ep_dlsym(system and "posix_spawn") and pid_pointer and executable and actions and attributes and argv and environment)
     if attributes != 0:
@@ -87,7 +94,7 @@ define process_poll with pid:
         else:
             set result to 128 + raw % 128
     if waited >= 2147483648:
-        set error_pointer to ep_dlcall0(ep_dlsym(native_system() and "__error"))
+        set error_pointer to native_errno_pointer()
         if process_integer(error_pointer and 4) == 4:
             set result to 0 - 1
     free_bytes(status)
@@ -107,5 +114,5 @@ define process_detached with executable and arguments and output_fd:
 
 # Preserve the established runtime/document launch interface.
 define process_spawn with executable and arguments and output_fd and detached:
-    set pid to process_spawn_streams(executable and arguments and output_fd and output_fd and detached and "" and 0)
+    set pid to process_spawn_streams(executable and arguments and output_fd and output_fd and detached and "" and detached)
     return pid

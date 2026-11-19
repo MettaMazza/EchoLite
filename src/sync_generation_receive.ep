@@ -1,0 +1,80 @@
+# Assemble only complete authenticated-frontier chunks into visible generation
+# history. Assembly is capped at 8 MiB and validates one bounded chunk at a time.
+import "sync_generation"
+
+define sync_generation_apply with db and object and manifest returning Str:
+    if result_cache_scalar(db and "SELECT (SELECT count(*)=7 AND count(DISTINCT key)=7 AND min(key IN ('schema','turn','round','bytes','characters','sha256','parts')) FROM json_each(p)) AND json_type(p,'$.schema')='integer' AND json_extract(p,'$.schema')=1 AND json_type(p,'$.turn')='text' AND json_type(p,'$.round')='integer' AND json_extract(p,'$.round') BETWEEN 0 AND 1024 AND json_type(p,'$.bytes')='integer' AND json_extract(p,'$.bytes') BETWEEN 1 AND 8388608 AND json_type(p,'$.characters')='integer' AND json_extract(p,'$.characters') BETWEEN 1 AND json_extract(p,'$.bytes') AND json_type(p,'$.sha256')='text' AND length(json_extract(p,'$.sha256'))=64 AND json_extract(p,'$.sha256') NOT GLOB '*[^0-9a-f]*' AND json_type(p,'$.parts')='array' AND json_array_length(p,'$.parts')=(json_extract(p,'$.characters')+8191)/8192 FROM (SELECT ? p)" and [manifest]) != "1":
+        return "Invalid thinking-history manifest"
+    if result_cache_scalar(db and "SELECT count(*)=count(DISTINCT value) AND coalesce(min(type='text' AND length(value)=32 AND value NOT GLOB '*[^0-9a-f]*'),0) FROM json_each(?,'$.parts')" and [manifest]) != "1":
+        return "Invalid thinking-history chunk references"
+    set turn_id to result_cache_scalar(db and "SELECT t.id FROM turns t JOIN sync_local_ids i ON i.kind='turn' AND i.local_id=t.id AND i.deleted=0 WHERE i.object=json_extract(?,'$.turn') AND t.status IN ('completed','failed','abandoned')" and [manifest])
+    if turn_id == "":
+        return "Waiting for finalized conversation before thinking history"
+    set round to result_cache_scalar(db and "SELECT json_extract(?,'$.round')" and [manifest])
+    set existing to result_cache_scalar(db and "SELECT object FROM sync_generation_rows WHERE turn_id=? AND round=?" and [turn_id,round])
+    if existing != "" && existing != object:
+        return "Local thinking history requires reconciliation"
+    if result_cache_scalar(db and "SELECT count(*) FROM sync_generation_rows WHERE object=? AND dirty=1" and [object]) != "0":
+        return "Local thinking history has an uncaptured edit"
+    if result_cache_scalar(db and "SELECT heads FROM sync_generation_applied WHERE object=?" and [object]) == sync_heads(db and object):
+        return ""
+    set parts to sql_query_params(db and "SELECT value FROM json_each(?,'$.parts') ORDER BY CAST(key AS INTEGER)" and [manifest])
+    set expected_bytes to string_to_int(result_cache_scalar(db and "SELECT json_extract(?,'$.bytes')" and [manifest]))
+    set bytes to 0
+    set index to 0
+    set problem to ""
+    set assembled to create_builder()
+    repeat while index < length_list(parts) && problem == "":
+        set part to get_list(get_list(parts and index) and 0)
+        set versions to sql_query_params(db and "SELECT v.payload FROM sync_versions v JOIN sync_objects o ON o.id=v.object WHERE o.id=? AND o.kind='generation_chunk' AND o.deleted=0" and [part])
+        if length_list(versions) != 1:
+            set problem to "Waiting for complete unambiguous thinking chunks"
+        else:
+            set payload to get_list(get_list(versions and 0) and 0)
+            if result_cache_scalar(db and "SELECT (SELECT count(*)=4 AND count(DISTINCT key)=4 AND min(key IN ('schema','owner','ordinal','data')) FROM json_each(p)) AND json_type(p,'$.schema')='integer' AND json_extract(p,'$.schema')=1 AND json_extract(p,'$.owner')=? AND json_type(p,'$.ordinal')='integer' AND json_extract(p,'$.ordinal')=CAST(? AS INTEGER) AND json_type(p,'$.data')='text' AND length(json_extract(p,'$.data')) BETWEEN 1 AND 8192 FROM (SELECT ? p)" and [object,int_to_string(index),payload]) != "1":
+                set problem to "Thinking chunk does not match its manifest"
+            else:
+                set data to result_cache_scalar(db and "SELECT json_extract(?,'$.data')" and [payload])
+                set bytes to bytes + string_length(data)
+                if bytes > expected_bytes:
+                    set problem to "Thinking chunk stream exceeds declared size"
+                else:
+                    builder_append(assembled and data)
+                    if sync_execute(db and "INSERT INTO sync_generation_parts(owner,ordinal,object) VALUES(?,?,?) ON CONFLICT(owner,ordinal) DO UPDATE SET object=excluded.object" and [object,int_to_string(index),part]) == 0:
+                        set problem to "Thinking chunk belongs to incompatible history"
+        set index to index + 1
+    set response to builder_to_string(assembled)
+    if problem != "":
+        return problem
+    if bytes != expected_bytes || sha256(response) != result_cache_scalar(db and "SELECT json_extract(?,'$.sha256')" and [manifest]) || result_cache_scalar(db and "SELECT length(?)=json_extract(?,'$.characters') AND CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [response,manifest,response,response]) != "1":
+        return "Thinking history integrity mismatch"
+    if sync_execute(db and "INSERT INTO sync_generation_rows(turn_id,round,object,dirty) VALUES(?,?,?,0) ON CONFLICT(turn_id,round) DO UPDATE SET dirty=0" and [turn_id,round,object]) == 0:
+        return "Cannot bind received thinking history"
+    if result_cache_scalar(db and "SELECT count(*) FROM generation_rounds WHERE turn_id=? AND round=?" and [turn_id,round]) != "0":
+        if result_cache_scalar(db and "SELECT response FROM generation_rounds WHERE turn_id=? AND round=?" and [turn_id,round]) != response:
+            return "Retained thinking history differs; reconciliation required"
+    else if sync_execute(db and "INSERT INTO generation_rounds(turn_id,round,response) VALUES(?,?,?)" and [turn_id,round,response]) == 0:
+        return "Cannot publish complete thinking history"
+    if sync_execute(db and "INSERT INTO sync_generation_applied(object,heads) VALUES(?,?) ON CONFLICT(object) DO UPDATE SET heads=excluded.heads" and [object,sync_heads(db and object)]) == 0:
+        return "Cannot acknowledge thinking history"
+    return ""
+
+define sync_project_generation with db and object returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot lock thinking history projection")
+    set problem to ""
+    if result_cache_scalar(db and "SELECT deleted FROM sync_objects WHERE id=? AND kind='generation'" and [object]) == "1" || result_cache_scalar(db and "SELECT count(*) FROM sync_generation_parts p JOIN sync_objects o ON o.id=p.object WHERE p.owner=? AND o.deleted=1" and [object]) != "0":
+        if sync_execute(db and "DELETE FROM generation_rounds WHERE (turn_id,round) IN (SELECT turn_id,round FROM sync_generation_rows WHERE object=?)" and [object]) == 0:
+            set problem to "Cannot forget received thinking history"
+    else:
+        set versions to sql_query_params(db and "SELECT v.payload FROM sync_versions v JOIN sync_objects o ON o.id=v.object WHERE o.id=? AND o.kind='generation' AND o.deleted=0" and [object])
+        if length_list(versions) != 1:
+            set problem to "Waiting for one complete thinking manifest"
+        else:
+            set problem to sync_generation_apply(db and object and get_list(get_list(versions and 0) and 0))
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        if problem == "":
+            set problem to "Cannot commit thinking projection"
+        return result_cache_error(problem)
+    return "{\"status\":\"ok\"}"

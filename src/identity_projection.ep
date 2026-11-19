@@ -14,16 +14,20 @@ define identity_regular with info:
     set mode to lease_integer(info and 4 and 2)
     set links to lease_integer(info and 6 and 2)
     set owner to lease_integer(info and 16 and 4)
+    if native_android():
+        set mode to lease_integer(info and 16 and 4)
+        set links to lease_integer(info and 20 and 4)
+        set owner to lease_integer(info and 24 and 4)
     return mode / 4096 == 8 && links == 1 && owner == ep_dlcall0(ep_dlsym(native_system() and "getuid"))
 
 define identity_existing with directory and name:
     set info to alloc_bytes(144)
-    set result to ep_dlcall4(ep_dlsym(native_system() and "fstatat") and directory and name and info and 32)
+    set result to ep_dlcall4(ep_dlsym(native_system() and "fstatat") and directory and name and info and native_at_nofollow())
     set valid to 0
     if result == 0:
         set valid to identity_regular(info)
     else:
-        set error_pointer to ep_dlcall0(ep_dlsym(native_system() and "__error"))
+        set error_pointer to native_errno_pointer()
         if lease_integer(error_pointer and 0 and 4) == 2:
             set valid to 1
     free_bytes(info)
@@ -54,7 +58,7 @@ define publish_identity with home and body returning Str:
     repeat while offset < string_length(body) && problem == "":
         set count to ep_dlcall3(ep_dlsym(libc and "write") and descriptor and str_to_ptr(body) + offset and string_length(body) - offset)
         if count < 0:
-            set error_pointer to ep_dlcall0(ep_dlsym(libc and "__error"))
+            set error_pointer to native_errno_pointer()
             if lease_integer(error_pointer and 0 and 4) != 4:
                 set problem to "Cannot finish writing identity staging file"
         else if count == 0:
@@ -64,9 +68,12 @@ define publish_identity with home and body returning Str:
     if problem == "" && ep_dlcall1(ep_dlsym(libc and "fsync") and descriptor) != 0:
         set problem to "Cannot synchronize identity staging file"
     if problem == "":
+        set device_width to 4
+        if native_android():
+            set device_width to 8
         set current to alloc_bytes(144)
-        set rc to ep_dlcall4(ep_dlsym(libc and "fstatat") and directory and "Me.txt.pending" and current and 32)
-        if rc != 0 || identity_regular(current) == 0 || lease_integer(opened and 0 and 4) != lease_integer(current and 0 and 4) || lease_integer(opened and 8 and 8) != lease_integer(current and 8 and 8) || identity_existing(directory and "Me.txt") == 0:
+        set rc to ep_dlcall4(ep_dlsym(libc and "fstatat") and directory and "Me.txt.pending" and current and native_at_nofollow())
+        if rc != 0 || identity_regular(current) == 0 || lease_integer(opened and 0 and device_width) != lease_integer(current and 0 and device_width) || lease_integer(opened and 8 and 8) != lease_integer(current and 8 and 8) || identity_existing(directory and "Me.txt") == 0:
             set problem to "Identity path changed during publication"
         free_bytes(current)
     free_bytes(opened)

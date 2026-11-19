@@ -1,0 +1,45 @@
+import "../src/sync_cleanup"
+import "os"
+set checks to 0
+
+define cleanup_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define cleanup_ok with result:
+    return string_contains(result and "\"status\":\"ok\"")
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    cleanup_assert(sql_execute(db and "CREATE TABLE me_versions(body TEXT); INSERT INTO me_versions VALUES('Retained identity'); CREATE VIEW active_me AS SELECT body FROM me_versions; CREATE TABLE sync_cleanup(singleton INTEGER PRIMARY KEY,epoch TEXT); INSERT INTO sync_cleanup VALUES(1,'7');") == 0 and "pending cleanup fixture")
+    cleanup_assert(cleanup_ok(sync_cleanup_finish(db and home and home and "" and 18997)) == 0 and "maintenance lease required")
+    cleanup_assert(cleanup_ok(state_lease(home and "maintenance")) and "exclusive maintenance lease")
+    set slot to slot_lock(home)
+    cleanup_assert(cleanup_ok(sync_cleanup_finish(db and home and home and "" and 18997)) == 0 and "busy inference slot defers cleanup")
+    slot_unlock(slot)
+    set directory to slot_directory(home)
+    slot_unlock(directory)
+    set cached to concat(home and "/native-slots/echolite-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bin")
+    cleanup_assert(write_file(cached and "Forgotten context") == 1 and "retained native context fixture")
+    ep_dlcall2(ep_dlsym(native_system() and "mkdir") and concat(home and "/backups") and 448)
+    set backup to concat(home and "/backups/backup-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.sqlite3")
+    cleanup_assert(write_file(backup and "Forgotten backup") == 1 and "managed backup fixture")
+    cleanup_assert(write_file(concat(home and "/Me.txt") and "Forgotten identity") == 1 and "stale identity fixture")
+    sql_execute(db and "CREATE TRIGGER fail_cleanup BEFORE DELETE ON sync_cleanup BEGIN SELECT RAISE(ABORT,'injected acknowledgement failure'); END")
+    cleanup_assert(cleanup_ok(sync_cleanup_finish(db and home and home and "" and 18997)) == 0 and "late acknowledgement failure reported")
+    cleanup_assert(result_cache_scalar(db and "SELECT epoch FROM sync_cleanup" and []) == "7" and "failure preserves durable retry marker")
+    cleanup_assert(file_exists(cached) == 0 && file_exists(backup) == 0 && read_file(concat(home and "/Me.txt")) == "Retained identity" and "artifacts purged and identity published before acknowledgement")
+    sql_execute(db and "DROP TRIGGER fail_cleanup")
+    cleanup_assert(cleanup_ok(sync_cleanup_finish(db and home and home and "" and 18997)) and "retry completes after partial cleanup")
+    cleanup_assert(result_cache_scalar(db and "SELECT count(*) FROM sync_cleanup" and []) == "0" and "successful cleanup acknowledges marker")
+    cleanup_assert(cleanup_ok(sync_cleanup_finish(db and home and home and "" and 18997)) and "completed cleanup is idempotent")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " synchronized runtime cleanup checks"))
+    return 0

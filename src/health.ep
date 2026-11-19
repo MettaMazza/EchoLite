@@ -1,3 +1,4 @@
+import "native_sqlite"
 # Read-only state diagnostics. No schema migration or identity projection repair.
 import "state_lock"
 import "transport"
@@ -33,7 +34,7 @@ define health_scalar with db and query and limit returning Str:
     set result to ""
     if ep_sqlite3_step(stmt) == 100:
         set value to ep_sqlite3_column_text(stmt and 0)
-        set bytes to ep_dlcall2(ep_dlsym(ep_dlopen("/usr/lib/libsqlite3.dylib") and "sqlite3_column_bytes") and stmt and 0)
+        set bytes to ep_dlcall2(ep_dlsym(native_sqlite() and "sqlite3_column_bytes") and stmt and 0)
         if bytes < limit && bytes == string_length(value):
             if ep_sqlite3_step(stmt) == 101:
                 set result to value
@@ -78,7 +79,7 @@ define health_check with path returning Str:
     set libc to native_system()
     set info to alloc_bytes(144)
     set code to ep_dlcall2(ep_dlsym(libc and "lstat") and path and info)
-    set regular to lease_integer(info and 4 and 2) / 4096
+    set regular to native_stat_mode(info) / 4096
     set device to lease_integer(info and 0 and 4)
     set inode to lease_integer(info and 8 and 8)
     free_bytes(info)
@@ -114,7 +115,7 @@ define health_check with path returning Str:
             ep_dlcall1(ep_dlsym(libc and "close") and wal_fd)
         else if transport_errno(libc) != 17:
             return health_error("Cannot create empty WAL bookkeeping for read-only inspection")
-    set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+    set sqlite to native_sqlite()
     set handle to alloc_bytes(8)
     set code to ep_dlcall4(ep_dlsym(sqlite and "sqlite3_open_v2") and canonical and handle and 16777217 and 0)
     set db to lease_integer(handle and 0 and 8)

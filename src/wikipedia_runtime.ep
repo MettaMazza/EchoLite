@@ -1,3 +1,4 @@
+import "runtime_paths"
 import "wikipedia"
 
 define wikipedia_ready with db and uuid:
@@ -32,6 +33,9 @@ define wikipedia_start with root and home and library returning Str:
         sql_close(db)
         return "Port 8402 is occupied by a service that does not expose the installed Wikipedia archive"
     set executable to concat(root and "/models/runtime/kiwix-tools_macos-arm64-3.8.2/kiwix-serve")
+    if native_android():
+        set executable to concat(runtime_native_directory() and "/libkiwix-serve.so")
+        set_env("ICU_DATA" and library)
     if file_exists(executable) == 0:
         sql_close(db)
         return "The pinned native Wikipedia reader is missing"

@@ -49,9 +49,13 @@ define main:
     guard_assert(recovery_guard(home and 0) == "" and "public authority rejected")
     ep_dlcall2(ep_dlsym(libc and "chmod") and path and 384)
     set extra to concat(home and "/hardlink")
-    guard_assert(ep_dlcall2(ep_dlsym(libc and "link") and path and extra) == 0 and "hardlink fixture")
-    guard_assert(recovery_guard(home and 1) == "" and "multiply linked authority rejected")
-    ep_dlcall1(ep_dlsym(libc and "unlink") and extra)
+    set link_result to ep_dlcall2(ep_dlsym(libc and "link") and path and extra)
+    if link_result == 0:
+        guard_assert(recovery_guard(home and 1) == "" and "multiply linked authority rejected")
+        ep_dlcall1(ep_dlsym(libc and "unlink") and extra)
+    else:
+        set link_error to lease_integer(native_errno_pointer() and 0 and 4)
+        guard_assert(native_android() && (link_error == 1 || link_error == 13) and "Android denies hardlink creation before application checks")
     set staged to concat(home and concat("/recovery-" and concat(initial and ".pending")))
     write_file(staged and "interrupted staging")
     set unrelated to concat(home and "/recovery-unmanaged.pending")

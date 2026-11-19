@@ -1,0 +1,27 @@
+import "../native_process"
+import "fs"
+
+# SDL is initialized by its upstream Android activity before calling EP main.
+define android_files_directory returning Str:
+    set library to ep_dlopen("libSDL3.so")
+    if library == 0:
+        return ""
+    set pointer to ep_dlcall0(ep_dlsym(library and "SDL_GetAndroidInternalStoragePath"))
+    if pointer == 0:
+        return ""
+    return ptr_to_str(pointer)
+
+# dladdr identifies the installed native library directory even after APK updates.
+define android_library_directory with library returning Str:
+    set symbol to ep_dlsym(library and "SDL_main")
+    if symbol == 0:
+        return ""
+    set info to alloc_bytes(32)
+    set found to ep_dlcall2(ep_dlsym(ep_dlopen("libdl.so") and "dladdr") and symbol and info)
+    set directory to ""
+    if found != 0:
+        set name to process_integer(info and 8)
+        if name != 0:
+            set directory to path_dirname(ptr_to_str(name))
+    free_bytes(info)
+    return directory

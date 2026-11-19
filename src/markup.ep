@@ -1,11 +1,14 @@
-# Native XML/HTML parsing through macOS libxml2. No browser or script execution.
+# Native XML/HTML parsing through platform libxml2. No browser or script execution.
 import "state_lock"
 import "result_cache"
 set MARKUP_LIBRARY to 0
 
 define markup_library:
     if MARKUP_LIBRARY == 0:
-        set MARKUP_LIBRARY to ep_dlopen("/usr/lib/libxml2.2.dylib")
+        if native_android():
+            set MARKUP_LIBRARY to ep_dlopen("libecholite_xml2.so")
+        else:
+            set MARKUP_LIBRARY to ep_dlopen("/usr/lib/libxml2.2.dylib")
     return MARKUP_LIBRARY
 
 define markup_release with pointer:
@@ -15,7 +18,7 @@ define markup_release with pointer:
     return 0
 
 define markup_parse with source and html:
-    if string_length(source) == 0 || string_length(source) > 1048576:
+    if markup_library() == 0 || string_length(source) == 0 || string_length(source) > 1048576:
         return 0
     set function to ep_dlsym(markup_library() and "xmlReadMemory")
     if html == 1:

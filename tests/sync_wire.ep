@@ -1,0 +1,53 @@
+# Isolated integration harness. It never opens the application's memory database.
+import "../src/sync_exchange"
+
+define main:
+    set args to get_args()
+    if length_list(args) < 3:
+        display "Usage: sync_wire init DB | pair DB PEER SECRET_FILE | seed DB OBJECT BODY | serve DB HOST PORT COUNT | exchange DB PEER HOST PORT CURSOR | inspect DB"
+        return 1
+    set db to sql_open(get_list(args and 2))
+    if sync_pair_init(db) == 0:
+        return 1
+    set command to get_list(args and 1)
+    if command == "init":
+        display result_cache_scalar(db and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    else if command == "pair" && length_list(args) == 5:
+        set result to sync_pair_install(db and get_list(args and 3) and "Integration peer" and string_trim(read_file(get_list(args and 4))))
+        display result
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) != "ok":
+            return 1
+    else if command == "seed" && length_list(args) == 5:
+        set object to get_list(args and 3)
+        set payload to result_cache_scalar(db and "SELECT json_object('body',?)" and [get_list(args and 4)])
+        display sync_write(db and object and "memory" and payload and sync_heads(db and object))
+    else if command == "serve" && length_list(args) == 6:
+        set port to transport_number(get_list(args and 4) and 10 and 65535)
+        set remaining to transport_number(get_list(args and 5) and 10 and 100)
+        set listener to sync_socket_open(get_list(args and 3) and port and 1)
+        if listener < 0:
+            display "Cannot bind isolated sync listener"
+            return 1
+        display "READY: authenticated sync listener"
+        repeat while remaining > 0:
+            set fd to sync_socket_accept(listener and transport_now(native_system()) + 60000)
+            if fd < 0:
+                sync_socket_close(listener)
+                return 1
+            set served to sync_connection_serve(db and fd)
+            sync_socket_close(fd)
+            display concat("Connection result: " and int_to_string(served))
+            set remaining to remaining - 1
+        sync_socket_close(listener)
+    else if command == "exchange" && length_list(args) == 7:
+        set result to sync_exchange(db and get_list(args and 3) and get_list(args and 4) and transport_number(get_list(args and 5) and 10 and 65535) and get_list(args and 6))
+        display result
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) != "ok":
+            return 1
+    else if command == "inspect":
+        display result_cache_scalar(db and "SELECT json_group_array(json(row)) FROM (SELECT json_object('id',id,'object',object,'payload',json(payload)) row FROM sync_versions ORDER BY object,id)" and [])
+    else:
+        display "Invalid isolated sync test command"
+        return 1
+    sql_close(db)
+    return 0

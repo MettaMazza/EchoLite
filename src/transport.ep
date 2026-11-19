@@ -177,10 +177,17 @@ define transport_u32 with pointer and offset and value:
     return 0
 
 define transport_now with libc:
+    if native_android():
+        set stamp to alloc_bytes(16)
+        ep_dlcall2(ep_dlsym(libc and "clock_gettime") and 1 and stamp)
+        set seconds to peek_byte(stamp and 0) + peek_byte(stamp and 1) * 256 + peek_byte(stamp and 2) * 65536 + peek_byte(stamp and 3) * 16777216
+        set nanos to peek_byte(stamp and 8) + peek_byte(stamp and 9) * 256 + peek_byte(stamp and 10) * 65536 + peek_byte(stamp and 11) * 16777216
+        free_bytes(stamp)
+        return seconds * 1000 + nanos / 1000000
     return ep_dlcall1(ep_dlsym(libc and "clock_gettime_nsec_np") and 6) / 1000000
 
 define transport_errno with libc:
-    set pointer to ep_dlcall0(ep_dlsym(libc and "__error"))
+    set pointer to native_errno_pointer()
     return peek_byte(pointer and 0)
 
 define transport_wait_cancel with libc and pollfd and fd and event and deadline and cancel:
@@ -243,7 +250,18 @@ define transport_request_cancel with method and port and path and token and payl
             set idle to transport_number(idle_setting and 10 and 600) * 1000
             if idle < 1000:
                 return transport_error("Invalid inference idle timeout")
-    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set libc to native_system()
+    set socket_level to 65535
+    set socket_error to 4103
+    set in_progress to 36
+    set again to 35
+    set send_flags to 0
+    if native_android():
+        set socket_level to 1
+        set socket_error to 4
+        set in_progress to 115
+        set again to 11
+        set send_flags to 16384
     set fd to ep_dlcall3(ep_dlsym(libc and "socket") and 2 and 1 and 0)
     if fd < 0 || fd > 2147483647:
         return transport_error("Local socket creation failed")
@@ -252,6 +270,9 @@ define transport_request_cancel with method and port and path and token and payl
     set option to alloc_bytes(4)
     poke_byte(address and 0 and 16)
     poke_byte(address and 1 and 2)
+    if native_android():
+        poke_byte(address and 0 and 2)
+        poke_byte(address and 1 and 0)
     poke_byte(address and 2 and port / 256)
     poke_byte(address and 3 and port % 256)
     poke_byte(address and 4 and 127)
@@ -260,13 +281,13 @@ define transport_request_cancel with method and port and path and token and payl
     set error to ""
     if native_fcntl_int(fd and 4 and 4) != 0 || native_fcntl_int(fd and 2 and 1) != 0:
         set error to "Socket configuration failed"
-    if ep_dlcall5(ep_dlsym(libc and "setsockopt") and fd and 65535 and 4130 and option and 4) != 0:
+    if native_android() == 0 && ep_dlcall5(ep_dlsym(libc and "setsockopt") and fd and 65535 and 4130 and option and 4) != 0:
         set error to "Socket signal configuration failed"
     set deadline to transport_now(libc) + timeout
     if error == "":
         set result to ep_dlcall3(ep_dlsym(libc and "connect") and fd and address and 16)
         if result != 0:
-            if transport_errno(libc) != 36:
+            if transport_errno(libc) != in_progress:
                 set error to "Local connection failed"
             else:
                 set connect_deadline to transport_now(libc) + 2000
@@ -277,7 +298,7 @@ define transport_request_cancel with method and port and path and token and payl
                 else:
                     transport_u32(address and 0 and 4)
                     transport_u32(option and 0 and 0)
-                    set rc to ep_dlcall5(ep_dlsym(libc and "getsockopt") and fd and 65535 and 4103 and option and address)
+                    set rc to ep_dlcall5(ep_dlsym(libc and "getsockopt") and fd and socket_level and socket_error and option and address)
                     if rc != 0 || peek_byte(option and 0) != 0:
                         set error to "Local connection failed"
     set host to concat(" HTTP/1.1\r\nHost: 127.0.0.1:" and concat(int_to_string(port) and "\r\nConnection: close\r\nContent-Type: application/json\r\nAuthorization: Bearer "))
@@ -288,12 +309,12 @@ define transport_request_cancel with method and port and path and token and payl
         if transport_wait_cancel(libc and pollfd and fd and 4 and deadline and cancel) <= 0:
             set error to "Local request deadline exceeded"
         else:
-            set n to ep_dlcall4(ep_dlsym(libc and "send") and fd and str_to_ptr(request) + sent and string_length(request) - sent and 0)
+            set n to ep_dlcall4(ep_dlsym(libc and "send") and fd and str_to_ptr(request) + sent and string_length(request) - sent and send_flags)
             if n > 0:
                 set sent to sent + n
             else if n == 0:
                 set error to "Local connection closed during request"
-            else if transport_errno(libc) != 4 && transport_errno(libc) != 35:
+            else if transport_errno(libc) != 4 && transport_errno(libc) != again:
                 set error to "Local request send failed"
     set state to transport_parser()
     set data to alloc_bytes(16385)
@@ -311,7 +332,7 @@ define transport_request_cancel with method and port and path and token and payl
                 transport_parse(state and "" and 1)
                 set error to get_list(state and 4)
             else if n < 0:
-                if transport_errno(libc) != 4 && transport_errno(libc) != 35:
+                if transport_errno(libc) != 4 && transport_errno(libc) != again:
                     set error to "Local response read failed"
             else:
                 set last_activity to transport_now(libc)

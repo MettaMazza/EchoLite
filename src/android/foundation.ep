@@ -1,0 +1,19 @@
+import "../../stdlib/bridge/raylib"
+
+# NativeActivity foundation probe. Application logic remains Ernos Plain.
+define main:
+    set RAYLIB_HANDLE to ep_dlopen("libecholite.so")
+    if RAYLIB_HANDLE == 0:
+        return 1
+    raylib_init_window(0 and 0 and "EchoLite")
+    raylib_set_target_fps(30)
+    repeat while raylib_window_should_close() == 0:
+        raylib_begin_drawing()
+        raylib_clear_background(4280039444)
+        raylib_draw_text("EchoLite" and 64 and 160 and 72 and 4291421629)
+        raylib_draw_text("Native Android foundation" and 64 and 260 and 36 and 4293586664)
+        raylib_draw_text("Ernos Plain / ARM64" and 64 and 320 and 32 and 4289302420)
+        raylib_draw_text("Under active development" and 64 and 420 and 32 and 4291421629)
+        raylib_end_drawing()
+    raylib_close_window()
+    return 0

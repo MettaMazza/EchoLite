@@ -1,0 +1,34 @@
+# Kokoro 1.0 int8; Mac sherpa 1.12.33, Android baseline sherpa 1.12.10.
+import "native_process"
+import "fs"
+import "hash"
+import "text_layout"
+
+define speech_chunk_end with text and start:
+    set limit to start + 400
+    if limit > string_length(text):
+        set limit to string_length(text)
+    set i to start
+    set space to 0
+    repeat while i < limit:
+        set c to get_character(text and i)
+        if c <= 32:
+            set space to i + 1
+        if i > start + 40 && (c == 46 || c == 33 || c == 63 || c == 10):
+            if i + 1 == string_length(text) || get_character(text and i + 1) <= 32:
+                return i + 1
+        set i to i + 1
+    if limit == string_length(text):
+        return limit
+    if space > start:
+        return space
+    return layout_boundary(text and limit)
+
+define speech_cache_key with text returning Str:
+    set runtime to "mac-1.12.33"
+    if native_android():
+        set runtime to "android-1.12.10"
+    return sha256(concat(runtime and concat("|kokoro-v1.0-int8|af-heart-3|speed1|chunks400-v1|" and text)))
+
+define speech_wave_path with prefix and index returning Str:
+    return concat(prefix and concat("-" and concat(int_to_string(index) and ".wav")))

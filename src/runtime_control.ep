@@ -1,0 +1,158 @@
+# Identify owned model processes by exact executable and argv, never by name alone.
+import "model_profile"
+import "slot_cache"
+
+define runtime_process_args with pid:
+    set args to create_list()
+    if pid <= 1:
+        return args
+    set bytes to alloc_bytes(131073)
+    set used to 0
+    set offset to 0
+    set maximum to 512
+    if native_android():
+        set path to concat("/proc/" and concat(int_to_string(pid) and "/cmdline"))
+        set fd to native_open(path and 256 and 0)
+        if fd >= 0:
+            set used to native_signed_int(ep_dlcall3(ep_dlsym(native_system() and "read") and fd and bytes and 131072))
+            ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    else:
+        set mib to alloc_bytes(12)
+        native_bytes_write(mib and 0 and 1 and 4)
+        native_bytes_write(mib and 4 and 49 and 4)
+        native_bytes_write(mib and 8 and pid and 4)
+        set size to alloc_bytes(8)
+        native_bytes_write(size and 0 and 131072 and 8)
+        if ep_dlcall6(ep_dlsym(native_system() and "sysctl") and mib and 3 and bytes and size and 0 and 0) == 0:
+            set used to process_integer(size and 8)
+            set maximum to process_integer(bytes and 4)
+            set offset to 4
+            repeat while offset < used && peek_byte(bytes and offset) != 0:
+                set offset to offset + 1
+            repeat while offset < used && peek_byte(bytes and offset) == 0:
+                set offset to offset + 1
+        free_bytes(size)
+        free_bytes(mib)
+    if used > 0 && used <= 131072 && maximum > 0 && maximum <= 512:
+        poke_byte(bytes and used and 0)
+        repeat while offset < used && length_list(args) < maximum:
+            set value to ptr_to_str(bytes + offset)
+            append_list(args and value)
+            set offset to offset + string_length(value) + 1
+    free_bytes(bytes)
+    return args
+
+define runtime_arg_value with args and option returning Str:
+    set i to 1
+    repeat while i + 1 < length_list(args):
+        if string_equals(get_list(args and i) and option):
+            return get_list(args and i + 1)
+        set i to i + 1
+    return ""
+
+define runtime_process_matches with root and token_path and args:
+    if length_list(args) < 2:
+        return 0
+    set executable to get_list(args and 0)
+    set matches_executable to runtime_same_model(runtime_worker_path(root) and executable)
+    # Android preserves detached workers across package replacement. The old APK
+    # directory differs, but only this app UID may own the matching process.
+    if native_android() && starts_with(executable and "/data/app/") && string_contains(executable and "/dev.echolite.android-") && ends_with(executable and "/lib/arm64/libllama-server.so"):
+        set matches_executable to 1
+    if matches_executable == 0:
+        return 0
+    if runtime_same_model(token_path and runtime_arg_value(args and "--api-key-file")) == 0:
+        return 0
+    set port to runtime_arg_value(args and "--port")
+    set model to runtime_arg_value(args and "--model")
+    if port == "8401":
+        return runtime_same_model(runtime_model_path(root and "all-minilm-l6-v2_f16.gguf") and model)
+    if port != "8400":
+        return 0
+    set profile to profile_index(model)
+    if profile < 0:
+        return 0
+    return runtime_same_model(runtime_model_path(root and profile_name(profile)) and model)
+
+define runtime_processes:
+    set pids to create_list()
+    if native_android():
+        set directory to ep_dlcall1(ep_dlsym(native_system() and "opendir") and "/proc")
+        if directory != 0:
+            repeat while 1:
+                set entry to ep_dlcall1(ep_dlsym(native_system() and "readdir") and directory)
+                if entry == 0:
+                    break
+                set name to native_dirent_name(entry)
+                set pid to string_to_int(name)
+                if pid > 1 && string_equals(int_to_string(pid) and name):
+                    append_list(pids and pid)
+            ep_dlcall1(ep_dlsym(native_system() and "closedir") and directory)
+    else:
+        set library to ep_dlopen("/usr/lib/libproc.dylib")
+        set bytes to alloc_bytes(131072)
+        set used to ep_dlcall4(ep_dlsym(library and "proc_listpids") and 1 and 0 and bytes and 131072)
+        set offset to 0
+        repeat while offset + 4 <= used && offset < 131072:
+            set pid to process_integer(bytes + offset and 4)
+            if pid > 1:
+                append_list(pids and pid)
+            set offset to offset + 4
+        free_bytes(bytes)
+    return pids
+
+define runtime_process_owned with pid:
+    if native_android() == 0:
+        return 1
+    set path to concat("/proc/" and int_to_string(pid))
+    set fd to native_open(path and 1048832 and 0)
+    if fd < 0:
+        return 0
+    set info to alloc_bytes(256)
+    set owned to ep_dlcall2(ep_dlsym(native_system() and "fstat") and fd and info) == 0
+    if owned:
+        set owned to native_stat_owner(info) == ep_dlcall0(ep_dlsym(native_system() and "getuid"))
+    free_bytes(info)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    return owned
+
+define runtime_unload with root and home and token_path returning Str:
+    set lock to private_lock(runtime_lock_directory(root and home) and "native-start.lock")
+    if lock < 0:
+        return "Cannot lock the local model runtime"
+    if ep_dlcall2(ep_dlsym(native_system() and "flock") and lock and 6) != 0:
+        ep_dlcall1(ep_dlsym(native_system() and "close") and lock)
+        return "Models are still starting; try unloading when ready"
+    set slot to slot_lock(path_dirname(token_path))
+    set problem to ""
+    if slot < 0:
+        set problem to "A model is working; stop the current response before unloading"
+    if problem == "":
+        set pids to runtime_processes()
+        set i to 0
+        repeat while i < length_list(pids):
+            set pid to get_list(pids and i)
+            if runtime_process_owned(pid) && runtime_process_matches(root and token_path and runtime_process_args(pid)):
+                if ep_dlcall2(ep_dlsym(native_system() and "kill") and pid and 15) != 0:
+                    set problem to "Cannot stop an owned model process"
+                else:
+                    set deadline to transport_now(native_system()) + 10000
+                    repeat while runtime_process_matches(root and token_path and runtime_process_args(pid)) && transport_now(native_system()) < deadline:
+                        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 100000)
+                    if runtime_process_owned(pid) && runtime_process_matches(root and token_path and runtime_process_args(pid)):
+                        set problem to "The model is still shutting down; try unloading again"
+            set i to i + 1
+    if problem == "":
+        set port to 8400
+        repeat while port <= 8401:
+            if slot_connection_state(port) != 0:
+                set problem to "A model service is still reachable; memory release was not confirmed"
+            set port to port + 1
+    if problem == "" && write_file(concat(path_dirname(token_path) and "/models-unloaded") and "unloaded\n") != 1:
+        set problem to "Cannot persist the unloaded preference"
+    if problem != "":
+        ep_dlcall1(ep_dlsym(native_system() and "unlink") and concat(path_dirname(token_path) and "/models-unloaded"))
+    if slot >= 0:
+        slot_unlock(slot)
+    ep_dlcall1(ep_dlsym(native_system() and "close") and lock)
+    return problem

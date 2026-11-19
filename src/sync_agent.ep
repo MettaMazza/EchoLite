@@ -1,0 +1,159 @@
+# Connection-driven background sync. Idle listeners never hold a state lease.
+import "sync_commands"
+import "sync_startup"
+import "native_process"
+import "os"
+
+set AGENT_LAST_ERROR to ""
+
+define agent_lease with home and token:
+    set result to sync_command_lease(home and "maintenance" and slot_runtime_home() and token and 8400)
+    set ok to result_cache_scalar(AGENT_DB and "SELECT json_extract(?,'$.status')" and [result]) == "ok"
+    if ok == 0 && string_equals(result and AGENT_LAST_ERROR) == 0:
+        display concat("Sync waiting: " and result)
+        ep_dlcall1(ep_dlsym(native_system() and "fflush") and 0)
+    set AGENT_LAST_ERROR to result
+    return ok
+
+
+set AGENT_DB to 0
+
+define main:
+    # A service crash must not strand an unprotected daemon holding the singleton.
+    set parent to get_env("ECHOLITE_SYNC_PARENT")
+    if native_android() && parent != "":
+        set system to native_system()
+        if ep_dlcall5(ep_dlsym(system and "prctl") and 1 and 15 and 0 and 0 and 0) != 0 || ep_dlcall0(ep_dlsym(system and "getppid")) != string_to_int(parent):
+            return 1
+    set home to get_env("ECHOLITE_HOME")
+    if home == "" || file_exists(concat(home and "/memory.sqlite3")) == 0:
+        return 1
+    # Android Context paths may contain /data/user/0 symlinks. Maintenance opens
+    # deliberately reject symlink traversal, so canonicalize once like the core/UI.
+    set resolved to alloc_bytes(4096)
+    set canonical to ep_dlcall2(ep_dlsym(native_system() and "realpath") and home and resolved)
+    if canonical == 0:
+        free_bytes(resolved)
+        return 1
+    set home to ptr_to_str(resolved)
+    free_bytes(resolved)
+    set_env("ECHOLITE_HOME" and home)
+    set singleton to private_lock(home and "sync-agent.lock")
+    if singleton < 0 || ep_dlcall2(ep_dlsym(native_system() and "flock") and singleton and 6) != 0:
+        return 0
+    set token_path to get_env("ECHOLITE_NATIVE_TOKEN_FILE")
+    if token_path == "":
+        set token_path to concat(home and "/native-runtime.token")
+    set AGENT_DB to sql_open(concat(home and "/memory.sqlite3"))
+    if AGENT_DB == 0:
+        return 1
+    sql_execute(AGENT_DB and "PRAGMA busy_timeout=100;")
+    set listeners to create_list()
+    set hosts to ""
+    set udp to -1
+    set refresh_at to 0
+    set exchange_at to 0
+    set received_at to 0
+    set adb_child to 0
+    set initialized to 0
+    repeat while 1:
+        set now to transport_now(native_system())
+        set token to ""
+        if file_exists(token_path):
+            set token to string_trim(read_file(token_path))
+        if initialized == 0:
+            if agent_lease(home and token):
+                set initialized to sync_devices_init(AGENT_DB) && sync_coordinator_init(AGENT_DB)
+                sql_execute(AGENT_DB and "CREATE TABLE IF NOT EXISTS sync_agent_status(singleton INTEGER PRIMARY KEY CHECK(singleton=1),state TEXT,updated INTEGER,last_received INTEGER DEFAULT 0);")
+                sync_release_state()
+        if initialized && now >= refresh_at:
+            set refresh_at to now + 3000
+            set interfaces to sync_network_interfaces()
+            set addresses to ["127.0.0.1"]
+            set n to 0
+            repeat while n < length_list(interfaces):
+                append_list(addresses and get_list(get_list(interfaces and n) and 1))
+                set n to n + 1
+            set signature to ""
+            set n to 0
+            repeat while n < length_list(addresses):
+                set signature to concat(signature and concat("|" and get_list(addresses and n)))
+                set n to n + 1
+            if result_cache_scalar(AGENT_DB and "SELECT count(*) FROM sync_peers WHERE enabled=1" and []) == "0":
+                set signature to ""
+                set addresses to create_list()
+            if string_equals(signature and hosts) == 0:
+                set n to 0
+                repeat while n < length_list(listeners):
+                    sync_socket_close(get_list(listeners and n))
+                    set n to n + 1
+                set listeners to create_list()
+                set n to 0
+                repeat while n < length_list(addresses):
+                    set fd to sync_socket_open(get_list(addresses and n) and 8410 and 1)
+                    if fd >= 0:
+                        append_list(listeners and fd)
+                    set n to n + 1
+                set hosts to signature
+                set exchange_at to 0
+            if length_list(listeners) > 0 && udp < 0:
+                set udp to sync_datagram_open("0.0.0.0" and 8411)
+            if native_android() == 0 && file_exists(concat(home and "/sync-usb.json")):
+                if adb_child > 0 && process_poll(adb_child) != -1:
+                    set adb_child to 0
+                if adb_child == 0:
+                    set config to read_file(concat(home and "/sync-usb.json"))
+                    set adb to result_cache_scalar(AGENT_DB and "SELECT json_extract(?,'$.adb')" and [config])
+                    set serial to result_cache_scalar(AGENT_DB and "SELECT json_extract(?,'$.serial')" and [config])
+                    if file_exists(adb) && serial != "":
+                        set quiet to native_open("/dev/null" and 1 and 0)
+                        set adb_child to process_launch(adb and ["-s",serial,"forward","tcp:18410","tcp:8410"] and quiet)
+                        sync_socket_close(quiet)
+        # Receive under maintenance only after a connection actually arrives.
+        set n to 0
+        repeat while n < length_list(listeners):
+            set fd to sync_socket_accept(get_list(listeners and n) and transport_now(native_system()) + 1)
+            if fd >= 0:
+                if agent_lease(home and token):
+                    set result to sync_service_receive(AGENT_DB and fd and home and slot_runtime_home() and token and 8400)
+                    if result_cache_scalar(AGENT_DB and "SELECT json_extract(?,'$.status')" and [result]) == "ok":
+                        set received_at to now
+                        sync_execute(AGENT_DB and "INSERT OR REPLACE INTO sync_agent_status VALUES(1,'received',?,?)" and [int_to_string(now),int_to_string(now)])
+                    sync_release_state()
+                sync_socket_close(fd)
+            set n to n + 1
+        if udp >= 0:
+            set packet to sync_datagram_receive(udp and transport_now(native_system()) + 1)
+            if length_list(packet) == 3 && agent_lease(home and token):
+                set interfaces to sync_network_interfaces()
+                set n to 0
+                repeat while n < length_list(interfaces):
+                    set host to get_list(get_list(interfaces and n) and 1)
+                    set reply to sync_discovery_reply(AGENT_DB and get_list(packet and 2) and host and 8410)
+                    if reply != "":
+                        sync_datagram_send(udp and get_list(packet and 0) and string_to_int(get_list(packet and 1)) and reply)
+                        break
+                    set n to n + 1
+                sync_release_state()
+        # Mac drives USB; Android discovers and drives Wi-Fi after USB goes quiet.
+        if initialized && now >= exchange_at:
+            set exchange_at to now + 3000
+            set permitted to native_android() == 0 || now - received_at > 15000
+            if native_android():
+                set exchange_at to now + 11000
+            if permitted && agent_lease(home and token):
+                set peers to sql_query_params(AGENT_DB and "SELECT peer FROM sync_peers WHERE enabled=1 ORDER BY peer LIMIT 16" and [])
+                set n to 0
+                repeat while n < length_list(peers):
+                    set peer to get_list(get_list(peers and n) and 0)
+                    set attempt to native_android() || result_cache_scalar(AGENT_DB and "SELECT count(*) FROM sync_endpoints WHERE peer=? AND transport='usb'" and [peer]) != "0"
+                    if attempt:
+                        set result to sync_device_exchange(AGENT_DB and peer and (native_android() == 0) and home and slot_runtime_home() and token and 8400)
+                        if native_android() && result_cache_scalar(AGENT_DB and "SELECT json_extract(?,'$.status')" and [result]) != "ok":
+                            sync_discovery_find(AGENT_DB and peer)
+                            set result to sync_device_exchange(AGENT_DB and peer and (native_android() == 0) and home and slot_runtime_home() and token and 8400)
+                        sync_ui_report(AGENT_DB and "sync-now" and result)
+                    set n to n + 1
+                sync_release_state()
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 100000)
+    return 0

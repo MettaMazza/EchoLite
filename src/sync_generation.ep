@@ -1,0 +1,53 @@
+# Generation responses are split into bounded UTF-8 text chunks. The manifest is
+# committed with every chunk. ID-only ownership links make forgetting transactional.
+import "sync_conversation"
+
+define sync_generation_init with db:
+    set code to sql_execute(db and "CREATE TABLE IF NOT EXISTS sync_generation_rows(turn_id INTEGER NOT NULL,round INTEGER NOT NULL,object TEXT NOT NULL UNIQUE,dirty INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(turn_id,round)); CREATE TABLE IF NOT EXISTS sync_generation_applied(object TEXT PRIMARY KEY,heads TEXT NOT NULL); CREATE TABLE IF NOT EXISTS sync_generation_parts(owner TEXT NOT NULL,ordinal INTEGER NOT NULL,object TEXT NOT NULL UNIQUE,PRIMARY KEY(owner,ordinal)); INSERT OR IGNORE INTO sync_generation_rows(turn_id,round,object) SELECT turn_id,round,lower(hex(randomblob(16))) FROM generation_rounds; CREATE TRIGGER IF NOT EXISTS sync_generation_insert AFTER INSERT ON generation_rounds BEGIN INSERT OR IGNORE INTO sync_generation_rows(turn_id,round,object) VALUES(new.turn_id,new.round,lower(hex(randomblob(16)))); END;")
+    if code != 0:
+        return 0
+    set purge to "INSERT OR IGNORE INTO sync_objects(id,kind,deleted) SELECT object,'generation',0 FROM sync_generation_rows WHERE turn_id=old.turn_id AND round=old.round; INSERT INTO sync_changes(object) SELECT id FROM sync_objects WHERE deleted=0 AND (id IN (SELECT object FROM sync_generation_rows WHERE turn_id=old.turn_id AND round=old.round) OR id IN (SELECT p.object FROM sync_generation_parts p JOIN sync_generation_rows r ON r.object=p.owner WHERE r.turn_id=old.turn_id AND r.round=old.round)); DELETE FROM sync_versions WHERE object IN (SELECT object FROM sync_generation_rows WHERE turn_id=old.turn_id AND round=old.round) OR object IN (SELECT p.object FROM sync_generation_parts p JOIN sync_generation_rows r ON r.object=p.owner WHERE r.turn_id=old.turn_id AND r.round=old.round); DELETE FROM sync_seen WHERE object IN (SELECT object FROM sync_generation_rows WHERE turn_id=old.turn_id AND round=old.round) OR object IN (SELECT p.object FROM sync_generation_parts p JOIN sync_generation_rows r ON r.object=p.owner WHERE r.turn_id=old.turn_id AND r.round=old.round); UPDATE sync_objects SET deleted=1 WHERE id IN (SELECT object FROM sync_generation_rows WHERE turn_id=old.turn_id AND round=old.round) OR id IN (SELECT p.object FROM sync_generation_parts p JOIN sync_generation_rows r ON r.object=p.owner WHERE r.turn_id=old.turn_id AND r.round=old.round); DELETE FROM sync_generation_applied WHERE object IN (SELECT object FROM sync_generation_rows WHERE turn_id=old.turn_id AND round=old.round); DELETE FROM sync_generation_parts WHERE owner IN (SELECT object FROM sync_generation_rows WHERE turn_id=old.turn_id AND round=old.round); DELETE FROM sync_generation_rows WHERE turn_id=old.turn_id AND round=old.round;"
+    set statement to concat("DROP TRIGGER IF EXISTS sync_generation_delete; DROP TRIGGER IF EXISTS sync_generation_update; CREATE TRIGGER IF NOT EXISTS sync_generation_delete AFTER DELETE ON generation_rounds BEGIN " and concat(purge and " END;"))
+    set statement to concat(statement and concat("CREATE TRIGGER IF NOT EXISTS sync_generation_update AFTER UPDATE ON generation_rounds WHEN old.response!=new.response OR old.turn_id!=new.turn_id OR old.round!=new.round BEGIN " and concat(purge and " INSERT OR IGNORE INTO sync_generation_rows(turn_id,round,object) VALUES(new.turn_id,new.round,lower(hex(randomblob(16)))); END;")))
+    set code to sql_execute(db and statement)
+    return code == 0
+
+define sync_generation_capture with db and turn_id and round returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot lock generation snapshot")
+    set problem to ""
+    set object to result_cache_scalar(db and "SELECT object FROM sync_generation_rows WHERE turn_id=? AND round=?" and [turn_id,round])
+    set turn to sync_identity_get(db and "turn" and turn_id)
+    if object == "" || turn == "":
+        set problem to "Generation snapshot has no stable owner"
+    else if result_cache_scalar(db and "SELECT dirty FROM sync_generation_rows WHERE object=?" and [object]) == "1":
+        set bytes to result_cache_scalar(db and "SELECT length(CAST(response AS BLOB)) FROM generation_rounds WHERE turn_id=? AND round=?" and [turn_id,round])
+        if result_cache_scalar(db and "SELECT CAST(? AS INTEGER) BETWEEN 1 AND 8388608" and [bytes]) != "1":
+            set problem to "Generation snapshot exceeds the bounded transfer size"
+        else:
+            set response to result_cache_scalar(db and "SELECT response FROM generation_rounds WHERE turn_id=? AND round=?" and [turn_id,round])
+            if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [response,response]) != "1":
+                set problem to "Generation snapshot must be a JSON object"
+            else:
+                set digest to sha256(response)
+                set characters to result_cache_scalar(db and "SELECT length(response) FROM generation_rounds WHERE turn_id=? AND round=?" and [turn_id,round])
+                set count to (string_to_int(characters) + 8191) / 8192
+                set index to 0
+                repeat while index < count && problem == "":
+                    set part to result_cache_scalar(db and "SELECT lower(hex(randomblob(16)))" and [])
+                    set payload to result_cache_scalar(db and "SELECT json_object('schema',1,'owner',?,'ordinal',CAST(? AS INTEGER),'data',substr(response,CAST(? AS INTEGER)*8192+1,8192)) FROM generation_rounds WHERE turn_id=? AND round=?" and [object,int_to_string(index),int_to_string(index),turn_id,round])
+                    set problem to sync_write_transaction(db and part and "generation_chunk" and payload and sync_heads(db and part))
+                    if problem == "" && sync_execute(db and "INSERT INTO sync_generation_parts(owner,ordinal,object) VALUES(?,?,?)" and [object,int_to_string(index),part]) == 0:
+                        set problem to "Cannot persist generation chunk ownership"
+                    set index to index + 1
+                if problem == "":
+                    set manifest to result_cache_scalar(db and "SELECT json_object('schema',1,'turn',?,'round',CAST(? AS INTEGER),'bytes',CAST(? AS INTEGER),'characters',CAST(? AS INTEGER),'sha256',?,'parts',json((SELECT json_group_array(object) FROM (SELECT object FROM sync_generation_parts WHERE owner=? ORDER BY ordinal))))" and [turn,round,bytes,characters,digest,object])
+                    set problem to sync_write_transaction(db and object and "generation" and manifest and sync_heads(db and object))
+                    if problem == "" && sync_execute(db and "UPDATE sync_generation_rows SET dirty=0 WHERE object=?" and [object]) == 0:
+                        set problem to "Cannot acknowledge generation snapshot"
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        if problem == "":
+            set problem to "Cannot commit generation snapshot"
+        return result_cache_error(problem)
+    return sync_record(db and object)

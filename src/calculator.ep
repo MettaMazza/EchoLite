@@ -1,4 +1,5 @@
 import "fs"
+import "native_calls"
 # Exact rational calculator. Grammar, bounds, receipts and caching are EP.
 # GMP is a native arithmetic dependency; no eval, shell or code execution is used.
 import "result_cache"
@@ -271,6 +272,8 @@ define run_calculator with db and expression and epoch returning Str:
         if library == "":
             set args to get_args()
             set library to concat(path_dirname(path_dirname(get_list(args and 0))) and "/models/runtime/libgmp.10.dylib")
+        if native_android() && get_env("ECHOLITE_GMP_LIBRARY") == "":
+            set library to "libecholite_gmp.so"
         set CALCULATOR_GMP to ep_dlopen(library)
     if CALCULATOR_GMP == 0:
         return "{\"status\":\"ok\",\"tool\":\"calculator\",\"outcome\":\"failed\",\"error_code\":\"unavailable\",\"text\":\"Native arithmetic library is unavailable.\"}"

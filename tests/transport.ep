@@ -85,19 +85,27 @@ define main:
     set_env("ECHOLITE_REQUEST_TIMEOUT_MS" and "wrong")
     assert_transport(string_contains(local_post("/recall" and "token" and "{}") and "Invalid request timeout") and "invalid deadline rejected")
     set_env("ECHOLITE_REQUEST_TIMEOUT_MS" and "2000")
-    set libc to ep_dlopen("/usr/lib/libSystem.B.dylib")
+    set libc to native_system()
     set listener to ep_dlcall3(ep_dlsym(libc and "socket") and 2 and 1 and 0)
     assert_transport(listener >= 0 && listener < 2147483647 and "listener created")
     set address to alloc_bytes(16)
     poke_byte(address and 0 and 16)
     poke_byte(address and 1 and 2)
+    if native_android():
+        poke_byte(address and 0 and 2)
+        poke_byte(address and 1 and 0)
     poke_byte(address and 2 and 32)
     poke_byte(address and 3 and 207)
     poke_byte(address and 4 and 127)
     poke_byte(address and 7 and 1)
     set option to alloc_bytes(4)
     transport_u32(option and 0 and 1)
-    ep_dlcall5(ep_dlsym(libc and "setsockopt") and listener and 65535 and 4 and option and 4)
+    set socket_level to 65535
+    set reuse_address to 4
+    if native_android():
+        set socket_level to 1
+        set reuse_address to 2
+    ep_dlcall5(ep_dlsym(libc and "setsockopt") and listener and socket_level and reuse_address and option and 4)
     assert_transport(ep_dlcall3(ep_dlsym(libc and "bind") and listener and address and 16) == 0 and "exclusive loopback listener")
     assert_transport(ep_dlcall2(ep_dlsym(libc and "listen") and listener and 4) == 0 and "listener ready")
     set completion to channel

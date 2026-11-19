@@ -1,0 +1,12 @@
+# Use the same SQLite implementation as EP's native database operations.
+# Android binaries export their linked SQLite symbols; macOS uses system SQLite.
+import "native_calls"
+set NATIVE_SQLITE_LIBRARY to 0
+
+define native_sqlite:
+    if NATIVE_SQLITE_LIBRARY == 0:
+        if native_android():
+            set NATIVE_SQLITE_LIBRARY to ep_dlcall2(ep_dlsym(ep_dlopen("libdl.so") and "dlopen") and 0 and 1)
+        else:
+            set NATIVE_SQLITE_LIBRARY to ep_dlopen("/usr/lib/libsqlite3.dylib")
+    return NATIVE_SQLITE_LIBRARY

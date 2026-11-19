@@ -1,3 +1,4 @@
+import "native_sqlite"
 import "snapshot_seal"
 import "health"
 
@@ -19,7 +20,7 @@ define backup_check with home and identifier returning Str:
     if parent < 0:
         return backup_check_error("Cannot open state directory")
     set info to alloc_bytes(144)
-    set owned to ep_dlcall2(ep_dlsym(libc and "fstat") and parent and info) == 0 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid"))
+    set owned to ep_dlcall2(ep_dlsym(libc and "fstat") and parent and info) == 0 && native_stat_owner(info) == ep_dlcall0(ep_dlsym(libc and "getuid"))
     free_bytes(info)
     if owned == 0:
         ep_dlcall1(ep_dlsym(libc and "close") and parent)
@@ -34,7 +35,7 @@ define backup_check with home and identifier returning Str:
         set problem to "Backup directory is unavailable or is a symlink"
     else:
         set info to alloc_bytes(144)
-        if ep_dlcall2(ep_dlsym(libc and "fstat") and directory and info) != 0 || lease_integer(info and 16 and 4) != ep_dlcall0(ep_dlsym(libc and "getuid")):
+        if ep_dlcall2(ep_dlsym(libc and "fstat") and directory and info) != 0 || native_stat_owner(info) != ep_dlcall0(ep_dlsym(libc and "getuid")):
             set problem to "Backup directory must be owned by the current user"
         free_bytes(info)
     set name to concat("backup-" and concat(identifier and ".sqlite3"))
@@ -44,7 +45,7 @@ define backup_check with home and identifier returning Str:
     if problem == "" && string_contains(health_check(path) and "\"status\":\"ok\"") == 0:
         set problem to "Snapshot structural integrity check failed"
     if problem == "":
-        set sqlite to ep_dlopen("/usr/lib/libsqlite3.dylib")
+        set sqlite to native_sqlite()
         set handle to alloc_bytes(8)
         set code to ep_dlcall4(ep_dlsym(sqlite and "sqlite3_open_v2") and path and handle and 16777217 and 0)
         set db to lease_integer(handle and 0 and 8)

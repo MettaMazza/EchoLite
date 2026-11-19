@@ -1,0 +1,130 @@
+# Prepare a redistributable snapshot from explicit public/runtime allowlists.
+import "setup_common"
+set RELEASE_ROOT to ""
+set RELEASE_OUTPUT to ""
+set RELEASE_BASE to ""
+set RELEASE_ASSETS to []
+
+define release_copy with source and destination:
+    application_directory(path_dirname(destination) and 0)
+    setup_wait("/bin/cp" and ["-R",source,destination])
+    return 0
+
+define release_asset with key and filename and path and kind and target and android_path:
+    set location to concat(RELEASE_OUTPUT and concat("/" and filename))
+    set hash to setup_hash(location)
+    if string_length(hash) != 64:
+        setup_fail(concat("Cannot hash release artifact " and filename))
+    set item to result_cache_scalar(SETUP_DB and "SELECT json_object('key',?,'url',?,'sha256',?,'bytes',CAST(? AS INTEGER),'path',?,'kind',?,'target',?)" and [key,concat(RELEASE_BASE and concat("/" and filename)),hash,int_to_string(file_size(location)),path,kind,target])
+    if android_path != "":
+        set item to result_cache_scalar(SETUP_DB and "SELECT json_set(?,'$.android_path',?)" and [item,android_path])
+    append_list(RELEASE_ASSETS and item)
+    return 0
+
+define release_model with key and url and source and path and android_path:
+    set item to result_cache_scalar(SETUP_DB and "SELECT json_object('key',?,'url',?,'sha256',?,'bytes',CAST(? AS INTEGER),'path',?,'kind','file','target','all','android_path',?)" and [key,url,setup_hash(source),int_to_string(file_size(source)),path,android_path])
+    append_list(RELEASE_ASSETS and item)
+    return 0
+
+define release_app with name and mode:
+    set app to concat(RELEASE_OUTPUT and concat("/" and concat(name and ".app")))
+    set contents to concat(app and "/Contents")
+    set resources to concat(contents and "/Resources")
+    application_directory(concat(contents and "/MacOS") and 0)
+    application_directory(resources and 0)
+    release_copy(concat(RELEASE_ROOT and "/src/setup_launcher") and concat(contents and "/MacOS/EchoLiteSetup"))
+    release_copy(concat(RELEASE_ROOT and "/src/setup_worker") and concat(resources and "/setup-worker"))
+    release_copy(concat(RELEASE_ROOT and "/models/runtime/libraylib.dylib") and concat(resources and "/libraylib.dylib"))
+    release_copy(concat(RELEASE_OUTPUT and "/release.json") and concat(resources and "/release.json"))
+    release_copy(concat(RELEASE_ROOT and "/android/assets/third-party") and concat(resources and "/third-party"))
+    write_file(concat(resources and "/mode.txt") and mode)
+    set plist to concat("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>dev.echolite.setup." and concat(mode and concat("</string><key>CFBundleName</key><string>" and concat(name and "</string><key>CFBundleExecutable</key><string>EchoLiteSetup</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string><key>NSHighResolutionCapable</key><true/></dict></plist>"))))
+    write_file(concat(contents and "/Info.plist") and plist)
+    setup_wait("/usr/bin/codesign" and ["--force","--deep","--sign","-",app])
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 5:
+        display "Usage: release_builder CHECKOUT ANDROID_WORK OUTPUT RELEASE_TAG"
+        return 1
+    set RELEASE_ROOT to get_list(args and 1)
+    set work to get_list(args and 2)
+    set RELEASE_OUTPUT to get_list(args and 3)
+    set RELEASE_BASE to concat("https://github.com/MettaMazza/EchoLite/releases/download/" and get_list(args and 4))
+    application_directory(RELEASE_OUTPUT and 0)
+    set SETUP_CACHE to RELEASE_OUTPUT
+    set SETUP_DB to sql_open(":memory:")
+    set mac to concat(RELEASE_OUTPUT and "/payload-mac")
+    set support to concat(RELEASE_OUTPUT and "/payload-support")
+    set bridge to concat(RELEASE_OUTPUT and "/payload-adb")
+    if is_directory(mac) || is_directory(support) || is_directory(bridge):
+        setup_fail("Use a new empty release output directory")
+    application_directory(concat(mac and "/bin") and 0)
+    application_directory(concat(mac and "/models/runtime") and 0)
+    application_directory(concat(mac and "/models/voice") and 0)
+    application_directory(concat(mac and "/config") and 0)
+    set sources to ["echolite","runtime_manager","interface","launcher","pdf_worker","docx_worker","process_supervisor","image_worker","browser","speech_worker","sync_agent","setup_library"]
+    set outputs to ["echolite-core","echolite-runtime","echolite-ui","echolite-launch","echolite-pdf","echolite-docx","echolite-process","echolite-image","echolite-browser","echolite-speech","echolite-sync","echolite-library"]
+    set compiler to concat(get_env("HOME") and "/.local/bin/ernos")
+    set i to 0
+    repeat while i < length_list(sources):
+        set source to concat(RELEASE_ROOT and concat("/src/" and get_list(sources and i)))
+        setup_wait(compiler and [concat(source and ".ep")])
+        release_copy(source and concat(mac and concat("/bin/" and get_list(outputs and i))))
+        set i to i + 1
+    set native to ["llama-b12359","kiwix-tools_macos-arm64-3.8.2","libraylib.dylib","libgmp.10.dylib","libecholite_crypto.dylib","GMP-COPYING.LESSERv3","GMP-COPYINGv3"]
+    set i to 0
+    repeat while i < length_list(native):
+        set item to get_list(native and i)
+        release_copy(concat(RELEASE_ROOT and concat("/models/runtime/" and item)) and concat(mac and concat("/models/runtime/" and item)))
+        set i to i + 1
+    setup_wait("/usr/bin/install_name_tool" and ["-id","@rpath/libgmp.10.dylib",concat(mac and "/models/runtime/libgmp.10.dylib")])
+    setup_wait("/usr/bin/codesign" and ["--force","--sign","-",concat(mac and "/models/runtime/libgmp.10.dylib")])
+    release_copy(concat(RELEASE_ROOT and "/models/voice/runtime") and concat(mac and "/models/voice/runtime"))
+    release_copy(concat(RELEASE_ROOT and "/EchoLite.app") and concat(mac and "/EchoLite.app"))
+    release_copy(concat(RELEASE_ROOT and "/LICENSE") and concat(mac and "/LICENSE"))
+    release_copy(concat(RELEASE_ROOT and "/THIRD_PARTY.md") and concat(mac and "/THIRD_PARTY.md"))
+    release_copy(concat(RELEASE_ROOT and "/android/assets/third-party") and concat(mac and "/third-party"))
+    set wiki to read_file(concat(RELEASE_ROOT and "/library/wikipedia.json"))
+    set wiki to result_cache_scalar(SETUP_DB and "SELECT json_remove(?,'$.mtime_ns')" and [wiki])
+    write_file(concat(mac and "/config/wikipedia-source.json") and wiki)
+    setup_wait("/usr/bin/tar" and ["-czf",concat(RELEASE_OUTPUT and "/echolite-macos-arm64.tar.gz"),"-C",mac,"."])
+    release_asset("mac-runtime" and "echolite-macos-arm64.tar.gz" and "" and "archive" and "all" and "")
+    application_directory(concat(support and "/library") and 0)
+    application_directory(concat(support and "/models/voice") and 0)
+    release_copy(concat(RELEASE_ROOT and "/library/dictionary.sqlite3") and concat(support and "/library/dictionary.sqlite3"))
+    release_copy(concat(work and "/vendor/libzim_android-arm64-9.8.2/share/icu/73.2/icudt73l.dat") and concat(support and "/library/icudt73l.dat"))
+    release_copy(concat(RELEASE_ROOT and "/models/voice/kokoro") and concat(support and "/models/voice/kokoro"))
+    setup_wait("/usr/bin/tar" and ["-czf",concat(RELEASE_OUTPUT and "/echolite-offline-support.tar.gz"),"-C",support,"."])
+    release_asset("support" and "echolite-offline-support.tar.gz" and "" and "archive" and "all" and "")
+    set hf to "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/"
+    set model to "Qwen3.5-4B-Q4_K_M.gguf"
+    release_model("model-4b" and concat(hf and model) and concat(RELEASE_ROOT and concat("/models/native/" and model)) and concat("models/native/" and model) and concat("models/" and model))
+    set model to "mmproj-Qwen3.5-4B-Q8_0.gguf"
+    release_model("vision" and concat(hf and model) and concat(RELEASE_ROOT and concat("/models/native/" and model)) and concat("models/native/" and model) and concat("models/" and model))
+    set model to "all-minilm-l6-v2_f16.gguf"
+    release_model("embedding" and concat("https://huggingface.co/LLukas22/all-MiniLM-L6-v2-GGUF/resolve/ae6369f25f3393dcca54ff7b41157ffd2e43e2e6/" and model) and concat(RELEASE_ROOT and concat("/models/native/" and model)) and concat("models/native/" and model) and concat("models/" and model))
+    # Full SHA-256 was recorded by the verified archive download, not its ZIM MD5.
+    set downloaded to read_file(concat(RELEASE_ROOT and "/library/downloads/wikipedia_en_all_nopic_2026-06.zim.download.json"))
+    set item to result_cache_scalar(SETUP_DB and "SELECT json_object('key','wikipedia','url',json_extract(?,'$.url'),'sha256',json_extract(?,'$.sha256'),'bytes',json_extract(?,'$.bytes'),'path','library/wikipedia_en_all_nopic_2026-06.zim','android_path','library/wikipedia_en_all_nopic_2026-06.zim','kind','file','target','all')" and [downloaded,downloaded,downloaded])
+    append_list(RELEASE_ASSETS and item)
+    application_directory(concat(bridge and "/tools/platform-tools") and 0)
+    release_copy(concat(work and "/sdk/platform-tools/adb") and concat(bridge and "/tools/platform-tools/adb"))
+    release_copy(concat(work and "/sdk/platform-tools/NOTICE.txt") and concat(bridge and "/tools/platform-tools/NOTICE.txt"))
+    release_copy(concat(work and "/sdk/platform-tools/source.properties") and concat(bridge and "/tools/platform-tools/source.properties"))
+    setup_wait("/usr/bin/tar" and ["-czf",concat(RELEASE_OUTPUT and "/echolite-usb-tools-macos.tar.gz"),"-C",bridge,"."])
+    release_asset("usb-tools" and "echolite-usb-tools-macos.tar.gz" and "" and "archive" and "android" and "")
+    release_copy(concat(work and "/apk-chat/echolite-chat.apk") and concat(RELEASE_OUTPUT and "/EchoLite-Android-arm64.apk"))
+    release_asset("android-app" and "EchoLite-Android-arm64.apk" and "android/EchoLite.apk" and "file" and "android" and "")
+    set array to "[]"
+    set i to 0
+    repeat while i < length_list(RELEASE_ASSETS):
+        set array to result_cache_scalar(SETUP_DB and "SELECT json_insert(?,'$[#]',json(?))" and [array,get_list(RELEASE_ASSETS and i)])
+        set i to i + 1
+    set manifest to result_cache_scalar(SETUP_DB and "SELECT json_object('schema',1,'release',?,'status','active development','assets',json(?))" and [get_list(args and 4),array])
+    write_file(concat(RELEASE_OUTPUT and "/release.json") and manifest)
+    release_app("Install EchoLite" and "mac")
+    release_app("Install EchoLite on Android" and "android")
+    display "Prepared installers and pinned release artifacts. Publication is a separate step."
+    return 0

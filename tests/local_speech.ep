@@ -1,0 +1,49 @@
+import "../src/local_speech"
+import "os"
+define main:
+    set text to "Hello 🌱."
+    if speech_chunk_end(text and 0) != string_length(text):
+        ep_exit(1)
+    set text to ""
+    repeat while string_length(text) < 12000:
+        set text to concat(text and "🌱")
+    set position to 0
+    set rebuilt to ""
+    repeat while position < string_length(text):
+        set finish to speech_chunk_end(text and position)
+        if finish <= position || finish - position > 400 || finish % 4 != 0:
+            ep_exit(2)
+        set rebuilt to concat(rebuilt and substring(text and position and finish - position))
+        set position to finish
+    if rebuilt != text:
+        ep_exit(3)
+    display "PASS: speech chunks preserve long Unicode responses within local engine limits"
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: local_speech INSTALL_ROOT TEST_HOME"
+        return 4
+    set_env("ECHOLITE_HOME" and get_list(args and 2))
+    ep_dlcall2(ep_dlsym(native_system() and "mkdir") and get_list(args and 2) and 448)
+    speech_configure(get_list(args and 1) and "")
+    speech_start("test" and "Hello. This is EchoLite's local neural voice.")
+    if SPEECH_GENERATOR <= 0:
+        return 5
+    set limit to transport_now(native_system()) + 60000
+    repeat while SPEECH_TURN != "" && transport_now(native_system()) < limit:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 100000)
+        speech_tick()
+    if SPEECH_TURN != "" || SPEECH_ERROR != "":
+        display SPEECH_ERROR
+        speech_close()
+        return 6
+    speech_start("test" and "Hello. This is EchoLite's local neural voice.")
+    if SPEECH_GENERATOR != 0:
+        return 7
+    speech_tick()
+    if SPEECH_PID <= 0:
+        return 8
+    speech_stop()
+    if SPEECH_TURN != "" || SPEECH_PID != 0:
+        return 9
+    display "PASS: Kokoro generation, audio playback, persistent cache replay and Stop"
+    return 0

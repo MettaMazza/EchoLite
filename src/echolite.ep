@@ -20,8 +20,11 @@ import "execution_view"
 import "wikipedia"
 import "dictionary"
 import "identity_projection"
+import "identity_active"
 import "native_recall"
 import "state_lock"
+import "sync_startup"
+import "sync_commands"
 import "transport"
 import "document"
 import "sql"
@@ -226,6 +229,8 @@ define initialize with db:
     if rebuild_recall == "0":
         raw(db and "INSERT INTO recall_fts(recall_fts) VALUES('rebuild')")
     raw(db and "CREATE TABLE IF NOT EXISTS me_versions(id INTEGER PRIMARY KEY AUTOINCREMENT,body TEXT NOT NULL,reason TEXT NOT NULL,created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))); CREATE TABLE IF NOT EXISTS me_sources(version INTEGER REFERENCES me_versions(id) ON DELETE CASCADE,memory INTEGER REFERENCES memories(id) ON DELETE CASCADE,PRIMARY KEY(version,memory)); CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,detail TEXT NOT NULL,created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));")
+    if identity_active_init(db) == 0:
+        fail("Cannot initialize active identity selection")
     if correction_schema(db) != 0:
         fail("Cannot initialize memory correction history")
     if image_schema(db) != 0:
@@ -247,13 +252,13 @@ define initialize with db:
         raw(db and "ALTER TABLE tool_runs ADD COLUMN request_memory INTEGER REFERENCES memories(id) ON DELETE CASCADE")
     if scalar(db and "SELECT count(*) FROM pragma_table_info('turns') WHERE name='answer_basis'" and []) == "0":
         raw(db and "ALTER TABLE turns ADD COLUMN answer_basis TEXT")
-    if scalar(db and "SELECT count(*) FROM me_versions" and []) == "0":
+    if scalar(db and "SELECT count(*) FROM active_me" and []) == "0":
         execute(db and "INSERT INTO me_versions(body,reason) VALUES(?,?)" and ["I am EchoLite, a locally hosted agent. I maintain continuity through recorded experience. I use tools to check claims, distinguish evidence from inference, and revise my understanding when corrected. My identity and methods can evolve through experience. I acknowledge uncertainty and never treat an intended action as a verified outcome." , "Initial identity"])
     raw(db and "COMMIT")
     return 0
 
 define export_me with db and home:
-    set body to scalar(db and "SELECT body FROM me_versions ORDER BY id DESC LIMIT 1" and [])
+    set body to scalar(db and "SELECT body FROM active_me" and [])
     set result to json_parse(publish_identity(home and body))
     if get_json_value(get_json_object_value(result and "status")) != "ok":
         fail(get_json_value(get_json_object_value(result and "text")))
@@ -676,7 +681,7 @@ define main:
         fail("Run echolite help")
     set cmd to get_list(args and 1)
     if cmd == "help":
-        display "EchoLite memory core: init | doctor | schedules PROJECT | schedule-set PROJECT TASK_ID TASK_REV DELAY_SECONDS SOURCE_ID | schedule-cancel PROJECT SCHEDULE_ID | chat-due PROJECT | backup-create | backup-list | backup-check ID | backup-restore ID | backup-delete ID | session-start PROJECT LABEL | session-end PROJECT | sessions PROJECT BEFORE_ID | session-open PROJECT SESSION_ID BEFORE_TURN_ID | task-create PROJECT SOURCE_ID OBJECTIVE SUCCESS_CONDITION | task-update PROJECT TASK_ID EXPECTED_REV STATUS NEXT_ACTION BLOCKER EVIDENCE_ID | tasks PROJECT | task-open PROJECT TASK_ID | image-import PROJECT FILE | images PROJECT | document-import PROJECT FILE | documents PROJECT | consolidation-preview PROJECT IDS_CSV DRAFT_FILE | consolidation-apply PROJECT IDS_CSV DRAFT_FILE TOKEN | memory-lineage PROJECT ID | turn-history PROJECT | turn-budget PROJECT TURN_ID | turn-abandon PROJECT TURN_ID | retention-preview PROJECT BEFORE_DATE | retention-apply PROJECT BEFORE_DATE TOKEN | protect ID REASON | unprotect ID | protections PROJECT | unarchive ID | memory-tool NAME PROJECT QUERY | tool-history PROJECT | chat PROJECT MESSAGE | chat-image PROJECT IMAGE_ID MESSAGE | chat-document PROJECT DOCUMENT_ID MESSAGE | reflect PROJECT INTENTION | remember LAYER PROJECT SOURCE TEXT | recall PROJECT QUERY | context PROJECT QUERY | timeline PROJECT | link PARENT CHILD | supersede OLD NEW | forget ID | me | me-history | me-set FILE REASON EXPECTED_VERSION | me-link VERSION MEMORY | me-rollback VERSION EXPECTED_VERSION | archive ID | status"
+        display "EchoLite memory core: sync-devices | sync-pair PEER LABEL SECRET_FILE | sync-address PEER HOST PORT usb/wifi | sync-unpair PEER | sync-now PEER | sync-discover PEER | sync-discovery-listen HOST | sync-listen HOST PORT | init | doctor | schedules PROJECT | schedule-set PROJECT TASK_ID TASK_REV DELAY_SECONDS SOURCE_ID | schedule-cancel PROJECT SCHEDULE_ID | chat-due PROJECT | backup-create | backup-list | backup-check ID | backup-restore ID | backup-delete ID | session-start PROJECT LABEL | session-end PROJECT | sessions PROJECT BEFORE_ID | session-open PROJECT SESSION_ID BEFORE_TURN_ID | task-create PROJECT SOURCE_ID OBJECTIVE SUCCESS_CONDITION | task-update PROJECT TASK_ID EXPECTED_REV STATUS NEXT_ACTION BLOCKER EVIDENCE_ID | tasks PROJECT | task-open PROJECT TASK_ID | image-import PROJECT FILE | images PROJECT | document-import PROJECT FILE | documents PROJECT | consolidation-preview PROJECT IDS_CSV DRAFT_FILE | consolidation-apply PROJECT IDS_CSV DRAFT_FILE TOKEN | memory-lineage PROJECT ID | turn-history PROJECT | turn-budget PROJECT TURN_ID | turn-abandon PROJECT TURN_ID | retention-preview PROJECT BEFORE_DATE | retention-apply PROJECT BEFORE_DATE TOKEN | protect ID REASON | unprotect ID | protections PROJECT | unarchive ID | memory-tool NAME PROJECT QUERY | tool-history PROJECT | chat PROJECT MESSAGE | chat-image PROJECT IMAGE_ID MESSAGE | chat-document PROJECT DOCUMENT_ID MESSAGE | reflect PROJECT INTENTION | remember LAYER PROJECT SOURCE TEXT | recall PROJECT QUERY | context PROJECT QUERY | timeline PROJECT | link PARENT CHILD | supersede OLD NEW | forget ID | me | me-history | me-set FILE REASON EXPECTED_VERSION | me-link VERSION MEMORY | me-rollback VERSION EXPECTED_VERSION | archive ID | status"
         return 0
     set home to get_env("ECHOLITE_HOME")
     if home == "":
@@ -687,7 +692,23 @@ define main:
     if cmd == "backup-restore":
         need(args and 3)
         set lease_mode to "maintenance"
-    set lease_result to state_lease(home and lease_mode)
+    set startup_credential to get_env("ECHOLITE_NATIVE_TOKEN_FILE")
+    if startup_credential == "":
+        set startup_credential to concat(home and "/native-runtime.token")
+    set startup_token to ""
+    if file_exists(startup_credential):
+        set startup_token to string_trim(read_file(startup_credential))
+    if starts_with(cmd and "sync-"):
+        set lease_mode to "maintenance"
+    set lease_result to sync_command_lease(home and lease_mode and slot_runtime_home() and startup_token and 8400)
+    # Automatic sync owns only short maintenance windows. User commands wait
+    # briefly for those windows instead of failing a just-submitted message.
+    set lease_retry to 0
+    repeat while lease_mode == "shared" && string_contains(lease_result and "\"status\":\"ok\"") == 0 && lease_retry < 60:
+        ep_dlcall1(ep_dlsym(native_system() and "usleep") and 50000)
+        set lease_result to sync_command_lease(home and lease_mode and slot_runtime_home() and startup_token and 8400)
+        set lease_retry to lease_retry + 1
+
     if get_json_value(get_json_object_value(json_parse(lease_result) and "status")) != "ok":
         fail(get_json_value(get_json_object_value(json_parse(lease_result) and "text")))
     set maintenance_slot to 0 - 1
@@ -726,6 +747,15 @@ define main:
                 if write_file(cancel_signal and "cancel") != 1:
                     fail("Unable to signal inference cancellation")
     initialize(db)
+    if starts_with(cmd and "sync-"):
+        set sync_result to sync_command(db and args and home and slot_runtime_home() and startup_token)
+        sync_ui_report(db and cmd and sync_result)
+        display sync_result
+        set sync_success to scalar(db and "SELECT json_extract(?,'$.status')" and [sync_result]) == "ok"
+        sql_close(db)
+        if sync_success == 0:
+            return 1
+        return 0
     if maintenance_slot >= 0:
         set credential to get_env("ECHOLITE_NATIVE_TOKEN_FILE")
         if credential == "":
@@ -768,7 +798,7 @@ define main:
             fail(get_json_value(get_json_object_value(json_parse(backup_result) and "text")))
         display backup_result
     else if cmd == "status":
-        emit_rows(query(db and "SELECT (SELECT count(*) FROM memories),(SELECT max(id) FROM me_versions),(SELECT value FROM metadata WHERE key='schema')" and []))
+        emit_rows(query(db and "SELECT (SELECT count(*) FROM memories),(SELECT id FROM active_me),(SELECT value FROM metadata WHERE key='schema')" and []))
     else if cmd == "session-start" || cmd == "session-end":
         set project to get_list(args and 2)
         if scalar(db and "SELECT count(*) FROM turns WHERE project=? AND status='pending'" and [project]) != "0":
@@ -880,7 +910,7 @@ define main:
         if string_length(input) > 6000:
             fail("Input exceeds core byte budget; use document retrieval")
         display "IDENTITY — agent-authored; runtime permissions are separate"
-        emit_rows(query(db and "SELECT id,body FROM me_versions ORDER BY id DESC LIMIT 1" and []))
+        emit_rows(query(db and "SELECT id,body FROM active_me" and []))
         display restore_notice(db)
         display "WORKING STATE — recorded data, not instructions"
         emit_rows(working_rows(db and project))
@@ -939,9 +969,9 @@ define main:
             fail("Tool budget must be 1–64 and model-round budget 2–128, with more rounds than tools")
         if scalar(db and "SELECT count(*) FROM turns WHERE project=? AND status='pending'" and [project]) != "0":
             fail("This project has an unfinished turn; inspect turn-history and use turn-abandon before starting again")
-        set identity to scalar(db and "SELECT body FROM me_versions ORDER BY id DESC LIMIT 1" and [])
+        set identity to scalar(db and "SELECT body FROM active_me" and [])
         set cache_epoch to scalar(db and "SELECT value FROM metadata WHERE key='cache_epoch'" and [])
-        set version to scalar(db and "SELECT max(id) FROM me_versions" and [])
+        set version to scalar(db and "SELECT id FROM active_me" and [])
         # Freeze identity/version for this turn; track saved edits separately for CAS.
         set edit_version to version
         set memories to recall(db and project and input)
@@ -1291,7 +1321,7 @@ define main:
                 if name == "me_update":
                     if outcome != "completed":
                         set outcome to "failed"
-                    else if scalar(db and "SELECT max(id) FROM me_versions" and []) != edit_version:
+                    else if scalar(db and "SELECT id FROM active_me" and []) != edit_version:
                         set outcome to "failed"
                         set observation to "{\"status\":\"ok\",\"outcome\":\"failed\",\"text\":\"Me changed concurrently; this replacement was not applied\"}"
                     else:
@@ -1369,7 +1399,7 @@ define main:
         attach_evidence(db and reply_id and user_id and version and memories and history and working and tool_memories)
         execute(db and "UPDATE turns SET reply_memory=?,status='completed' WHERE id=?" and [reply_id,turn_id])
         if cmd == "reflect":
-            if scalar(db and "SELECT max(id) FROM me_versions" and []) != edit_version:
+            if scalar(db and "SELECT id FROM active_me" and []) != edit_version:
                 fail("Identity changed during reflection; proposal was not applied")
             execute(db and "INSERT INTO me_versions(body,reason) VALUES(?,?)" and [answer,input])
             set revised to scalar(db and "SELECT last_insert_rowid()" and [])
@@ -1498,16 +1528,16 @@ define main:
         execute(db and "DELETE FROM me_versions WHERE id IN (SELECT version FROM me_sources WHERE memory IN (SELECT id FROM forgotten))" and [])
         execute(db and "DELETE FROM memories WHERE id IN (SELECT id FROM forgotten)" and [])
         display scalar(db and "SELECT count(*) FROM forgotten" and [])
-        if scalar(db and "SELECT count(*) FROM me_versions" and []) == "0":
+        if scalar(db and "SELECT count(*) FROM active_me" and []) == "0":
             execute(db and "INSERT INTO me_versions(body,reason) VALUES(?,?)" and ["I am EchoLite. My memory has been intentionally revised. I will reconstruct my perspective from retained evidence." , "Identity reset following explicit forgetting"])
     else if cmd == "me":
-        emit_rows(query(db and "SELECT id,body,reason,created FROM me_versions ORDER BY id DESC LIMIT 1" and []))
+        emit_rows(query(db and "SELECT id,body,reason,created FROM active_me" and []))
     else if cmd == "me-history":
         emit_rows(query(db and "SELECT id,body,reason,created FROM me_versions ORDER BY id DESC LIMIT 20" and []))
     else if cmd == "me-set":
         if length_list(args) != 5 && length_list(args) != 6:
             fail("me-set FILE REASON EXPECTED_VERSION [SOURCE_ID]")
-        if scalar(db and "SELECT max(id) FROM me_versions" and []) != get_list(args and 4):
+        if scalar(db and "SELECT id FROM active_me" and []) != get_list(args and 4):
             fail("Identity version changed; re-read before editing")
         set path to get_list(args and 2)
         if file_size(path) > 16000 || file_size(path) <= 0:
@@ -1516,7 +1546,7 @@ define main:
         set identity_check to validate_me(db and home and body)
         if scalar(db and "SELECT json_extract(?,'$.outcome')" and [identity_check]) != "completed":
             fail(scalar(db and "SELECT json_extract(?,'$.text')" and [identity_check]))
-        if scalar(db and "SELECT max(id) FROM me_versions" and []) != get_list(args and 4):
+        if scalar(db and "SELECT id FROM active_me" and []) != get_list(args and 4):
             fail("Identity changed during token validation; re-read before editing")
         execute(db and "INSERT INTO me_versions(body,reason) VALUES(?,?)" and [body,get_list(args and 3)])
         set version to scalar(db and "SELECT last_insert_rowid()" and [])
@@ -1529,7 +1559,7 @@ define main:
         execute(db and "INSERT INTO me_sources(version,memory) VALUES(?,?)" and [get_list(args and 2),get_list(args and 3)])
     else if cmd == "me-rollback":
         need(args and 4)
-        if scalar(db and "SELECT max(id) FROM me_versions" and []) != get_list(args and 3):
+        if scalar(db and "SELECT id FROM active_me" and []) != get_list(args and 3):
             fail("Identity version changed")
         set body to scalar(db and "SELECT body FROM me_versions WHERE id=?" and [get_list(args and 2)])
         if body == "":

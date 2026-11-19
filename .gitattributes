@@ -4,3 +4,7 @@
 *.json text eol=lf
 *.svg text eol=lf
 *.png binary
+
+# Preserve upstream notice formatting verbatim.
+android/assets/third-party/** -whitespace
+**/Contents/Resources/third-party/** -whitespace

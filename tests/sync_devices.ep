@@ -1,0 +1,38 @@
+import "../src/sync_devices"
+set checks to 0
+
+define devices_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define devices_ok with db and result:
+    return result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2 || file_exists(get_list(args and 1)):
+        return 1
+    set db to sql_open(get_list(args and 1))
+    set peer to "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    devices_assert(sync_devices_init(db) and "device schema")
+    devices_assert(devices_ok(db and sync_endpoint_set(db and peer and "127.0.0.1" and 18410 and "usb")) == 0 and "unknown peer rejected")
+    set secret to sync_random_secret()
+    devices_assert(devices_ok(db and sync_pair_install(db and peer and "Phone" and secret)) and "paired fixture")
+    devices_assert(devices_ok(db and sync_endpoint_set(db and peer and "127.0.0.1" and 18410 and "usb")) and "USB address saved")
+    devices_assert(devices_ok(db and sync_endpoint_set(db and peer and "192.168.1.20" and 8410 and "wifi")) and "Wi-Fi address saved")
+    devices_assert(devices_ok(db and sync_endpoint_set(db and peer and "8.8.8.8" and 8410 and "wifi")) == 0 && devices_ok(db and sync_endpoint_set(db and peer and "192.168.1.20" and 8410 and "usb")) == 0 and "invalid public and non-loopback USB endpoints rejected")
+    devices_assert(sync_endpoint_result(db and peer and "127.0.0.1" and 18410 and 0) && result_cache_scalar(db and "SELECT failures=1 AND retry_at>unixepoch() AND last_result='unavailable' FROM sync_endpoints WHERE transport='usb'" and []) == "1" and "failure persists bounded retry delay")
+    set view to sync_devices_list(db)
+    devices_assert(devices_ok(db and view) && string_contains(view and secret) == 0 && result_cache_scalar(db and "SELECT json_array_length(?,'$.peers[0].addresses')" and [view]) == "2" and "device view contains addresses and no secret")
+    sql_close(db)
+    set db to sql_open(get_list(args and 1))
+    devices_assert(sync_devices_init(db) && result_cache_scalar(db and "SELECT failures FROM sync_endpoints WHERE transport='usb'" and []) == "1" and "connection state survives restart")
+    devices_assert(sync_endpoint_result(db and peer and "127.0.0.1" and 18410 and 1) && result_cache_scalar(db and "SELECT failures=0 AND retry_at=0 AND last_result='transferred' FROM sync_endpoints WHERE transport='usb'" and []) == "1" and "successful transfer resets retry delay")
+    devices_assert(devices_ok(db and sync_pair_revoke(db and peer)) && result_cache_scalar(db and "SELECT count(*) FROM sync_endpoints" and []) == "0" and "unpair removes automatic connection targets")
+    devices_assert(devices_ok(db and sync_endpoint_set(db and peer and "127.0.0.1" and 18410 and "usb")) == 0 && devices_ok(db and sync_device_exchange(db and peer and 1 and "/unused" and "/unused" and "" and 18997)) == 0 and "revoked device cannot reconnect")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " device connection checks"))
+    return 0

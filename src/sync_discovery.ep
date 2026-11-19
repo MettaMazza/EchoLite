@@ -1,0 +1,40 @@
+# Small authenticated discovery challenges; identity never trusts an IP address.
+import "sync_devices"
+import "sync_network"
+
+define sync_discovery_probe with db and peer returning Str:
+    set frame to sync_pair_wrap(db and peer and "request" and "" and "{\"action\":\"discover\"}")
+    return frame
+
+define sync_discovery_reply with db and frame and host and port returning Str:
+    if string_length(frame) > 4096 || result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [frame,frame]) != "1":
+        return ""
+    set address to alloc_bytes(16)
+    set valid to sync_address(host and port and address)
+    free_bytes(address)
+    if valid == 0:
+        return ""
+    set peer to result_cache_scalar(db and "SELECT json_extract(?,'$.sender')" and [frame])
+    set opened to sync_pair_unwrap(db and peer and "request" and "" and frame)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.body.action')='discover'" and [opened,opened]) != "1":
+        return ""
+    set nonce to result_cache_scalar(db and "SELECT json_extract(?,'$.nonce')" and [opened])
+    set body to result_cache_scalar(db and "SELECT json_object('action','discover-reply','host',?,'port',CAST(? AS INTEGER))" and [host,int_to_string(port)])
+    set reply to sync_pair_wrap(db and peer and "response" and nonce and body)
+    if string_length(reply) > 4096 || result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')" and [reply]) != "1":
+        return ""
+    return reply
+
+define sync_discovery_accept with db and peer and nonce and frame and source returning Str:
+    if string_length(frame) > 4096:
+        return result_cache_error("Discovery response exceeds the message limit")
+    set opened to sync_pair_unwrap(db and peer and "response" and nonce and frame)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [opened]) != "ok":
+        return opened
+    if result_cache_scalar(db and "SELECT json_extract(p,'$.body.action')='discover-reply' AND json_type(p,'$.body.host')='text' AND json_extract(p,'$.body.host')=? AND json_type(p,'$.body.port')='integer' AND json_extract(p,'$.body.port') BETWEEN 1024 AND 65535 FROM (SELECT ? p)" and [source,opened]) != "1":
+        return result_cache_error("Discovery address does not match the authenticated response")
+    set port to string_to_int(result_cache_scalar(db and "SELECT json_extract(?,'$.body.port')" and [opened]))
+    set transport to "wifi"
+    if source == "127.0.0.1":
+        set transport to "usb"
+    return sync_endpoint_set(db and peer and source and port and transport)

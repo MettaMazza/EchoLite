@@ -22,7 +22,7 @@ define snapshot_private with fd and info:
     set libc to native_system()
     if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) != 0:
         return 0
-    if lease_integer(info and 4 and 2) / 4096 != 8 || lease_integer(info and 16 and 4) != ep_dlcall0(ep_dlsym(libc and "getuid")) || lease_integer(info and 6 and 2) != 1 || lease_integer(info and 4 and 2) % 64 != 0:
+    if native_stat_mode(info) / 4096 != 8 || native_stat_owner(info) != ep_dlcall0(ep_dlsym(libc and "getuid")) || native_stat_links(info) != 1 || native_stat_mode(info) % 64 != 0:
         return 0
     return 1
 
@@ -33,7 +33,16 @@ define snapshot_hash with directory and name returning Str:
     if fd < 0:
         return ""
     set libc to native_system()
-    set crypto to ep_dlopen("/usr/lib/system/libcommonCrypto.dylib")
+    set crypto_path to "/usr/lib/system/libcommonCrypto.dylib"
+    set init_name to "CC_SHA256_Init"
+    set update_name to "CC_SHA256_Update"
+    set final_name to "CC_SHA256_Final"
+    if native_android():
+        set crypto_path to "libecholite_crypto.so"
+        set init_name to "SHA256_Init"
+        set update_name to "SHA256_Update"
+        set final_name to "SHA256_Final"
+    set crypto to ep_dlopen(crypto_path)
     set before to alloc_bytes(144)
     set after to alloc_bytes(144)
     set ctx to alloc_bytes(256)
@@ -42,7 +51,7 @@ define snapshot_hash with directory and name returning Str:
     set valid to snapshot_private(fd and before)
     if crypto == 0:
         set valid to 0
-    else if ep_dlcall1(ep_dlsym(crypto and "CC_SHA256_Init") and ctx) != 1:
+    else if ep_dlcall1(ep_dlsym(crypto and init_name) and ctx) != 1:
         set valid to 0
     set total to 0
     set finished to 0
@@ -58,19 +67,19 @@ define snapshot_hash with directory and name returning Str:
                 if transport_errno(libc) != 4:
                     set valid to 0
             else:
-                if ep_dlcall3(ep_dlsym(crypto and "CC_SHA256_Update") and ctx and buffer and bytes) != 1:
+                if ep_dlcall3(ep_dlsym(crypto and update_name) and ctx and buffer and bytes) != 1:
                     set valid to 0
                 set total to total + bytes
-    if snapshot_private(fd and after) == 0 || total != lease_integer(before and 96 and 8) || lease_integer(before and 96 and 8) != lease_integer(after and 96 and 8):
+    if snapshot_private(fd and after) == 0 || total != native_stat_size(before) || native_stat_size(before) != native_stat_size(after):
         set valid to 0
     set field to 48
     repeat while field <= 72:
-        if lease_integer(before and field and 8) != lease_integer(after and field and 8):
+        if native_stat_time(before and field) != native_stat_time(after and field):
             set valid to 0
         set field to field + 8
     ep_dlcall1(ep_dlsym(libc and "close") and fd)
     set output to ""
-    if valid == 1 && ep_dlcall2(ep_dlsym(crypto and "CC_SHA256_Final") and digest and ctx) == 1:
+    if valid == 1 && ep_dlcall2(ep_dlsym(crypto and final_name) and digest and ctx) == 1:
         set builder to create_builder()
         set digits to "0123456789abcdef"
         set i to 0
@@ -97,7 +106,7 @@ define snapshot_read_hex with directory and name returning Str:
     set libc to native_system()
     set info to alloc_bytes(144)
     set valid to snapshot_private(fd and info)
-    if lease_integer(info and 96 and 8) != 65:
+    if native_stat_size(info) != 65:
         set valid to 0
     free_bytes(info)
     set data to alloc_bytes(67)

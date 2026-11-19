@@ -1,0 +1,84 @@
+# Application projections run under BEGIN IMMEDIATE. Failed/deferred projections
+# leave the imported frontier intact for retry and leave application rows intact.
+import "sync_application"
+
+define sync_memory_validate with db and payload and object returning Str:
+    if result_cache_scalar(db and "SELECT json_type(?)='object' AND (SELECT count(*)=11 AND count(DISTINCT key)=11 AND min(key IN ('schema','layer','project','source','body','status','created','parents','session','task','protection')) FROM json_each(?))" and [payload,payload]) != "1":
+        return "Unsupported memory snapshot shape"
+    if result_cache_scalar(db and "SELECT json_type(p,'$.schema')='integer' AND json_extract(p,'$.schema')=1 AND json_extract(p,'$.layer') IN ('episodic','semantic','procedural','working','reference') AND json_type(p,'$.project')='text' AND json_type(p,'$.source')='text' AND json_type(p,'$.body')='text' AND length(json_extract(p,'$.body'))<=16000 AND json_extract(p,'$.status') IN ('active','archived','superseded') AND json_type(p,'$.created')='text' AND json_type(p,'$.parents')='array' AND json_type(p,'$.session') IN ('object','null') AND json_type(p,'$.task') IN ('object','null') AND json_type(p,'$.protection') IN ('text','null') FROM (SELECT ? p)" and [payload]) != "1":
+        return "Invalid memory snapshot fields"
+    if result_cache_scalar(db and "SELECT count(*)=count(DISTINCT value) AND coalesce(min(type='text' AND length(value)=32 AND value NOT GLOB '*[^0-9a-f]*' AND value!=?),1) FROM json_each(?,'$.parents')" and [object,payload]) != "1":
+        return "Invalid memory parent references"
+    if result_cache_scalar(db and "SELECT count(*) FROM json_each(?,'$.parents') p LEFT JOIN sync_local_ids i ON i.object=p.value AND i.kind='memory' AND i.deleted=0 LEFT JOIN memories m ON m.id=i.local_id WHERE m.id IS NULL" and [payload]) != "0":
+        return "Waiting for memory parents"
+    if result_cache_scalar(db and "SELECT json_type(?,'$.session')" and [payload]) == "object":
+        if result_cache_scalar(db and "SELECT (SELECT count(*)=2 AND count(DISTINCT key)=2 AND min(key IN ('project','closed')) FROM json_each(p,'$.session')) AND json_type(p,'$.session.project')='text' AND json_extract(p,'$.session.project')=json_extract(p,'$.project') AND json_type(p,'$.session.closed') IN ('null','text') FROM (SELECT ? p)" and [payload]) != "1":
+            return "Invalid session snapshot"
+    if result_cache_scalar(db and "SELECT json_type(?,'$.task')" and [payload]) == "object":
+        if result_cache_scalar(db and "SELECT (SELECT count(*)=4 AND count(DISTINCT key)=4 AND min(key IN ('project','current','revision','status')) FROM json_each(p,'$.task')) AND json_extract(p,'$.task.project')=json_extract(p,'$.project') AND json_type(p,'$.task.current')='text' AND json_type(p,'$.task.revision')='integer' AND json_extract(p,'$.task.revision')>0 AND json_extract(p,'$.task.status') IN ('planned','running','waiting','completed','failed','cancelled') FROM (SELECT ? p)" and [payload]) != "1":
+            return "Invalid task snapshot"
+        if result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids i JOIN memories m ON m.id=i.local_id WHERE i.kind='memory' AND i.deleted=0 AND i.object=json_extract(?,'$.task.current')" and [payload]) != "1":
+            return "Waiting for task revision memory"
+    return ""
+
+define sync_memory_apply with db and object and payload returning Str:
+    set problem to sync_memory_validate(db and payload and object)
+    if problem != "":
+        return problem
+    set local_id to result_cache_scalar(db and "SELECT local_id FROM sync_local_ids WHERE object=? AND kind='memory' AND deleted=0" and [object])
+    if local_id == "":
+        if result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE object=?" and [object]) != "0":
+            return "Local memory identity is deleted or incompatible"
+        set local_id to result_cache_scalar(db and "SELECT max(coalesce((SELECT max(id) FROM memories),0),coalesce((SELECT seq FROM sqlite_sequence WHERE name='memories'),0),coalesce((SELECT max(local_id) FROM sync_local_ids WHERE kind='memory'),0))+1" and [])
+        if sync_execute(db and "INSERT INTO sync_local_ids(kind,local_id,object,dirty) VALUES('memory',?,?,0)" and [local_id,object]) == 0:
+            return "Cannot allocate local memory identity"
+    # Imported content may extend the local derivation graph, never introduce a cycle.
+    if result_cache_scalar(db and "WITH RECURSIVE descendants(id) AS (SELECT CAST(? AS INTEGER) UNION SELECT d.child FROM derivations d JOIN descendants r ON d.parent=r.id) SELECT count(*) FROM json_each(?,'$.parents') p JOIN sync_local_ids i ON i.object=p.value AND i.kind='memory' JOIN descendants d ON d.id=i.local_id" and [local_id,payload]) != "0":
+        return "Memory derivation would introduce a cycle"
+    if sync_execute(db and "INSERT INTO memories(id,layer,project,source,body,status,created) SELECT ?,json_extract(p,'$.layer'),json_extract(p,'$.project'),json_extract(p,'$.source'),json_extract(p,'$.body'),json_extract(p,'$.status'),json_extract(p,'$.created') FROM (SELECT ? p) WHERE 1 ON CONFLICT(id) DO UPDATE SET layer=excluded.layer,project=excluded.project,source=excluded.source,body=excluded.body,status=excluded.status,created=excluded.created" and [local_id,payload]) == 0:
+        return "Cannot apply memory content"
+    if sync_execute(db and "DELETE FROM derivations WHERE child=?" and [local_id]) == 0 || sync_execute(db and "INSERT INTO derivations(parent,child) SELECT i.local_id,? FROM json_each(?,'$.parents') p JOIN sync_local_ids i ON i.object=p.value AND i.kind='memory' AND i.deleted=0" and [local_id,payload]) == 0:
+        return "Cannot apply memory lineage"
+    if sync_execute(db and "DELETE FROM memory_protection WHERE memory=?" and [local_id]) == 0 || sync_execute(db and "INSERT INTO memory_protection(memory,reason) SELECT ?,json_extract(p,'$.protection') FROM (SELECT ? p) WHERE json_type(p,'$.protection')='text'" and [local_id,payload]) == 0:
+        return "Cannot apply memory protection"
+    if result_cache_scalar(db and "SELECT json_type(?,'$.session')" and [payload]) == "object":
+        if sync_execute(db and "INSERT INTO sessions(memory,project,closed) SELECT ?,json_extract(p,'$.session.project'),CASE WHEN json_type(p,'$.session.closed')='null' AND EXISTS(SELECT 1 FROM sessions WHERE project=json_extract(p,'$.session.project') AND closed IS NULL AND memory!=CAST(? AS INTEGER)) THEN coalesce((SELECT closed FROM sessions WHERE memory=CAST(? AS INTEGER)),json_extract(p,'$.created')) ELSE json_extract(p,'$.session.closed') END FROM (SELECT ? p) WHERE 1 ON CONFLICT(memory) DO UPDATE SET project=excluded.project,closed=excluded.closed" and [local_id,local_id,local_id,payload]) == 0:
+            return "Session conflicts with local open conversation"
+    else:
+        if sync_execute(db and "DELETE FROM sessions WHERE memory=?" and [local_id]) == 0:
+            return "Cannot remove session metadata"
+    if result_cache_scalar(db and "SELECT json_type(?,'$.task')" and [payload]) == "object":
+        if sync_execute(db and "INSERT INTO tasks(memory,project,current_memory,revision,status) SELECT ?,json_extract(p,'$.task.project'),i.local_id,json_extract(p,'$.task.revision'),json_extract(p,'$.task.status') FROM (SELECT ? p) JOIN sync_local_ids i ON i.object=json_extract(p,'$.task.current') AND i.kind='memory' AND i.deleted=0 WHERE 1 ON CONFLICT(memory) DO UPDATE SET project=excluded.project,current_memory=excluded.current_memory,revision=excluded.revision,status=excluded.status" and [local_id,payload]) == 0:
+            return "Cannot apply task metadata"
+    else:
+        if sync_execute(db and "DELETE FROM tasks WHERE memory=?" and [local_id]) == 0:
+            return "Cannot remove task metadata"
+    return ""
+
+define sync_project_memory with db and object returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot lock memory projection")
+    set problem to ""
+    set versions to sql_query_params(db and "SELECT v.payload FROM sync_versions v JOIN sync_objects o ON o.id=v.object WHERE o.id=? AND o.kind='memory' AND o.deleted=0" and [object])
+    if length_list(versions) != 1:
+        set problem to "Memory needs conflict or deletion reconciliation"
+    else if result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE object=? AND (dirty=1 OR deleted=1)" and [object]) != "0":
+        set problem to "Local memory edit needs reconciliation"
+    else if result_cache_scalar(db and "SELECT applied_heads FROM sync_local_ids WHERE object=?" and [object]) == sync_heads(db and object):
+        set problem to ""
+    else:
+        if sql_execute(db and "UPDATE sync_meta SET value='1' WHERE key='projecting'") != 0:
+            set problem to "Cannot begin projection tracking"
+        else:
+            set problem to sync_memory_apply(db and object and get_list(get_list(versions and 0) and 0))
+            if problem == "":
+                if sync_execute(db and "UPDATE sync_local_ids SET dirty=0,applied_heads=? WHERE object=?" and [sync_heads(db and object),object]) == 0:
+                    set problem to "Cannot acknowledge projected memory"
+    if problem == "" && sql_execute(db and "UPDATE sync_meta SET value='0' WHERE key='projecting'") != 0:
+        set problem to "Cannot finish projection tracking"
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        if problem == "":
+            set problem to "Cannot commit memory projection"
+        return result_cache_error(problem)
+    return result_cache_scalar(db and "SELECT json_object('status','ok','memory',local_id,'object',object) FROM sync_local_ids WHERE object=?" and [object])

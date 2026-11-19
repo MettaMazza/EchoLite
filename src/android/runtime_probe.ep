@@ -1,0 +1,17 @@
+import "os"
+import "string"
+import "fs"
+
+define main:
+    set libc to ep_dlopen("libc.so")
+    if libc == 0:
+        display "FAIL Android libc"
+        return 1
+    set pid to ep_dlcall0(ep_dlsym(libc and "getpid"))
+    if pid < 1:
+        return 2
+    set values to [11,23,37]
+    if get_list(values and 2) != 37:
+        return 3
+    display concat("PASS native Ernos Plain ARM64 runtime; pid=" and int_to_string(pid))
+    return 0

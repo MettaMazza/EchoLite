@@ -1,0 +1,45 @@
+# Finish received forgetting while the caller holds exclusive state maintenance.
+# Keep the durable marker until recovery artifacts, runtime context and Me agree.
+import "sync_forgetting"
+import "backup_purge"
+import "slot_lifecycle"
+import "identity_projection"
+
+define sync_cleanup_finish with db and home and runtime_home and token and port returning Str:
+    if STATE_LEASE_FD < 0 || WORKER_LEASE_FD < 0:
+        return lease_error("Synchronized cleanup requires the maintenance lease")
+    if sync_forgetting_init(db) == 0:
+        return lease_error("Cannot initialize synchronized cleanup")
+    set slot to slot_lock(runtime_home)
+    if slot < 0:
+        return lease_error("Model context is busy; synchronized cleanup remains pending")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        slot_unlock(slot)
+        return lease_error("Cannot lock synchronized cleanup")
+    set epoch to result_cache_scalar(db and "SELECT epoch FROM sync_cleanup WHERE singleton=1" and [])
+    set result to "{\"status\":\"ok\",\"cleaned\":false}"
+    if epoch != "":
+        set result to backup_purge(home)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok":
+            if token == "" && slot_connection_state(port) != 0:
+                set result to lease_error("A runtime credential is required to erase the resident model context")
+            else:
+                set result to slot_forget_at(db and runtime_home and token and port)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok":
+            set body to result_cache_scalar(db and "SELECT body FROM active_me" and [])
+            if body == "":
+                set result to lease_error("Cannot publish an absent active identity")
+            else:
+                set result to publish_identity(home and body)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok":
+            if sync_execute(db and "DELETE FROM sync_cleanup WHERE singleton=1 AND epoch=?" and [epoch]) == 0:
+                set result to lease_error("Cannot acknowledge synchronized cleanup")
+            else:
+                set result to "{\"status\":\"ok\",\"cleaned\":true}"
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) != "ok":
+        sql_execute(db and "ROLLBACK")
+    else if sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        set result to lease_error("Cannot commit synchronized cleanup acknowledgement")
+    slot_unlock(slot)
+    return result

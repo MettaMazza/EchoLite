@@ -1,0 +1,81 @@
+import "../src/sync_store"
+import "os"
+set checks to 0
+
+define sync_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define sync_test_ok with db and response:
+    set valid to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN coalesce(json_extract(?,'$.status'),'ok')!='error' ELSE 0 END" and [response,response])
+    if valid == "1":
+        return 1
+    return 0
+
+define sync_test_send with sender and receiver returning Str:
+    set peer to result_cache_scalar(sender and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set cursor to result_cache_scalar(receiver and "SELECT coalesce((SELECT cursor FROM sync_cursors WHERE peer=?),0)" and [peer])
+    set page to sync_export(sender and cursor)
+    set result to sync_import(receiver and peer and page)
+    sync_assert(sync_test_ok(receiver and result) and concat("transactional transfer: " and result))
+    return page
+
+define main:
+    set a to sql_open(":memory:")
+    set b to sql_open(":memory:")
+    sync_assert(sync_store_init(a) && sync_store_init(b) and "replication schema initializes")
+    set device_a to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set device_b to result_cache_scalar(b and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    sync_assert(device_a != device_b && sync_identifier(a and device_a) && sync_identifier(b and device_b) and "stable independent device identities")
+    set object to "11111111111111111111111111111111"
+    set payload to "{\"body\":\"Remember the mint notebook 🌱\"}"
+    set first to sync_write(a and object and "memory" and payload and sync_heads(a and object))
+    sync_assert(sync_test_ok(a and first) and concat("local revision: " and first))
+    set page to sync_test_send(a and b)
+    sync_assert(sync_record(a and object) == sync_record(b and object) and "exact Unicode payload survives peer transfer")
+    set count to result_cache_scalar(b and "SELECT count(*) FROM sync_changes" and [])
+    sync_assert(sync_test_ok(b and sync_import(b and device_a and page)) && result_cache_scalar(b and "SELECT count(*) FROM sync_changes" and []) == count and "duplicate delivery is idempotent")
+    set base_a to sync_heads(a and object)
+    set base_b to sync_heads(b and object)
+    sync_assert(sync_test_ok(a and sync_write(a and object and "memory" and "{\"body\":\"Mac edit\"}" and base_a)) and "Mac edits offline")
+    sync_assert(sync_test_ok(b and sync_write(b and object and "memory" and "{\"body\":\"Phone edit\"}" and base_b)) and "phone edits offline")
+    sync_test_send(a and b)
+    sync_test_send(b and a)
+    sync_assert(result_cache_scalar(a and "SELECT count(*) FROM sync_versions WHERE object=?" and [object]) == "2" && result_cache_scalar(b and "SELECT count(*) FROM sync_versions WHERE object=?" and [object]) == "2" and "both concurrent edits retained")
+    sync_assert(sync_record(a and object) == sync_record(b and object) and "frontiers converge without last-write loss")
+    sync_assert(sync_test_ok(a and sync_write(a and object and "memory" and "{\"body\":\"stale overwrite\"}" and base_a)) == 0 and "stale editor cannot silently overwrite conflict")
+    sync_assert(sync_test_ok(a and sync_write(a and object and "memory" and "{\"body\":\"Resolved from both devices\"}" and sync_heads(a and object))) and "explicit current-frontier resolution")
+    sync_test_send(a and b)
+    sync_assert(result_cache_scalar(b and "SELECT count(*) FROM sync_versions WHERE object=?" and [object]) == "1" && sync_record(a and object) == sync_record(b and object) and "resolution supersedes both observed branches")
+    set stale to sync_export(b and "0")
+    sync_assert(sync_test_ok(a and sync_forget(a and object)) and "local forgetting committed")
+    sync_assert(result_cache_scalar(a and "SELECT count(*) FROM sync_versions WHERE object=?" and [object]) == "0" && result_cache_scalar(a and "SELECT count(*) FROM sync_seen WHERE object=?" and [object]) == "0" and "forgotten payload and receipt digests purged")
+    set deletion to sync_test_send(a and b)
+    sync_assert(result_cache_scalar(b and "SELECT deleted FROM sync_objects WHERE id=?" and [object]) == "1" && result_cache_scalar(b and "SELECT count(*) FROM sync_versions" and []) == "0" and "forgetting propagates to peer")
+    sync_assert(string_contains(sync_export(a and "0") and "mint notebook") == 0 && string_contains(sync_export(a and "0") and "Resolved from both") == 0 and "full replay after forgetting contains no erased payload")
+    sync_assert(sync_test_ok(a and sync_import(a and device_b and stale)) && result_cache_scalar(a and "SELECT count(*) FROM sync_versions" and []) == "0" and "offline stale peer cannot resurrect forgotten memory")
+    sync_assert(sync_test_ok(a and sync_write(a and object and "memory" and payload and sync_heads(a and object))) == 0 and "local recreate needs a new stable identity")
+    set other to "22222222222222222222222222222222"
+    sync_assert(sync_test_ok(a and sync_write(a and other and "identity" and "{\"body\":\"Me revision\"}" and sync_heads(a and other))) and "independent retained identity record")
+    set clean to sync_export(a and "0")
+    set tampered to string_replace(clean and "Me revision" and "Forged body")
+    set c to sql_open(":memory:")
+    sync_store_init(c)
+    sync_assert(sync_test_ok(c and sync_import(c and device_a and tampered)) == 0 and "changed payload fails integrity check")
+    sync_assert(result_cache_scalar(c and "SELECT count(*) FROM sync_objects" and []) == "0" && result_cache_scalar(c and "SELECT count(*) FROM sync_cursors" and []) == "0" and "invalid later record rolls back entire batch and cursor")
+    sync_assert(sync_test_ok(c and sync_import(c and device_a and clean)) and "retry after failed batch succeeds")
+    set skipped to result_cache_scalar(a and "SELECT json_set(?,'$.after',999,'$.cursor',1000)" and [clean])
+    sync_assert(sync_test_ok(c and sync_import(c and device_a and skipped)) == 0 and "missing earlier page cannot be skipped")
+    sync_assert(sync_test_ok(c and sync_import(c and device_b and clean)) == 0 and "peer identity must match authenticated sender")
+    set before to result_cache_scalar(c and "SELECT cursor FROM sync_cursors WHERE peer=?" and [device_a])
+    sync_assert(sync_test_ok(c and sync_import(c and device_a and deletion)) && result_cache_scalar(c and "SELECT cursor FROM sync_cursors WHERE peer=?" and [device_a]) == before and "reordered old page never regresses cursor")
+    sync_assert(sync_clock(a and "{\"bad\":1}") == "" && sync_clock(a and "[]") == "" and "invalid clocks rejected")
+    sync_assert(sync_clock(a and concat("{\"" and concat(device_a and concat("\":1,\"" and concat(device_a and "\":2}"))))) == "" and "duplicate clock components rejected")
+    sql_close(a)
+    sql_close(b)
+    sql_close(c)
+    display concat("PASS: " and concat(int_to_string(checks) and " replicated frontier checks"))
+    return 0

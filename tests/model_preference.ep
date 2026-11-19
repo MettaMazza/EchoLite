@@ -1,0 +1,22 @@
+import "../src/model_profile"
+import "os"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set directory to get_list(args and 1)
+    if file_exists(concat(directory and "/model-preference.txt")):
+        return 1
+    if profile_preference(directory) != 0:
+        return 1
+    if profile_preference_save(directory and 1) == 0 || profile_preference(directory) != 1:
+        return 1
+    if profile_preference_save(directory and 2) != 0 || profile_preference(directory) != 1:
+        return 1
+    if profile_preference_save(directory and 0) == 0 || profile_preference(directory) != 0:
+        return 1
+    if write_file(concat(directory and "/model-preference.txt") and "invalid") != 1 || profile_preference(directory) != 0:
+        return 1
+    display "PASS: default, persisted 9B/4B, invalid selection and malformed preference"
+    return 0

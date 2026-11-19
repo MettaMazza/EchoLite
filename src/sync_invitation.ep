@@ -1,0 +1,76 @@
+# Explicit local pairing exchange; invitation text is a temporary bearer secret.
+# It is never a replicated object and never returned by ordinary device status.
+import "sync_pair"
+
+define sync_invitation_init with db:
+    if sync_pair_init(db) == 0:
+        return 0
+    set code to sql_execute(db and "CREATE TABLE IF NOT EXISTS sync_invitation(singleton INTEGER PRIMARY KEY CHECK(singleton=1),id TEXT NOT NULL,secret TEXT NOT NULL,expires INTEGER NOT NULL); DELETE FROM sync_invitation WHERE expires<=unixepoch();")
+    return code == 0
+
+define sync_invitation_create with db and label returning Str:
+    if string_length(label) == 0 || string_length(label) > 80 || sync_invitation_init(db) == 0:
+        return result_cache_error("Choose a device name of 1 to 80 bytes")
+    set secret to sync_random_secret()
+    if string_length(secret) != 64:
+        return result_cache_error("Secure pairing invitation unavailable")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot create pairing invitation")
+    if sync_execute(db and "INSERT OR REPLACE INTO sync_invitation VALUES(1,lower(hex(randomblob(16))),?,unixepoch()+600)" and [secret]) == 0:
+        return sync_pair_abort(db and "Cannot save pairing invitation")
+    set result to result_cache_scalar(db and "SELECT json_object('protocol','EchoLite pairing 1','device',(SELECT value FROM sync_meta WHERE key='device'),'label',?,'invitation',id,'secret',secret,'expires',expires) FROM sync_invitation" and [label])
+    if result == "" || sql_execute(db and "COMMIT") != 0:
+        return sync_pair_abort(db and "Cannot commit pairing invitation")
+    return result
+
+define sync_invitation_cancel with db returning Str:
+    if sql_execute(db and "DELETE FROM sync_invitation") != 0:
+        return result_cache_error("Cannot cancel pairing invitation")
+    return "{\"status\":\"ok\"}"
+
+define sync_invitation_accept with db and invitation and label returning Str:
+    if string_length(invitation) > 2048 || string_length(label) == 0 || string_length(label) > 80:
+        return result_cache_error("Invalid pairing invitation or device name")
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [invitation,invitation]) != "1":
+        return result_cache_error("Invalid pairing invitation JSON")
+    if result_cache_scalar(db and "SELECT (SELECT count(*)=6 AND count(DISTINCT key)=6 AND min(key IN ('protocol','device','label','invitation','secret','expires')) FROM json_each(p)) AND json_extract(p,'$.protocol')='EchoLite pairing 1' AND json_type(p,'$.expires')='integer' AND json_extract(p,'$.expires')>unixepoch() AND json_extract(p,'$.expires')<=unixepoch()+600 AND json_type(p,'$.label')='text' AND length(json_extract(p,'$.label')) BETWEEN 1 AND 80 FROM (SELECT ? p)" and [invitation]) != "1":
+        return result_cache_error("Pairing invitation is invalid or expired; create a new invitation")
+    set peer to result_cache_scalar(db and "SELECT json_extract(?,'$.device')" and [invitation])
+    set invitation_id to result_cache_scalar(db and "SELECT json_extract(?,'$.invitation')" and [invitation])
+    if sync_identifier(db and invitation_id) == 0:
+        return result_cache_error("Invalid pairing invitation identity")
+    set secret to result_cache_scalar(db and "SELECT json_extract(?,'$.secret')" and [invitation])
+    set peer_label to result_cache_scalar(db and "SELECT json_extract(?,'$.label')" and [invitation])
+    set installed to sync_pair_install(db and peer and peer_label and secret)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [installed]) != "ok":
+        return installed
+    set device to result_cache_scalar(db and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set payload to result_cache_scalar(db and "SELECT json_object('action','pair-confirm','invitation',?,'label',?)" and [invitation_id,label])
+    return sync_seal(db and secret and device and peer and "response" and payload)
+
+define sync_invitation_finish with db and confirmation returning Str:
+    if string_length(confirmation) > 4096 || result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [confirmation,confirmation]) != "1":
+        return result_cache_error("Invalid pairing confirmation")
+    set rows to sql_query_params(db and "SELECT id,secret FROM sync_invitation WHERE singleton=1 AND expires>unixepoch()" and [])
+    if length_list(rows) != 1:
+        return result_cache_error("Pairing invitation expired, cancelled or already completed")
+    set row to get_list(rows and 0)
+    set invitation_id to get_list(row and 0)
+    set secret to get_list(row and 1)
+    set peer to result_cache_scalar(db and "SELECT json_extract(?,'$.sender')" and [confirmation])
+    set device to result_cache_scalar(db and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set opened to sync_open(db and secret and peer and device and "response" and confirmation)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [opened]) != "ok":
+        return opened
+    set payload to result_cache_scalar(db and "SELECT json_extract(?,'$.payload')" and [opened])
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.action')='pair-confirm' AND json_extract(?,'$.invitation')=? AND json_type(?,'$.label')='text' ELSE 0 END" and [payload,payload,payload,invitation_id,payload]) != "1":
+        return result_cache_error("Confirmation does not match this invitation")
+    set label to result_cache_scalar(db and "SELECT json_extract(?,'$.label')" and [payload])
+    set installed to sync_pair_install(db and peer and label and secret)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [installed]) != "ok":
+        return installed
+    # Installation is idempotent and never resets counters. A crash here can
+    # safely retry the same confirmation before the invitation is consumed.
+    if sync_execute(db and "DELETE FROM sync_invitation WHERE singleton=1 AND id=?" and [invitation_id]) == 0:
+        return result_cache_error("Pairing saved; retry confirmation to finish invitation cleanup")
+    return installed

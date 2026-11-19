@@ -1,0 +1,45 @@
+import "../src/sync_invitation"
+set checks to 0
+
+define invitation_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define invitation_ok with db and result:
+    return result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN coalesce(json_extract(?,'$.status'),'ok') ELSE 'error' END" and [result,result]) == "ok"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3 || file_exists(get_list(args and 1)) || file_exists(get_list(args and 2)):
+        return 1
+    set a to sql_open(get_list(args and 1))
+    set b to sql_open(get_list(args and 2))
+    invitation_assert(sync_invitation_init(a) && sync_invitation_init(b) and "invitation schemas")
+    set invite to sync_invitation_create(a and "Mac")
+    invitation_assert(invitation_ok(a and invite) && result_cache_scalar(a and "SELECT length(json_extract(?,'$.secret'))=64 AND json_extract(?,'$.expires')>unixepoch()" and [invite,invite]) == "1" and "short-lived secure invitation")
+    invitation_assert(invitation_ok(b and sync_invitation_accept(b and "invalid" and "Phone")) == 0 and "malformed invite rejected")
+    set expired to result_cache_scalar(a and "SELECT json_set(?,'$.expires',unixepoch()-1)" and [invite])
+    invitation_assert(invitation_ok(b and sync_invitation_accept(b and expired and "Phone")) == 0 and "expired invite rejected")
+    invitation_assert(invitation_ok(a and sync_invitation_accept(a and invite and "Self")) == 0 and "self pairing rejected")
+    set response to sync_invitation_accept(b and invite and "Phone")
+    invitation_assert(invitation_ok(b and response) && string_contains(response and result_cache_scalar(a and "SELECT json_extract(?,'$.secret')" and [invite])) == 0 and "encrypted confirmation contains no plaintext secret")
+    set damaged to result_cache_scalar(a and "SELECT json_set(?,'$.tag','00000000000000000000000000000000')" and [response])
+    invitation_assert(invitation_ok(a and sync_invitation_finish(a and damaged)) == 0 && result_cache_scalar(a and "SELECT count(*) FROM sync_peers" and []) == "0" and "tampered confirmation cannot install peer")
+    sql_close(a)
+    set a to sql_open(get_list(args and 1))
+    invitation_assert(sync_invitation_init(a) && invitation_ok(a and sync_invitation_finish(a and response)) and "confirmation completes after restart")
+    invitation_assert(result_cache_scalar(a and "SELECT count(*) FROM sync_invitation" and []) == "0" && invitation_ok(a and sync_invitation_finish(a and response)) == 0 and "invitation consumed and replay rejected")
+    set aid to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set bid to result_cache_scalar(b and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set request to sync_pair_wrap(a and bid and "request" and "" and "{\"action\":\"hello\"}")
+    invitation_assert(invitation_ok(b and sync_pair_unwrap(b and aid and "request" and "" and request)) and "completed pairing authenticates real sync frames")
+    set invite to sync_invitation_create(a and "Mac")
+    invitation_assert(invitation_ok(a and invite) && invitation_ok(a and sync_invitation_cancel(a)) && result_cache_scalar(a and "SELECT count(*) FROM sync_invitation" and []) == "0" and "cancel removes retained invitation secret")
+    invitation_assert(result_cache_scalar(a and "SELECT count(*) FROM sync_changes" and []) == "0" && result_cache_scalar(b and "SELECT count(*) FROM sync_changes" and []) == "0" and "pairing never enters replicated data")
+    sql_close(a)
+    sql_close(b)
+    display concat("PASS: " and concat(int_to_string(checks) and " invitation pairing checks"))
+    return 0

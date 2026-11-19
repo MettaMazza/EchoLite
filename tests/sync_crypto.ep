@@ -1,0 +1,63 @@
+import "../src/sync_crypto"
+set checks to 0
+
+define crypto_assert with passed and label:
+    if passed == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define crypto_ok with db and response:
+    set status to result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_extract(?,'$.status') ELSE 'error' END" and [response,response])
+    if status == "ok":
+        return 1
+    return 0
+
+define main:
+    crypto_assert(sync_crypto_library() != 0 and "native crypto loaded")
+    set key to "0000000000000000000000000000000000000000000000000000000000000000"
+    set nonce to "000000000000000000000000"
+    set input to alloc_bytes(16)
+    set output to alloc_bytes(32)
+    set decoded to alloc_bytes(32)
+    set tag to alloc_bytes(16)
+    set size to sync_crypt_raw(1 and key and nonce and "" and input and 16 and tag and output)
+    crypto_assert(size == 16 && sync_hex(output and 16) == "cea7403d4d606b6e074ec5d3baf39d18" && sync_hex(tag and 16) == "d0d1c8a799996bf0265b98b5d48ab919" and "upstream OpenSSL AES-256-GCM known-answer vector")
+    crypto_assert(sync_crypt_raw(0 and key and nonce and "" and output and 16 and tag and decoded) == 16 && sync_hex(decoded and 16) == "00000000000000000000000000000000" and "known-answer decryption")
+    poke_byte(tag and 0 and 0)
+    crypto_assert(sync_crypt_raw(0 and key and nonce and "" and output and 16 and tag and decoded) == 0 - 1 && sync_hex(decoded and 32) == key and "authentication failure wipes unauthenticated output")
+    free_bytes(input)
+    free_bytes(output)
+    free_bytes(decoded)
+    free_bytes(tag)
+    set db to sql_open(":memory:")
+    set secret to sync_random_secret()
+    crypto_assert(string_length(secret) == 64 && secret != sync_random_secret() and "pairing secrets come from native CSPRNG")
+    set sender to "11111111111111111111111111111111"
+    set receiver to "22222222222222222222222222222222"
+    set text to "{\"body\":\"Local memory 🌱 café\"}"
+    set frame to sync_seal(db and secret and sender and receiver and "request" and text)
+    crypto_assert(string_contains(frame and "Local memory") == 0 and "wire envelope contains no plaintext memory")
+    set opened to sync_open(db and secret and sender and receiver and "request" and frame)
+    crypto_assert(crypto_ok(db and opened) && result_cache_scalar(db and "SELECT json_extract(?,'$.payload')" and [opened]) == text and "authenticated Unicode frame round trip")
+    set second to sync_seal(db and secret and sender and receiver and "request" and text)
+    crypto_assert(frame != second and "identical requests use fresh nonces")
+    crypto_assert(crypto_ok(db and sync_open(db and key and sender and receiver and "request" and frame)) == 0 and "wrong pairing secret rejected")
+    crypto_assert(crypto_ok(db and sync_open(db and secret and receiver and sender and "request" and frame)) == 0 and "wrong receiving device rejected")
+    set reflection to result_cache_scalar(db and "SELECT json_set(?,'$.direction','response')" and [frame])
+    crypto_assert(crypto_ok(db and sync_open(db and secret and sender and receiver and "response" and reflection)) == 0 and "authenticated direction prevents reflection")
+    set tampered to result_cache_scalar(db and "SELECT json_set(?,'$.tag','00000000000000000000000000000000')" and [frame])
+    crypto_assert(crypto_ok(db and sync_open(db and secret and sender and receiver and "request" and tampered)) == 0 and "modified authentication tag rejected")
+    set ciphertext to result_cache_scalar(db and "SELECT json_extract(?,'$.ciphertext')" and [frame])
+    set replacement to "A"
+    if starts_with(ciphertext and "A"):
+        set replacement to "B"
+    set ciphertext to concat(replacement and substring(ciphertext and 1 and string_length(ciphertext) - 1))
+    set tampered to result_cache_scalar(db and "SELECT json_set(?,'$.ciphertext',?)" and [frame,ciphertext])
+    crypto_assert(crypto_ok(db and sync_open(db and secret and sender and receiver and "request" and tampered)) == 0 and "modified ciphertext rejected")
+    set truncated to substring(frame and 0 and string_length(frame) - 1)
+    crypto_assert(crypto_ok(db and sync_open(db and secret and sender and receiver and "request" and truncated)) == 0 and "truncated frame rejected")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " authenticated sync encryption checks"))
+    return 0

@@ -1,0 +1,81 @@
+# Bounded nonblocking UDP transport for local discovery, with no content logging.
+import "sync_network"
+
+define sync_datagram_open with host and port:
+    if port < 0 || port > 65535 || (port > 0 && port < 1024):
+        return 0 - 1
+    set address to alloc_bytes(16)
+    set bind_host to host
+    if host == "0.0.0.0":
+        set bind_host to "127.0.0.1"
+    if sync_address(bind_host and 8411 and address) == 0:
+        free_bytes(address)
+        return 0 - 1
+    poke_byte(address and 2 and port / 256)
+    poke_byte(address and 3 and port % 256)
+    if host == "0.0.0.0":
+        native_bytes_write(address and 4 and 0 and 4)
+    set libc to native_system()
+    set fd to native_signed_int(ep_dlcall3(ep_dlsym(libc and "socket") and 2 and 2 and 0))
+    set valid to fd >= 0
+    if valid:
+        set valid to sync_socket_configure(fd)
+    set level to 65535
+    set broadcast_option to 32
+    if native_android():
+        set level to 1
+        set broadcast_option to 6
+    set option to alloc_bytes(4)
+    native_bytes_write(option and 0 and 1 and 4)
+    if valid:
+        set valid to ep_dlcall5(ep_dlsym(libc and "setsockopt") and fd and level and broadcast_option and option and 4) == 0
+    if valid:
+        set valid to ep_dlcall3(ep_dlsym(libc and "bind") and fd and address and 16) == 0
+    free_bytes(option)
+    free_bytes(address)
+    if valid == 0:
+        sync_socket_close(fd)
+        return 0 - 1
+    return fd
+
+define sync_datagram_send with fd and host and port and frame:
+    if string_length(frame) == 0 || string_length(frame) > 4096:
+        return 0
+    set address to alloc_bytes(16)
+    if sync_address(host and port and address) == 0:
+        free_bytes(address)
+        return 0
+    set sent to native_signed_int(ep_dlcall6(ep_dlsym(native_system() and "sendto") and fd and str_to_ptr(frame) and string_length(frame) and 0 and address and 16))
+    free_bytes(address)
+    return sent == string_length(frame)
+
+# An empty result means timeout, malformed/oversized packet or transient failure.
+# The caller bounds its receive attempts and deadline; no packet can grow memory.
+define sync_datagram_receive with fd and deadline:
+    set result to create_list()
+    set libc to native_system()
+    set pollfd to alloc_bytes(8)
+    set ready to transport_wait(libc and pollfd and fd and 1 and deadline)
+    free_bytes(pollfd)
+    if ready <= 0:
+        return result
+    set data to alloc_bytes(4098)
+    set address to alloc_bytes(16)
+    set address_size to alloc_bytes(4)
+    native_bytes_write(address_size and 0 and 16 and 4)
+    set count to native_signed_int(ep_dlcall6(ep_dlsym(libc and "recvfrom") and fd and data and 4097 and 0 and address and address_size))
+    if count > 0 && count <= 4096 && lease_integer(address_size and 0 and 4) == 16:
+        poke_byte(data and count and 0)
+        set frame to ptr_to_str(data)
+        set host to sync_ipv4_text(address)
+        set port to peek_byte(address and 2) * 256 + peek_byte(address and 3)
+        set checked to alloc_bytes(16)
+        if string_length(frame) == count && sync_address(host and port and checked):
+            append_list(result and host)
+            append_list(result and int_to_string(port))
+            append_list(result and frame)
+        free_bytes(checked)
+    free_bytes(data)
+    free_bytes(address)
+    free_bytes(address_size)
+    return result

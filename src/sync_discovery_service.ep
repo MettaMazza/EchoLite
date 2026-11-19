@@ -1,0 +1,70 @@
+# Bounded discovery operations. Call under the device maintenance lease so replay
+# counters cannot race another synchronization command in this application.
+import "sync_discovery"
+import "sync_datagram"
+
+define sync_discovery_search with db and peer and destinations and discovery_port returning Str:
+    if result_cache_scalar(db and "SELECT count(*) FROM sync_peers WHERE peer=? AND enabled=1" and [peer]) != "1":
+        return result_cache_error("Device is not paired")
+    if discovery_port < 1024 || discovery_port > 65535 || length_list(destinations) == 0 || length_list(destinations) > 8:
+        return result_cache_error("No usable local discovery addresses")
+    set fd to sync_datagram_open("0.0.0.0" and 0)
+    if fd < 0:
+        return result_cache_error("Cannot open local device discovery")
+    set probe to sync_discovery_probe(db and peer)
+    set nonce to result_cache_scalar(db and "SELECT json_extract(?,'$.nonce')" and [probe])
+    if nonce == "":
+        sync_socket_close(fd)
+        return result_cache_error("Cannot authenticate device discovery")
+    set sent to 0
+    set index to 0
+    repeat while index < length_list(destinations):
+        set sent to sent + sync_datagram_send(fd and get_list(destinations and index) and discovery_port and probe)
+        set index to index + 1
+    set result to result_cache_error("Paired device was not found on this network")
+    set deadline to transport_now(native_system()) + 1500
+    set attempts to 0
+    repeat while sent > 0 && attempts < 32 && transport_now(native_system()) < deadline:
+        set packet to sync_datagram_receive(fd and deadline)
+        if length_list(packet) == 3:
+            set accepted to sync_discovery_accept(db and peer and nonce and get_list(packet and 2) and get_list(packet and 0))
+            if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [accepted]) == "ok":
+                set result to accepted
+                break
+        set attempts to attempts + 1
+    sync_socket_close(fd)
+    return result
+
+define sync_discovery_find with db and peer returning Str:
+    set interfaces to sync_network_interfaces()
+    set destinations to create_list()
+    set index to 0
+    repeat while index < length_list(interfaces):
+        append_list(destinations and get_list(get_list(interfaces and index) and 2))
+        set index to index + 1
+    return sync_discovery_search(db and peer and destinations and 8411)
+
+# A short listener tick can be scheduled by the app supervisor. Unauthenticated
+# packets receive no reply and do not end the window before a legitimate probe.
+define sync_discovery_listen with db and host and discovery_port and service_port returning Str:
+    set address to alloc_bytes(16)
+    set valid to sync_address(host and service_port and address)
+    free_bytes(address)
+    if valid == 0:
+        return result_cache_error("Invalid local discovery service address")
+    set fd to sync_datagram_open("0.0.0.0" and discovery_port)
+    if fd < 0:
+        return result_cache_error("Cannot listen for local device discovery")
+    set deadline to transport_now(native_system()) + 1000
+    set attempts to 0
+    set replies to 0
+    repeat while attempts < 32 && transport_now(native_system()) < deadline:
+        set packet to sync_datagram_receive(fd and deadline)
+        if length_list(packet) == 3:
+            set reply to sync_discovery_reply(db and get_list(packet and 2) and host and service_port)
+            if reply != "":
+                set replies to replies + sync_datagram_send(fd and get_list(packet and 0) and string_to_int(get_list(packet and 1)) and reply)
+        set attempts to attempts + 1
+    sync_socket_close(fd)
+    set result to result_cache_scalar(db and "SELECT json_object('status','ok','replies',CAST(? AS INTEGER))" and [int_to_string(replies)])
+    return result

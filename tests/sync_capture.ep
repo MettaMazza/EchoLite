@@ -1,0 +1,39 @@
+import "../src/sync_capture"
+import "os"
+set checks to 0
+
+define capture_check with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define capture_ok with db and result:
+    set status to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.status'),'ok')" and [result])
+    if status == "error":
+        return 0
+    return 1
+
+define main:
+    set db to sql_open(":memory:")
+    capture_check(sql_execute(db and "CREATE TABLE memories(id INTEGER PRIMARY KEY AUTOINCREMENT,body TEXT); CREATE TABLE me_versions(id INTEGER PRIMARY KEY AUTOINCREMENT,body TEXT); CREATE TABLE turns(id INTEGER PRIMARY KEY AUTOINCREMENT); CREATE TABLE tool_runs(id INTEGER PRIMARY KEY AUTOINCREMENT);") == 0 && sync_identity_init(db) and "tracking initialized")
+    sql_execute(db and "INSERT INTO memories(body) VALUES('first')")
+    set object to sync_identity_get(db and "memory" and "1")
+    capture_check(capture_ok(db and sync_capture_record(db and "memory" and "1" and "SELECT json_object('body',body) FROM memories WHERE id=?")) and "first edit becomes revision")
+    set heads to sync_heads(db and object)
+    capture_check(result_cache_scalar(db and "SELECT dirty FROM sync_local_ids WHERE object=?" and [object]) == "0" and "capture acknowledgement is persisted")
+    capture_check(capture_ok(db and sync_capture_record(db and "memory" and "1" and "SELECT json_object('body',body) FROM memories WHERE id=?")) && sync_heads(db and object) == heads and "retry does not invent a revision")
+    sql_execute(db and "UPDATE memories SET body='edited'")
+    capture_check(capture_ok(db and sync_capture_record(db and "memory" and "1" and "SELECT 'not-json' FROM memories WHERE id=?")) == 0 and "invalid payload rejects snapshot")
+    capture_check(sync_heads(db and object) == heads && result_cache_scalar(db and "SELECT dirty FROM sync_local_ids WHERE object=?" and [object]) == "1" and "failed snapshot retains dirty edit and previous revision")
+    capture_check(capture_ok(db and sync_write(db and object and "memory" and "{\"body\":\"unseen revision\"}" and heads)) and "frontier advances before projection")
+    set unseen to sync_heads(db and object)
+    capture_check(capture_ok(db and sync_capture_record(db and "memory" and "1" and "SELECT json_object('body',body) FROM memories WHERE id=?")) == 0 && sync_heads(db and object) == unseen and "stale local view cannot silently resolve unseen revision")
+    capture_check(result_cache_scalar(db and "SELECT body FROM memories WHERE id=1" and []) == "edited" && result_cache_scalar(db and "SELECT dirty FROM sync_local_ids WHERE object=?" and [object]) == "1" and "local edit remains available for conflict reconciliation")
+    sql_execute(db and "DELETE FROM memories WHERE id=1")
+    capture_check(capture_ok(db and sync_capture_record(db and "memory" and "1" and "SELECT json_object('body',body) FROM memories WHERE id=?")) and "forgetting supersedes an unseen edit")
+    capture_check(result_cache_scalar(db and "SELECT deleted FROM sync_objects WHERE id=?" and [object]) == "1" && result_cache_scalar(db and "SELECT count(*) FROM sync_versions WHERE object=?" and [object]) == "0" and "forgotten snapshot contains no content")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " application capture checks"))
+    return 0

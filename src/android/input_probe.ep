@@ -1,0 +1,31 @@
+import "input"
+import "../../stdlib/bridge/raylib"
+import "fs"
+import "../native_font"
+
+define main:
+    set RAYLIB_HANDLE to ep_dlopen("libmain.so")
+    raylib_init_window(0 and 0 and "EchoLite")
+    raylib_set_target_fps(30)
+    font_init(RAYLIB_HANDLE)
+    if android_input_init(RAYLIB_HANDLE) == 0:
+        return 1
+    set home to ptr_to_str(ep_dlcall0(ep_dlsym(ANDROID_SDL and "SDL_GetAndroidInternalStoragePath")))
+    set text to ""
+    repeat while raylib_window_should_close() == 0:
+        if raylib_is_mouse_button_pressed(0):
+            android_keyboard(0)
+            android_keyboard(1)
+        set inserted to android_input_take()
+        if inserted != "":
+            set text to concat(text and inserted)
+            write_file(concat(home and "/input-probe.txt") and text)
+        raylib_begin_drawing()
+        raylib_clear_background(4280031252)
+        font_draw("EchoLite" and 48 and 110 and 64 and 4291421629)
+        font_draw("Tap to type" and 48 and 210 and 36 and 4293586664)
+        font_draw(text and 48 and 300 and 34 and 4293586664)
+        raylib_end_drawing()
+    android_input_close()
+    raylib_close_window()
+    return 0

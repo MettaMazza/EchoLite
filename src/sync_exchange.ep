@@ -1,0 +1,104 @@
+import "sync_socket"
+
+# This layer exchanges replicated records. The application projection will apply
+# accepted frontiers/tombstones to its domain tables before user-visible success.
+define sync_exchange_body with db and peer and body returning Str:
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.action')='exchange' AND json_type(?,'$.page')='object' AND json_type(?,'$.pull_after')='integer' AND json_extract(?,'$.pull_after')>=0" and [body,body,body,body]) != "1":
+        return result_cache_error("Invalid sync exchange request")
+    set page to result_cache_scalar(db and "SELECT json_extract(?,'$.page')" and [body])
+    set received to sync_import(db and peer and page)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [received]) != "ok":
+        return received
+    set cursor to result_cache_scalar(db and "SELECT json_extract(?,'$.pull_after')" and [body])
+    set outgoing to sync_export(db and cursor)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')" and [outgoing]) != "1":
+        return outgoing
+    return result_cache_scalar(db and "SELECT json_object('status','ok','received',CAST(json_extract(?,'$.cursor') AS INTEGER),'page',json(?))" and [received,outgoing])
+
+# One small authenticated hello before any large input allocation. The server
+# never returns pairing information or plaintext failure details to an unknown peer.
+define sync_connection_receive with db and fd returning Str:
+    set deadline to transport_now(native_system()) + 3000
+    set hello to sync_frame_receive(fd and 4096 and deadline)
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [hello,hello]) != "1":
+        return result_cache_error("Sync authentication or receive failed")
+    set peer to result_cache_scalar(db and "SELECT json_extract(?,'$.sender')" and [hello])
+    set opened to sync_pair_unwrap(db and peer and "request" and "" and hello)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.body.action')='hello'" and [opened,opened]) != "1":
+        return result_cache_error("Sync authentication or receive failed")
+    set nonce to result_cache_scalar(db and "SELECT json_extract(?,'$.nonce')" and [opened])
+    set answer to sync_pair_wrap(db and peer and "response" and nonce and "{\"action\":\"hello\",\"status\":\"ok\"}")
+    if sync_frame_send(fd and answer and deadline) == 0:
+        return result_cache_error("Sync authentication or receive failed")
+    set deadline to transport_now(native_system()) + 30000
+    set frame to sync_frame_receive(fd and 11186000 and deadline)
+    set opened to sync_pair_unwrap(db and peer and "request" and "" and frame)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [opened]) != "ok":
+        return result_cache_error("Sync authentication or receive failed")
+    set body to result_cache_scalar(db and "SELECT json_extract(?,'$.body')" and [opened])
+    set nonce to result_cache_scalar(db and "SELECT json_extract(?,'$.nonce')" and [opened])
+    return result_cache_scalar(db and "SELECT json_object('status','ok','peer',?,'nonce',?,'body',json(?))" and [peer,nonce,body])
+
+define sync_connection_reply with db and fd and request and result:
+    set peer to result_cache_scalar(db and "SELECT json_extract(?,'$.peer')" and [request])
+    set nonce to result_cache_scalar(db and "SELECT json_extract(?,'$.nonce')" and [request])
+    set response to sync_pair_wrap(db and peer and "response" and nonce and result)
+    return sync_frame_send(fd and response and transport_now(native_system()) + 30000)
+
+define sync_connection_serve with db and fd:
+    set request to sync_connection_receive(db and fd)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [request]) != "ok":
+        return 0
+    set peer to result_cache_scalar(db and "SELECT json_extract(?,'$.peer')" and [request])
+    set body to result_cache_scalar(db and "SELECT json_extract(?,'$.body')" and [request])
+    return sync_connection_reply(db and fd and request and sync_exchange_body(db and peer and body))
+
+define sync_round_trip with db and fd and peer and body and limit returning Str:
+    set request to sync_pair_wrap(db and peer and "request" and "" and body)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')" and [request]) != "1":
+        return request
+    set nonce to result_cache_scalar(db and "SELECT json_extract(?,'$.nonce')" and [request])
+    set deadline to transport_now(native_system()) + 30000
+    if limit == 4096:
+        set deadline to transport_now(native_system()) + 3000
+    if sync_frame_send(fd and request and deadline) == 0:
+        return result_cache_error("Sync send interrupted; resume from the committed cursor")
+    set response to sync_frame_receive(fd and limit and deadline)
+    if response == "":
+        return result_cache_error("Sync response interrupted; resume from the committed cursor")
+    set opened to sync_pair_unwrap(db and peer and "response" and nonce and response)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [opened]) != "ok":
+        return opened
+    return result_cache_scalar(db and "SELECT json_extract(?,'$.body')" and [opened])
+
+define sync_exchange with db and peer and host and port and push_after returning Str:
+    if push_after == "resume":
+        set push_after to result_cache_scalar(db and "SELECT coalesce((SELECT cursor FROM sync_outgoing WHERE peer=?),0)" and [peer])
+    set fd to sync_socket_open(host and port and 0)
+    if fd < 0:
+        return result_cache_error("Paired device is not reachable at this local endpoint")
+    set greeting to sync_round_trip(db and fd and peer and "{\"action\":\"hello\"}" and 4096)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_extract(?,'$.action')='hello'" and [greeting,greeting]) != "1":
+        sync_socket_close(fd)
+        return greeting
+    set pull_after to result_cache_scalar(db and "SELECT coalesce((SELECT cursor FROM sync_cursors WHERE peer=?),0)" and [peer])
+    set page to sync_export(db and push_after)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')" and [page]) != "1":
+        sync_socket_close(fd)
+        return page
+    set body to result_cache_scalar(db and "SELECT json_object('action','exchange','pull_after',CAST(? AS INTEGER),'page',json(?))" and [pull_after,page])
+    set result to sync_round_trip(db and fd and peer and body and 11186000)
+    sync_socket_close(fd)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')='ok' AND json_type(?,'$.page')='object' AND json_type(?,'$.received')='integer'" and [result,result,result]) != "1":
+        return result
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.received')=json_extract(?,'$.cursor')" and [result,page]) != "1":
+        return result_cache_error("Peer acknowledgement does not match the sent page")
+    set incoming to result_cache_scalar(db and "SELECT json_extract(?,'$.page')" and [result])
+
+    set imported to sync_import(db and peer and incoming)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [imported]) != "ok":
+        return imported
+    set acknowledged to result_cache_scalar(db and "SELECT json_extract(?,'$.received')" and [result])
+    if sync_execute(db and "INSERT INTO sync_outgoing VALUES(?,?) ON CONFLICT(peer) DO UPDATE SET cursor=max(cursor,excluded.cursor)" and [peer,acknowledged]) == 0:
+        return result_cache_error("Cannot persist outbound acknowledgement; retry is safe")
+    return result

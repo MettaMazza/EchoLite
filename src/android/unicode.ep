@@ -1,0 +1,50 @@
+import "../native_process"
+import "os"
+set ANDROID_ICU to 0
+
+define android_icu_error with status:
+    return native_signed_int(process_integer(status and 4)) > 0
+
+# NFKC then full case-fold matches the dictionary index; accents are retained.
+define android_dictionary_normalize with text returning Str:
+    if string_length(text) > 8192:
+        return ""
+    if ANDROID_ICU == 0:
+        set ANDROID_ICU to ep_dlopen("libicu.so")
+    if ANDROID_ICU == 0:
+        return ""
+    set status to alloc_bytes(4)
+    set length to alloc_bytes(4)
+    set source to alloc_bytes(16384)
+    set normalized to alloc_bytes(16384)
+    set folded to alloc_bytes(16384)
+    set utf8 to alloc_bytes(8193)
+    set result to ""
+    ep_dlcall6(ep_dlsym(ANDROID_ICU and "u_strFromUTF8") and source and 8192 and length and text and string_length(text) and status)
+    if android_icu_error(status) == 0:
+        set count to process_integer(length and 4)
+        set start to 0
+        set whitespace to ep_dlsym(ANDROID_ICU and "u_isUWhiteSpace")
+        repeat while start < count && ep_dlcall1(whitespace and process_integer(source + start * 2 and 2)):
+            set start to start + 1
+        repeat while count > start && ep_dlcall1(whitespace and process_integer(source + (count - 1) * 2 and 2)):
+            set count to count - 1
+        set normalizer to ep_dlcall1(ep_dlsym(ANDROID_ICU and "unorm2_getNFKCInstance") and status)
+        if normalizer != 0 && android_icu_error(status) == 0:
+            set count to native_signed_int(ep_dlcall6(ep_dlsym(ANDROID_ICU and "unorm2_normalize") and normalizer and source + start * 2 and count - start and normalized and 8192 and status))
+            if count >= 0 && count <= 8192 && android_icu_error(status) == 0:
+                set count to native_signed_int(ep_dlcall6(ep_dlsym(ANDROID_ICU and "u_strFoldCase") and folded and 8192 and normalized and count and 0 and status))
+                if count >= 0 && count <= 8192 && android_icu_error(status) == 0:
+                    ep_dlcall6(ep_dlsym(ANDROID_ICU and "u_strToUTF8") and utf8 and 8192 and length and folded and count and status)
+                    if android_icu_error(status) == 0:
+                        set used to process_integer(length and 4)
+                        if used <= 8192:
+                            poke_byte(utf8 and used and 0)
+                            set result to ptr_to_str(utf8)
+    free_bytes(status)
+    free_bytes(length)
+    free_bytes(source)
+    free_bytes(normalized)
+    free_bytes(folded)
+    free_bytes(utf8)
+    return result

@@ -1,0 +1,160 @@
+# Android SDL input. The native event callback only touches unmanaged storage;
+# managed strings are created on the EP UI thread after taking the mutex.
+import "../native_process"
+import "string"
+set ANDROID_SDL to 0
+set ANDROID_INPUT_MUTEX to 0
+set ANDROID_INPUT_BUFFER to 0
+set ANDROID_INPUT_USED to 0
+set ANDROID_INPUT_OVERFLOW to 0
+set ANDROID_INPUT_WATCH to 0
+set ANDROID_INPUT_WINDOW to 0
+set ANDROID_INPUT_LOCK to 0
+set ANDROID_INPUT_UNLOCK to 0
+set ANDROID_INPUT_COPY to 0
+set ANDROID_INPUT_LENGTH to 0
+set ANDROID_POINTER_PENDING to 0
+
+define android_text_watch with userdata and event:
+    set event_type to process_integer(event and 4)
+    if event_type == 1025:
+        ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+        set ANDROID_POINTER_PENDING to 1
+        ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
+    set kind to 1
+    set pointer to 0
+    set count to 0
+    if event_type == 771:
+        set pointer to process_integer(event + 24 and 8)
+        if pointer != 0:
+            set count to ep_dlcall1(ANDROID_INPUT_LENGTH and pointer)
+    else if event_type == 768:
+        set scancode to process_integer(event + 24 and 4)
+        if scancode == 42 || scancode == 76:
+            set kind to 2
+            set pointer to event + 24
+            set count to 4
+    if pointer == 0 || count <= 0:
+        return 1
+    ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+    if count + 5 <= 1048576 - ANDROID_INPUT_USED:
+        poke_byte(ANDROID_INPUT_BUFFER and ANDROID_INPUT_USED and kind)
+        native_bytes_write(ANDROID_INPUT_BUFFER and ANDROID_INPUT_USED + 1 and count and 4)
+        ep_dlcall3(ANDROID_INPUT_COPY and ANDROID_INPUT_BUFFER + ANDROID_INPUT_USED + 5 and pointer and count)
+        set ANDROID_INPUT_USED to ANDROID_INPUT_USED + count + 5
+    else:
+        set ANDROID_INPUT_OVERFLOW to 1
+    ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
+    return 1
+
+define android_input_init with self_library:
+    if native_android() == 0:
+        return 1
+    if ANDROID_INPUT_MUTEX != 0:
+        android_input_close()
+    set ANDROID_SDL to ep_dlopen("libSDL3.so")
+    if ANDROID_SDL == 0:
+        return 0
+    set ANDROID_INPUT_MUTEX to ep_dlcall0(ep_dlsym(ANDROID_SDL and "SDL_CreateMutex"))
+    set ANDROID_INPUT_BUFFER to ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_malloc") and 1048577)
+    set ANDROID_INPUT_LOCK to ep_dlsym(ANDROID_SDL and "SDL_LockMutex")
+    set ANDROID_INPUT_UNLOCK to ep_dlsym(ANDROID_SDL and "SDL_UnlockMutex")
+    set ANDROID_INPUT_COPY to ep_dlsym(native_system() and "memcpy")
+    set ANDROID_INPUT_LENGTH to ep_dlsym(native_system() and "strlen")
+    set ANDROID_INPUT_WATCH to ep_dlsym(self_library and "android_text_watch")
+    if ANDROID_INPUT_MUTEX == 0 || ANDROID_INPUT_BUFFER == 0 || ANDROID_INPUT_WATCH == 0:
+        android_input_close()
+        return 0
+    set count to alloc_bytes(4)
+    set windows to ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_GetWindows") and count)
+    if windows != 0 && process_integer(count and 4) > 0:
+        set ANDROID_INPUT_WINDOW to process_integer(windows and 8)
+    ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_free") and windows)
+    free_bytes(count)
+    if ANDROID_INPUT_WINDOW == 0:
+        android_input_close()
+        return 0
+    ep_dlcall2(ep_dlsym(ANDROID_SDL and "SDL_SetHint") and "SDL_ENABLE_SCREEN_KEYBOARD" and "1")
+    ep_dlcall2(ep_dlsym(ANDROID_SDL and "SDL_SetHint") and "SDL_TOUCH_MOUSE_EVENTS" and "1")
+    if ep_dlcall2(ep_dlsym(ANDROID_SDL and "SDL_AddEventWatch") and ANDROID_INPUT_WATCH and 0) == 0:
+        android_input_close()
+        return 0
+    return 1
+
+# Preserve IME replacement ordering: deletes and committed text share one queue.
+define android_input_events:
+    set events to create_list()
+    if ANDROID_INPUT_MUTEX == 0:
+        return events
+    ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+    poke_byte(ANDROID_INPUT_BUFFER and ANDROID_INPUT_USED and 0)
+    set offset to 0
+    repeat while offset < ANDROID_INPUT_USED:
+        set kind to peek_byte(ANDROID_INPUT_BUFFER and offset)
+        set count to process_integer(ANDROID_INPUT_BUFFER + offset + 1 and 4)
+        set start to offset + 5
+        if kind == 1:
+            set saved to peek_byte(ANDROID_INPUT_BUFFER and start + count)
+            poke_byte(ANDROID_INPUT_BUFFER and start + count and 0)
+            set text to ptr_to_str(ANDROID_INPUT_BUFFER + start)
+            poke_byte(ANDROID_INPUT_BUFFER and start + count and saved)
+            append_list(events and ["text",text])
+        else:
+            append_list(events and ["key",int_to_string(process_integer(ANDROID_INPUT_BUFFER + start and 4))])
+        set offset to start + count
+    set ANDROID_INPUT_USED to 0
+    ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
+    return events
+
+define android_input_take returning Str:
+    set events to android_input_events()
+    set text to create_builder()
+    set i to 0
+    repeat while i < length_list(events):
+        set event to get_list(events and i)
+        if get_list(event and 0) == "text":
+            builder_append(text and get_list(event and 1))
+        set i to i + 1
+    return builder_to_string(text)
+
+define android_keyboard with visible:
+    if ANDROID_INPUT_WINDOW == 0:
+        return 0
+    set operation to "SDL_StopTextInput"
+    if visible:
+        set operation to "SDL_StartTextInput"
+    return ep_dlcall1(ep_dlsym(ANDROID_SDL and operation) and ANDROID_INPUT_WINDOW)
+
+define android_input_close:
+    if ANDROID_INPUT_WATCH != 0:
+        ep_dlcall2(ep_dlsym(ANDROID_SDL and "SDL_RemoveEventWatch") and ANDROID_INPUT_WATCH and 0)
+    if ANDROID_INPUT_MUTEX != 0:
+        ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_DestroyMutex") and ANDROID_INPUT_MUTEX)
+    if ANDROID_INPUT_BUFFER != 0:
+        ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_free") and ANDROID_INPUT_BUFFER)
+    set ANDROID_INPUT_MUTEX to 0
+    set ANDROID_INPUT_BUFFER to 0
+    set ANDROID_INPUT_WATCH to 0
+    set ANDROID_INPUT_WINDOW to 0
+    set ANDROID_INPUT_USED to 0
+    set ANDROID_INPUT_OVERFLOW to 0
+    return 0
+
+define android_input_overflowed:
+    if ANDROID_INPUT_MUTEX == 0:
+        return 0
+    ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+    set overflow to ANDROID_INPUT_OVERFLOW
+    set ANDROID_INPUT_OVERFLOW to 0
+    ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
+    return overflow
+
+# Preserve taps whose press and release arrive within one rendered frame.
+define android_pointer_take:
+    if ANDROID_INPUT_MUTEX == 0:
+        return 0
+    ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+    set pressed to ANDROID_POINTER_PENDING
+    set ANDROID_POINTER_PENDING to 0
+    ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
+    return pressed

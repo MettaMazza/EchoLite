@@ -18,7 +18,7 @@ define slot_directory with home:
     set info to alloc_bytes(144)
     set valid to ep_dlcall2(ep_dlsym(native_system() and "fstat") and dir and info) == 0
     if valid:
-        set valid to lease_integer(info and 4 and 2) / 4096 == 4 && lease_integer(info and 4 and 2) % 64 == 0 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(native_system() and "getuid"))
+        set valid to native_stat_mode(info) / 4096 == 4 && native_stat_mode(info) % 64 == 0 && native_stat_owner(info) == ep_dlcall0(ep_dlsym(native_system() and "getuid"))
     free_bytes(info)
     if valid == 0:
         ep_dlcall1(ep_dlsym(native_system() and "close") and dir)
@@ -37,7 +37,7 @@ define slot_prune with directory and keep:
         return 0
     ep_dlcall1(ep_dlsym(libc and "rewinddir") and stream)
     set info to alloc_bytes(144)
-    set errno_ptr to ep_dlcall0(ep_dlsym(libc and "__error"))
+    set errno_ptr to native_errno_pointer()
     set valid to 1
     set count to 0
     repeat while valid:
@@ -51,9 +51,9 @@ define slot_prune with directory and keep:
         if count > 10000:
             set valid to 0
             break
-        set name to ptr_to_str(entry + 21)
+        set name to native_dirent_name(entry)
         if slot_filename(name) && string_equals(name and keep) == 0:
-            if ep_dlcall4(ep_dlsym(libc and "fstatat") and directory and name and info and 32) != 0 || lease_integer(info and 4 and 2) / 4096 != 8 || lease_integer(info and 6 and 2) != 1 || lease_integer(info and 16 and 4) != ep_dlcall0(ep_dlsym(libc and "getuid")):
+            if ep_dlcall4(ep_dlsym(libc and "fstatat") and directory and name and info and native_at_nofollow()) != 0 || native_stat_mode(info) / 4096 != 8 || native_stat_links(info) != 1 || native_stat_owner(info) != ep_dlcall0(ep_dlsym(libc and "getuid")):
                 set valid to 0
             else if ep_dlcall3(ep_dlsym(libc and "unlinkat") and directory and name and 0) != 0:
                 set valid to 0

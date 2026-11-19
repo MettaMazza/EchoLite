@@ -1,0 +1,186 @@
+# Authenticated local-pair transport using OpenSSL AES-256-GCM. Pairing provisions
+# a random 256-bit secret; every frame uses a fresh CSPRNG 96-bit nonce. Device
+# identities, protocol version and direction are authenticated associated data.
+import "sync_store"
+import "native_process"
+import "os"
+import "fs"
+set SYNC_CRYPTO to 0
+
+define sync_crypto_library:
+    if SYNC_CRYPTO == 0:
+        set library to get_env("ECHOLITE_CRYPTO_LIBRARY")
+        if library == "":
+            set library to "libecholite_crypto.so"
+            if native_android() == 0:
+                set args to get_args()
+                set library to concat(path_dirname(path_dirname(get_list(args and 0))) and "/models/runtime/libecholite_crypto.dylib")
+        set SYNC_CRYPTO to ep_dlopen(library)
+    return SYNC_CRYPTO
+
+define sync_nibble with byte:
+    if byte >= 48 && byte <= 57:
+        return byte - 48
+    if byte >= 97 && byte <= 102:
+        return byte - 87
+    return 0 - 1
+
+define sync_unhex with text and pointer and count:
+    if string_length(text) != count * 2:
+        return 0
+    set i to 0
+    repeat while i < count:
+        set high to sync_nibble(get_character(text and i * 2))
+        set low to sync_nibble(get_character(text and i * 2 + 1))
+        if high < 0 || low < 0:
+            return 0
+        poke_byte(pointer and i and high * 16 + low)
+        set i to i + 1
+    return 1
+
+define sync_hex with pointer and count returning Str:
+    set digits to "0123456789abcdef"
+    set out to create_builder()
+    set i to 0
+    repeat while i < count:
+        set value to peek_byte(pointer and i)
+        builder_append(out and substring(digits and value / 16 and 1))
+        builder_append(out and substring(digits and value % 16 and 1))
+        set i to i + 1
+    return builder_to_string(out)
+
+define sync_random_secret returning Str:
+    set library to sync_crypto_library()
+    if library == 0:
+        return ""
+    set bytes to alloc_bytes(32)
+    set secret to ""
+    if ep_dlcall2(ep_dlsym(library and "RAND_bytes") and bytes and 32) == 1:
+        set secret to sync_hex(bytes and 32)
+    ep_dlcall2(ep_dlsym(library and "OPENSSL_cleanse") and bytes and 32)
+    free_bytes(bytes)
+    return secret
+
+# Caller supplies output of at least input length + 16, and a 16-byte tag buffer.
+# Decryption failure wipes output; no unauthenticated plaintext is returned.
+define sync_crypt_raw with encrypt and key and nonce and aad and input and size and tag and output:
+    set library to sync_crypto_library()
+    if library == 0 || size < 0 || size > 8388608:
+        return 0 - 1
+    set key_bytes to alloc_bytes(32)
+    set iv to alloc_bytes(12)
+    set written to alloc_bytes(4)
+    set valid to sync_unhex(key and key_bytes and 32) && sync_unhex(nonce and iv and 12)
+    set context to ep_dlcall0(ep_dlsym(library and "EVP_CIPHER_CTX_new"))
+    set cipher to ep_dlcall0(ep_dlsym(library and "EVP_aes_256_gcm"))
+    set init to "EVP_DecryptInit_ex"
+    set update to "EVP_DecryptUpdate"
+    set finish to "EVP_DecryptFinal_ex"
+    if encrypt:
+        set init to "EVP_EncryptInit_ex"
+        set update to "EVP_EncryptUpdate"
+        set finish to "EVP_EncryptFinal_ex"
+    set total to 0 - 1
+    if valid && context != 0 && cipher != 0:
+        set valid to ep_dlcall5(ep_dlsym(library and init) and context and cipher and 0 and key_bytes and iv) == 1
+        if valid && string_length(aad) > 0:
+            set valid to ep_dlcall5(ep_dlsym(library and update) and context and 0 and written and aad and string_length(aad)) == 1
+        if valid:
+            set valid to ep_dlcall5(ep_dlsym(library and update) and context and output and written and input and size) == 1
+        if valid:
+            set total to process_integer(written and 4)
+            if encrypt == 0:
+                set valid to ep_dlcall4(ep_dlsym(library and "EVP_CIPHER_CTX_ctrl") and context and 17 and 16 and tag) == 1
+        if valid:
+            set valid to ep_dlcall3(ep_dlsym(library and finish) and context and output + total and written) == 1
+        if valid:
+            set total to total + process_integer(written and 4)
+            if encrypt:
+                set valid to ep_dlcall4(ep_dlsym(library and "EVP_CIPHER_CTX_ctrl") and context and 16 and 16 and tag) == 1
+    if valid == 0 || context == 0 || cipher == 0:
+        ep_dlcall2(ep_dlsym(library and "OPENSSL_cleanse") and output and size + 16)
+        set total to 0 - 1
+    if context != 0:
+        ep_dlcall1(ep_dlsym(library and "EVP_CIPHER_CTX_free") and context)
+    ep_dlcall2(ep_dlsym(library and "OPENSSL_cleanse") and key_bytes and 32)
+    free_bytes(key_bytes)
+    free_bytes(iv)
+    free_bytes(written)
+    return total
+
+define sync_base64 with bytes and count returning Str:
+    set buffer to alloc_bytes((count + 2) / 3 * 4 + 1)
+    set size to ep_dlcall3(ep_dlsym(sync_crypto_library() and "EVP_EncodeBlock") and buffer and bytes and count)
+    set result to ""
+    if size == (count + 2) / 3 * 4:
+        poke_byte(buffer and size and 0)
+        set result to ptr_to_str(buffer)
+    free_bytes(buffer)
+    return result
+
+define sync_aad with db and sender and receiver and direction returning Str:
+    set result to result_cache_scalar(db and "SELECT json_array('EchoLite paired sync v1',?,?,?)" and [sender,receiver,direction])
+    if result == "":
+        return ""
+    return result
+
+define sync_seal with db and key and sender and receiver and direction and payload returning Str:
+    if sync_crypto_library() == 0 || sync_identifier(db and sender) == 0 || sync_identifier(db and receiver) == 0 || (direction != "request" && direction != "response") || string_length(payload) > 8388608 || string_length(payload) == 0:
+        return result_cache_error("Cannot seal invalid sync frame")
+    set nonce_bytes to alloc_bytes(12)
+    set nonce to ""
+    if ep_dlcall2(ep_dlsym(SYNC_CRYPTO and "RAND_bytes") and nonce_bytes and 12) == 1:
+        set nonce to sync_hex(nonce_bytes and 12)
+    free_bytes(nonce_bytes)
+    if nonce == "":
+        return result_cache_error("Secure sync nonce unavailable")
+    set tag to alloc_bytes(16)
+    set output to alloc_bytes(string_length(payload) + 16)
+    set size to sync_crypt_raw(1 and key and nonce and sync_aad(db and sender and receiver and direction) and str_to_ptr(payload) and string_length(payload) and tag and output)
+    set result to result_cache_error("Cannot encrypt sync frame")
+    if size >= 0:
+        set result to result_cache_scalar(db and "SELECT json_object('protocol',1,'sender',?,'receiver',?,'direction',?,'nonce',?,'ciphertext',?,'tag',?)" and [sender,receiver,direction,nonce,sync_base64(output and size),sync_hex(tag and 16)])
+    free_bytes(tag)
+    free_bytes(output)
+    return result
+
+define sync_open with db and key and sender and receiver and direction and envelope returning Str:
+    if sync_crypto_library() == 0 || string_length(envelope) > 11186000 || sync_identifier(db and sender) == 0 || sync_identifier(db and receiver) == 0 || (direction != "request" && direction != "response"):
+        return result_cache_error("Invalid encrypted sync frame")
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [envelope,envelope]) != "1":
+        return result_cache_error("Invalid encrypted sync JSON")
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')=1 AND json_extract(?,'$.sender')=? AND json_extract(?,'$.receiver')=? AND json_extract(?,'$.direction')=? AND json_type(?,'$.ciphertext')='text' AND json_type(?,'$.nonce')='text' AND json_type(?,'$.tag')='text'" and [envelope,envelope,sender,envelope,receiver,envelope,direction,envelope,envelope,envelope]) != "1":
+        return result_cache_error("Sync frame identity or direction mismatch")
+    set nonce to result_cache_scalar(db and "SELECT json_extract(?,'$.nonce')" and [envelope])
+    set encoded to result_cache_scalar(db and "SELECT json_extract(?,'$.ciphertext')" and [envelope])
+    set tag_text to result_cache_scalar(db and "SELECT json_extract(?,'$.tag')" and [envelope])
+    set length to string_length(encoded)
+    if length == 0 || length % 4 != 0 || length > 11184812:
+        return result_cache_error("Invalid encrypted payload length")
+    set input to alloc_bytes(length / 4 * 3 + 1)
+    set size to native_signed_int(ep_dlcall3(ep_dlsym(SYNC_CRYPTO and "EVP_DecodeBlock") and input and encoded and length))
+    if get_character(encoded and length - 1) == 61:
+        set size to size - 1
+    if get_character(encoded and length - 2) == 61:
+        set size to size - 1
+    if size <= 0 || size > 8388608:
+        free_bytes(input)
+        return result_cache_error("Invalid encrypted payload encoding")
+    if string_equals(sync_base64(input and size) and encoded) == 0:
+        free_bytes(input)
+        return result_cache_error("Noncanonical encrypted payload encoding")
+    set tag to alloc_bytes(16)
+    set output to alloc_bytes(size + 17)
+    set used to 0 - 1
+    if sync_unhex(tag_text and tag and 16):
+        set used to sync_crypt_raw(0 and key and nonce and sync_aad(db and sender and receiver and direction) and input and size and tag and output)
+    set result to result_cache_error("Sync frame authentication failed")
+    if used == size && ep_dlcall3(ep_dlsym(native_system() and "memchr") and output and 0 and used) == 0:
+        poke_byte(output and used and 0)
+        set plaintext to ptr_to_str(output)
+        set result to result_cache_scalar(db and "SELECT json_object('status','ok','payload',?,'nonce',?)" and [plaintext,nonce])
+    ep_dlcall2(ep_dlsym(SYNC_CRYPTO and "OPENSSL_cleanse") and output and size + 17)
+    free_bytes(output)
+    free_bytes(tag)
+    free_bytes(input)
+    return result

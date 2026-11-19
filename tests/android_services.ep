@@ -1,0 +1,38 @@
+# Packaged debug diagnostic, executed under the application's actual UID.
+import "../src/web_transfer"
+import "../src/dictionary"
+import "../src/calculator"
+import "../src/wikipedia"
+
+define main:
+    set home to get_env("ECHOLITE_HOME")
+    set library to get_env("ECHOLITE_LIBRARY")
+    if home == "" || library == "":
+        display "Set private ECHOLITE_HOME and ECHOLITE_LIBRARY"
+        return 1
+    set db to sql_open(":memory:")
+    sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER);")
+    set calculation to run_calculator(db and "0.1+0.2" and "0")
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.exact')" and [calculation]) != "3/10":
+        display calculation
+        return 1
+    display "PASS: app UID exact rational arithmetic"
+    set result to dictionary_lookup(db and library and "ＲＥＳＩＬＩＥＮＣＥ" and "0")
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) != "completed":
+        display result
+        return 1
+    display "PASS: app UID local Unicode dictionary lookup"
+    set result to web_transfer(db and "https://example.com")
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.http_status')" and [result]) != "200":
+        display result
+        return 1
+    display "PASS: app UID verified HTTPS, private anonymous response files"
+    set args to get_args()
+    if length_list(args) > 1:
+        set result to wikipedia_lookup(db and library and "Ada Lovelace" and "0")
+        display result
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.outcome')" and [result]) != "completed":
+            return 1
+        display "PASS: app UID local Wikipedia search and article"
+    sql_close(db)
+    return 0

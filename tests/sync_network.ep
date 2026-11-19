@@ -1,0 +1,30 @@
+import "../src/sync_network"
+set checks to 0
+
+define network_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set address to alloc_bytes(16)
+    network_assert(sync_address("192.168.1.20" and 8411 and address) && sync_ipv4_text(address) == "192.168.1.20" and "native IPv4 sockaddr decoded")
+    network_assert(sync_ipv4_text(0) == "" and "absent address ignored")
+    native_bytes_write(address and 0 and 0 and 2)
+    network_assert(sync_ipv4_text(address) == "" and "non-IPv4 family ignored")
+    free_bytes(address)
+    network_assert(sync_lan_candidate(3 and "192.168.1.20" and "192.168.1.255") and "active LAN interface accepted")
+    network_assert(sync_lan_candidate(2 and "192.168.1.20" and "192.168.1.255") == 0 && sync_lan_candidate(1 and "192.168.1.20" and "192.168.1.255") == 0 and "down and non-broadcast interfaces excluded")
+    network_assert(sync_lan_candidate(11 and "127.0.0.1" and "127.255.255.255") == 0 && sync_lan_candidate(3 and "8.8.8.8" and "8.8.8.255") == 0 and "loopback and public interfaces excluded")
+    network_assert(sync_lan_candidate(3 and "192.168.1.20" and "192.168.1.20") == 0 && sync_lan_candidate(3 and "192.168.1.20" and "") == 0 and "invalid broadcast excluded")
+    set rows to sync_network_interfaces()
+    network_assert(length_list(rows) > 0 && length_list(rows) <= 8 and "actual connected device enumerates bounded LAN interfaces")
+    set i to 0
+    repeat while i < length_list(rows):
+        set row to get_list(rows and i)
+        network_assert(length_list(row) == 3 && sync_lan_candidate(3 and get_list(row and 1) and get_list(row and 2)) and "actual interface is usable for private discovery")
+        set i to i + 1
+    display concat("PASS: " and concat(int_to_string(checks) and " local network interface checks"))
+    return 0

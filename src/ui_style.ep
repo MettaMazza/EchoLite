@@ -1,3 +1,4 @@
+import "ui_viewport"
 # EchoLite pixel design system: integer geometry, shared palette and spacing.
 import "chat_editor"
 
@@ -48,6 +49,8 @@ define ui_icon with name and x and y and scale and tint:
         set bitmap to "00000001000010011111001000010000000"
     if name == "chat":
         set bitmap to "11111100011000110001111110100010000"
+    if name == "devices":
+        set bitmap to "11111100011000111111001001111100000"
     if name == "tasks":
         set bitmap to "11111100011010110001101011000111111"
     if name == "memory":
@@ -70,7 +73,7 @@ define ui_text_fit with text and width and size returning Str:
 define ui_nav with text and icon and y and active:
     set fill to ui_color(17 and 20 and 24)
     set tint to ui_color(152 and 162 and 170)
-    set hovered to raylib_get_mouse_x() >= 16 && raylib_get_mouse_x() < 232 && raylib_get_mouse_y() >= y && raylib_get_mouse_y() < y + 38
+    set hovered to ui_mouse_x() >= 16 && ui_mouse_x() < 232 && ui_mouse_y() >= y && ui_mouse_y() < y + 38
     if active || hovered:
         set fill to ui_color(30 and 36 and 40)
         set tint to ui_color(229 and 235 and 238)
@@ -95,7 +98,7 @@ define ui_code_block with text and language and x and y and width:
         set title to "CODE"
     font_draw(ui_text_fit(title and width - 110 and 12) and x + 16 and y + 9 and 12 and ui_color(155 and 174 and 165))
     font_draw("Copy" and x + width - 52 and y + 9 and 12 and ui_color(189 and 229 and 201))
-    if raylib_is_mouse_button_pressed(0) && raylib_get_mouse_x() >= x + width - 64 && raylib_get_mouse_x() <= x + width && raylib_get_mouse_y() >= y && raylib_get_mouse_y() < y + 30 && raylib_get_mouse_y() >= SELECT_TOP && raylib_get_mouse_y() < SELECT_BOTTOM:
+    if ui_mouse_pressed() && ui_mouse_x() >= x + width - 64 && ui_mouse_x() <= x + width && ui_mouse_y() >= y && ui_mouse_y() < y + 30 && ui_mouse_y() >= SELECT_TOP && ui_mouse_y() < SELECT_BOTTOM:
         ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and text)
     selectable_text(text and x + 16 and y + 42 and width - 32 and 15 and ui_color(216 and 229 and 220))
     return y + block_height + 16

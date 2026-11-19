@@ -1,0 +1,86 @@
+import "../src/sync_generation_receive"
+import "../src/native_font"
+import "../src/chat_view"
+import "os"
+set checks to 0
+
+define thinking_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define thinking_ok with db and result:
+    set status to result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.status'),'ok')" and [result])
+    if status == "error":
+        return 0
+    return 1
+
+define thinking_transfer with a and b:
+    set peer to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set pages to 0
+    set more to 1
+    repeat while more && pages < 20:
+        set cursor to result_cache_scalar(b and "SELECT coalesce((SELECT cursor FROM sync_cursors WHERE peer=?),0)" and [peer])
+        set page to sync_export(a and cursor)
+        thinking_assert(thinking_ok(b and sync_import(b and peer and page)) and "durable thinking page transfer")
+        set more to result_cache_scalar(a and "SELECT json_extract(?,'$.cursor')>CAST(? AS INTEGER)" and [page,cursor]) == "1"
+        set pages to pages + 1
+    thinking_assert(more == 0 and "bounded page transfer finishes")
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: sync_thinking EMPTY_APP_DB_A EMPTY_APP_DB_B"
+        return 1
+    set a to sql_open(get_list(args and 1))
+    set b to sql_open(get_list(args and 2))
+    sql_execute(a and "PRAGMA foreign_keys=ON")
+    sql_execute(b and "PRAGMA foreign_keys=ON")
+    thinking_assert(sync_application_init(a) && sync_application_init(b) && sync_generation_init(a) && sync_generation_init(b) and "thinking sync schemas")
+    thinking_assert(sql_execute(a and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','thinking','user-message','Explain'),('episodic','thinking','assistant','An answer'),('working','thinking','session','Thinking history'); INSERT INTO sessions(memory,project,closed) VALUES(3,'thinking','2026-11-19'); INSERT INTO turns(project,user_memory,reply_memory,me_version,status,answer_basis) VALUES('thinking',1,2,1,'completed','inference'); INSERT INTO session_turns VALUES(1,3); INSERT INTO generation_rounds SELECT 1,0,json_object('reasoning','Persistent reasoning 🌱 '||hex(zeroblob(80000)),'completion_tokens',321,'text','An answer');") == 0 and "long thinking history in real application schema")
+    set user to sync_identity_get(a and "memory" and "1")
+    set reply to sync_identity_get(a and "memory" and "2")
+    set session to sync_identity_get(a and "memory" and "3")
+    set identity to sync_identity_get(a and "identity" and "1")
+    set turn to sync_identity_get(a and "turn" and "1")
+    thinking_assert(thinking_ok(a and sync_application_capture(a and "memory" and "1")) && thinking_ok(a and sync_application_capture(a and "memory" and "2")) && thinking_ok(a and sync_application_capture(a and "memory" and "3")) && thinking_ok(a and sync_application_capture(a and "identity" and "1")) && thinking_ok(a and sync_application_capture(a and "turn" and "1")) && thinking_ok(a and sync_generation_capture(a and "1" and "0")) and "capture conversation and bounded thinking")
+    set owner to result_cache_scalar(a and "SELECT object FROM sync_generation_rows" and [])
+    set peer to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set first_page to sync_export(a and "0")
+    thinking_assert(thinking_ok(b and sync_import(b and peer and first_page)) and "first interrupted transfer page retained")
+    sql_execute(b and "BEGIN IMMEDIATE")
+    set early_manifest to sync_merge_record(b and sync_record(a and owner))
+    thinking_assert(early_manifest == "" && sql_execute(b and "COMMIT") == 0 and "manifest may arrive before all chunks")
+    thinking_assert(thinking_ok(b and sync_project_memory(b and user)) && thinking_ok(b and sync_project_memory(b and reply)) && thinking_ok(b and sync_project_memory(b and session)) && thinking_ok(b and sync_project_me(b and identity)) && thinking_ok(b and sync_project_turn(b and turn)) and "conversation ready before thinking is complete")
+    thinking_assert(thinking_ok(b and sync_project_generation(b and owner)) == 0 && result_cache_scalar(b and "SELECT count(*) FROM generation_rounds" and []) == "0" && result_cache_scalar(b and "SELECT count(*) FROM sync_generation_parts" and []) == "0" and "incomplete chunks never publish partial thinking")
+    sql_close(b)
+    set b to sql_open(get_list(args and 2))
+    sql_execute(b and "PRAGMA foreign_keys=ON")
+    thinking_transfer(a and b)
+    set original_manifest to result_cache_scalar(a and "SELECT payload FROM sync_versions WHERE object=?" and [owner])
+    set corrupt_manifest to result_cache_scalar(a and "SELECT json_set(?,'$.sha256',printf('%064d',0))" and [original_manifest])
+    thinking_assert(thinking_ok(a and sync_write(a and owner and "generation" and corrupt_manifest and sync_heads(a and owner))) and "fixture with incorrect assembled digest")
+    thinking_transfer(a and b)
+    thinking_assert(thinking_ok(b and sync_project_generation(b and owner)) == 0 && result_cache_scalar(b and "SELECT count(*) FROM generation_rounds" and []) == "0" && result_cache_scalar(b and "SELECT count(*) FROM sync_generation_parts" and []) == "0" and "digest mismatch rolls back assembly and ownership links")
+    thinking_assert(thinking_ok(a and sync_write(a and owner and "generation" and original_manifest and sync_heads(a and owner))) and "correct manifest restored for retry")
+    thinking_transfer(a and b)
+    set result to sync_project_generation(b and owner)
+    thinking_assert(thinking_ok(b and result) and concat("resumed thinking assembly: " and result))
+    thinking_assert(result_cache_scalar(a and "SELECT response FROM generation_rounds" and []) == result_cache_scalar(b and "SELECT response FROM generation_rounds" and []) and "exact full response survives interrupted transfer and reopen")
+    set session_id to result_cache_scalar(b and "SELECT local_id FROM sync_local_ids WHERE object=?" and [session])
+    set visible to chat_turns(b and session_id)
+    thinking_assert(length_list(visible) == 1 && string_contains(get_list(get_list(visible and 0) and 4) and "Persistent reasoning 🌱") && get_list(get_list(visible and 0) and 5) == "321" and "existing chat view receives thinking text and token count")
+    thinking_assert(thinking_ok(b and sync_project_generation(b and owner)) && result_cache_scalar(b and "SELECT count(*) FROM generation_rounds" and []) == "1" and "assembled thinking replay is idempotent")
+    sql_execute(a and "DELETE FROM generation_rounds")
+    thinking_transfer(a and b)
+    thinking_assert(thinking_ok(b and sync_project_generation(b and owner)) && result_cache_scalar(b and "SELECT count(*) FROM generation_rounds" and []) == "0" && result_cache_scalar(b and "SELECT count(*) FROM sync_generation_parts" and []) == "0" and "remote forgetting removes assembled and queued thinking")
+    thinking_assert(thinking_ok(b and sync_import(b and peer and first_page)) && result_cache_scalar(b and "SELECT count(*) FROM sync_versions v JOIN sync_objects o ON o.id=v.object WHERE o.kind IN ('generation','generation_chunk')" and []) == "0" and "stale interrupted page cannot resurrect forgotten thinking")
+    set visible to chat_turns(b and session_id)
+    thinking_assert(get_list(get_list(visible and 0) and 4) == "" && get_list(get_list(visible and 0) and 5) == "0" and "chat thinking text and count clear after forgetting")
+    sql_close(a)
+    sql_close(b)
+    display concat("PASS: " and concat(int_to_string(checks) and " thinking-history receiver checks"))
+    return 0

@@ -1,0 +1,32 @@
+import "../src/sync_identity"
+import "os"
+set checks to 0
+
+define check_identity with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define main:
+    set db to sql_open(":memory:")
+    check_identity(sql_execute(db and "PRAGMA foreign_keys=ON; CREATE TABLE memories(id INTEGER PRIMARY KEY AUTOINCREMENT,body TEXT); CREATE TABLE me_versions(id INTEGER PRIMARY KEY AUTOINCREMENT,body TEXT); CREATE TABLE turns(id INTEGER PRIMARY KEY AUTOINCREMENT,user_memory INTEGER REFERENCES memories(id) ON DELETE CASCADE); CREATE TABLE tool_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,turn_id INTEGER REFERENCES turns(id) ON DELETE CASCADE); INSERT INTO memories(body) VALUES('existing memory'); INSERT INTO me_versions(body) VALUES('existing identity');") == 0 and "application fixture schema")
+    check_identity(sync_identity_init(db) and "tracking installs")
+    set object to sync_identity_get(db and "memory" and "1")
+    check_identity(sync_identifier(db and object) and "existing row receives portable identity")
+    check_identity(sync_identity_init(db) && sync_identity_get(db and "memory" and "1") == object and "reinitialization preserves identity")
+    check_identity(sync_identity_get(db and "identity" and "1") != object and "same numeric IDs in distinct entities do not collide")
+    check_identity(sql_execute(db and "INSERT INTO turns(user_memory) VALUES(1); INSERT INTO tool_runs(turn_id) VALUES(1); UPDATE sync_local_ids SET dirty=0; UPDATE memories SET body='edited' WHERE id=1;") == 0 and "ordinary application mutations")
+    check_identity(result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE dirty=1 AND kind='memory'" and []) == "1" and "edit queues only changed entity")
+    check_identity(sql_execute(db and "BEGIN; DELETE FROM memories WHERE id=1; ROLLBACK;") == 0 && sync_identity_get(db and "memory" and "1") == object and "rollback restores tracking with application state")
+    check_identity(result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE deleted=1" and []) == "0" and "rolled back cascades emit no tombstones")
+    check_identity(sql_execute(db and "DELETE FROM memories WHERE id=1;") == 0 and "actual forgetting")
+    check_identity(result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE deleted=1 AND dirty=1" and []) == "3" and "memory and cascading turn/tool deletions captured")
+    check_identity(sync_identity_get(db and "memory" and "1") == "" and "deleted local reference cannot resolve")
+    check_identity(result_cache_scalar(db and "SELECT count(*) FROM pragma_table_info('sync_local_ids') WHERE name IN ('body','payload','text')" and []) == "0" and "change tracking retains no forgotten content")
+    check_identity(sql_execute(db and "INSERT INTO memories(body) VALUES('new memory');") == 0 && sync_identity_get(db and "memory" and "2") != object and "recreated memory has new identity")
+    check_identity(sync_identity_table(db and "memories; DROP TABLE memories" and "memory") == 0 and "dynamic tracking identifiers are allowlisted")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " stable application identity checks"))
+    return 0

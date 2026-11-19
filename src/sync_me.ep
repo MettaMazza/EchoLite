@@ -1,0 +1,60 @@
+# Import historical Me revisions without selecting them as the active identity.
+import "sync_projection"
+import "identity_active"
+
+define sync_me_validate with db and payload returning Str:
+    if result_cache_scalar(db and "SELECT (SELECT count(*)=5 AND count(DISTINCT key)=5 AND min(key IN ('schema','body','reason','created','sources')) FROM json_each(p)) AND json_type(p,'$.schema')='integer' AND json_extract(p,'$.schema')=1 AND json_type(p,'$.body')='text' AND length(trim(json_extract(p,'$.body')))>0 AND length(CAST(json_extract(p,'$.body') AS BLOB))<=16000 AND json_type(p,'$.reason')='text' AND json_type(p,'$.created')='text' AND json_type(p,'$.sources')='array' FROM (SELECT ? p)" and [payload]) != "1":
+        return "Invalid identity history snapshot"
+    if result_cache_scalar(db and "SELECT count(*)=count(DISTINCT value) AND coalesce(min(type='text' AND length(value)=32 AND value NOT GLOB '*[^0-9a-f]*'),1) FROM json_each(?,'$.sources')" and [payload]) != "1":
+        return "Invalid identity source references"
+    if result_cache_scalar(db and "SELECT count(*) FROM json_each(?,'$.sources') s LEFT JOIN sync_local_ids i ON i.object=s.value AND i.kind='memory' AND i.deleted=0 LEFT JOIN memories m ON m.id=i.local_id WHERE m.id IS NULL" and [payload]) != "0":
+        return "Waiting for identity source memories"
+    return ""
+
+define sync_me_apply with db and object and payload returning Str:
+    set problem to sync_me_validate(db and payload)
+    if problem != "":
+        return problem
+    set local_id to result_cache_scalar(db and "SELECT local_id FROM sync_local_ids WHERE object=? AND kind='identity' AND deleted=0" and [object])
+    if local_id == "":
+        if result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE object=?" and [object]) != "0":
+            return "Identity mapping is deleted or incompatible"
+        set local_id to result_cache_scalar(db and "SELECT max(coalesce((SELECT max(id) FROM me_versions),0),coalesce((SELECT seq FROM sqlite_sequence WHERE name='me_versions'),0),coalesce((SELECT max(local_id) FROM sync_local_ids WHERE kind='identity'),0))+1" and [])
+        if sync_execute(db and "INSERT INTO sync_local_ids(kind,local_id,object,dirty) VALUES('identity',?,?,0)" and [local_id,object]) == 0:
+            return "Cannot allocate historical identity mapping"
+        if sync_execute(db and "INSERT INTO me_versions(id,body,reason,created) SELECT ?,json_extract(p,'$.body'),json_extract(p,'$.reason'),json_extract(p,'$.created') FROM (SELECT ? p)" and [local_id,payload]) == 0:
+            return "Cannot insert historical identity"
+    else:
+        if result_cache_scalar(db and "SELECT body=json_extract(p,'$.body') AND reason=json_extract(p,'$.reason') AND created=json_extract(p,'$.created') FROM me_versions,(SELECT ? p) WHERE id=?" and [payload,local_id]) != "1":
+            return "Identity revision content is immutable; retain a separate revision"
+    if sync_execute(db and "DELETE FROM me_sources WHERE version=?" and [local_id]) == 0 || sync_execute(db and "INSERT INTO me_sources(version,memory) SELECT ?,i.local_id FROM json_each(?,'$.sources') s JOIN sync_local_ids i ON i.object=s.value AND i.kind='memory' AND i.deleted=0" and [local_id,payload]) == 0:
+        return "Cannot restore identity evidence links"
+    return ""
+
+define sync_project_me with db and object returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot lock identity history projection")
+    set problem to ""
+    set versions to sql_query_params(db and "SELECT v.payload FROM sync_versions v JOIN sync_objects o ON o.id=v.object WHERE o.id=? AND o.kind='identity' AND o.deleted=0" and [object])
+    if length_list(versions) != 1:
+        set problem to "Identity history needs conflict or deletion reconciliation"
+    else if result_cache_scalar(db and "SELECT count(*) FROM sync_local_ids WHERE object=? AND (dirty=1 OR deleted=1)" and [object]) != "0":
+        set problem to "Local identity changes need reconciliation"
+    else if result_cache_scalar(db and "SELECT applied_heads FROM sync_local_ids WHERE object=?" and [object]) == sync_heads(db and object):
+        set problem to ""
+    else:
+        if identity_active_init(db) == 0 || sql_execute(db and "UPDATE identity_control SET importing=1 WHERE singleton=1; UPDATE sync_meta SET value='1' WHERE key='projecting';") != 0:
+            set problem to "Cannot isolate imported identity history"
+        else:
+            set problem to sync_me_apply(db and object and get_list(get_list(versions and 0) and 0))
+            if problem == "":
+                if sync_execute(db and "UPDATE sync_local_ids SET dirty=0,applied_heads=? WHERE object=?" and [sync_heads(db and object),object]) == 0:
+                    set problem to "Cannot acknowledge historical identity"
+    if problem == "" && sql_execute(db and "UPDATE identity_control SET importing=0 WHERE singleton=1; UPDATE sync_meta SET value='0' WHERE key='projecting';") != 0:
+        set problem to "Cannot finish identity history projection"
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        if problem == "":
+            set problem to "Cannot commit historical identity"
+        return result_cache_error(problem)
+    return result_cache_scalar(db and "SELECT json_object('status','ok','version',local_id,'object',object) FROM sync_local_ids WHERE object=?" and [object])

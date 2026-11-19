@@ -1,0 +1,15 @@
+import "../src/native_conversation"
+import "os"
+
+define main:
+    set db to sql_open(":memory:")
+    set settings to "{\"max_tokens\":8192,\"reasoning_budget_tokens\":-1}"
+    set payload to conversation_payload(db and "[]" and "{}" and settings)
+    if result_cache_scalar(db and "SELECT json_extract(p,'$.temperature')=1.0 AND json_extract(p,'$.top_p')=0.95 AND json_extract(p,'$.top_k')=20 AND json_extract(p,'$.min_p')=0.0 AND json_extract(p,'$.presence_penalty')=1.5 AND json_extract(p,'$.repeat_penalty')=1.0 AND json_extract(p,'$.max_tokens')=8192 AND json_extract(p,'$.reasoning_budget_tokens')=-1 AND json_extract(p,'$.stream')=1 FROM (SELECT ? p)" and [payload]) != "1":
+        return 1
+    set old to result_cache_scalar(db and "SELECT json_remove(json_set(?,'$.temperature',0),'$.top_p','$.top_k','$.min_p','$.presence_penalty','$.repeat_penalty')" and [payload])
+    if sha256(payload) == sha256(old):
+        return 1
+    sql_close(db)
+    display "PASS: recommended sampling, preserved reasoning/output settings, distinct cache input"
+    return 0

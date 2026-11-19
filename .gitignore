@@ -39,3 +39,18 @@ evidence/user-journey-*/component-state/
 !/tests/*.ep
 !/tests/*.sb
 !/tests/fixtures/
+
+# Native Android source; generated binaries and signing material stay local.
+!/src/android/
+/src/android/*
+!/src/android/*.ep
+*.apk
+*.keystore
+*.jks
+/android/.build/
+
+# Installed distribution receipts and bundled USB tools
+/.installed/
+/tools/
+*.verified
+/config/wikipedia-source.json

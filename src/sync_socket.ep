@@ -1,0 +1,183 @@
+# Bounded framed transport for explicitly paired devices. Numeric private IPv4
+# endpoints only; USB forwarding uses loopback. Authentication happens before
+# accepting a large sync page. All socket operations have monotonic deadlines.
+import "sync_pair"
+import "transport"
+
+define sync_address with host and port and address:
+    if port < 1024 || port > 65535:
+        return 0
+    set parts to string_split(host and ".")
+    if length_list(parts) != 4:
+        return 0
+    set i to 0
+    repeat while i < 4:
+        set part to get_list(parts and i)
+        set value to transport_number(part and 10 and 255)
+        if value < 0 || string_equals(part and int_to_string(value)) == 0:
+            return 0
+        poke_byte(address and 4 + i and value)
+        set i to i + 1
+    set first to peek_byte(address and 4)
+    set second to peek_byte(address and 5)
+    if first != 127 && first != 10 && (first != 192 || second != 168) && (first != 172 || second < 16 || second > 31) && (first != 169 || second != 254):
+        return 0
+    poke_byte(address and 0 and 16)
+    poke_byte(address and 1 and 2)
+    if native_android():
+        poke_byte(address and 0 and 2)
+        poke_byte(address and 1 and 0)
+    poke_byte(address and 2 and port / 256)
+    poke_byte(address and 3 and port % 256)
+    return 1
+
+define sync_socket_configure with fd:
+    if native_fcntl_int(fd and 4 and 4) != 0 || native_fcntl_int(fd and 2 and 1) != 0:
+        return 0
+    if native_android() == 0:
+        set option to alloc_bytes(4)
+        transport_u32(option and 0 and 1)
+        set result to ep_dlcall5(ep_dlsym(native_system() and "setsockopt") and fd and 65535 and 4130 and option and 4)
+        free_bytes(option)
+        if result != 0:
+            return 0
+    return 1
+
+define sync_socket_close with fd:
+    if fd >= 0:
+        ep_dlcall1(ep_dlsym(native_system() and "close") and fd)
+    return 0
+
+define sync_socket_open with host and port and listening:
+    set address to alloc_bytes(16)
+    if sync_address(host and port and address) == 0:
+        free_bytes(address)
+        return 0 - 1
+    set libc to native_system()
+    set fd to native_signed_int(ep_dlcall3(ep_dlsym(libc and "socket") and 2 and 1 and 0))
+    if fd < 0:
+        free_bytes(address)
+        return 0 - 1
+    set valid to sync_socket_configure(fd)
+    set level to 65535
+    set error_option to 4103
+    set reuse_option to 4
+    set progress_error to 36
+    if native_android():
+        set level to 1
+        set error_option to 4
+        set reuse_option to 2
+        set progress_error to 115
+    set option to alloc_bytes(4)
+    if listening && valid:
+        transport_u32(option and 0 and 1)
+        set valid to ep_dlcall5(ep_dlsym(libc and "setsockopt") and fd and level and reuse_option and option and 4) == 0
+        if valid:
+            set valid to ep_dlcall3(ep_dlsym(libc and "bind") and fd and address and 16) == 0
+        if valid:
+            set valid to ep_dlcall2(ep_dlsym(libc and "listen") and fd and 4) == 0
+    else if valid:
+        set result to ep_dlcall3(ep_dlsym(libc and "connect") and fd and address and 16)
+        if result != 0:
+            set valid to transport_errno(libc) == progress_error
+            set pollfd to alloc_bytes(8)
+            if valid:
+                set valid to transport_wait(libc and pollfd and fd and 4 and transport_now(libc) + 3000) > 0
+            if valid:
+                transport_u32(address and 0 and 4)
+                set valid to ep_dlcall5(ep_dlsym(libc and "getsockopt") and fd and level and error_option and option and address) == 0 && process_integer(option and 4) == 0
+            free_bytes(pollfd)
+    free_bytes(option)
+    free_bytes(address)
+    if valid == 0:
+        sync_socket_close(fd)
+        return 0 - 1
+    return fd
+
+define sync_socket_accept with listener and deadline:
+    set libc to native_system()
+    set pollfd to alloc_bytes(8)
+    set ready to transport_wait(libc and pollfd and listener and 1 and deadline)
+    free_bytes(pollfd)
+    if ready <= 0:
+        return 0 - 1
+    set fd to native_signed_int(ep_dlcall3(ep_dlsym(libc and "accept") and listener and 0 and 0))
+    if fd >= 0 && sync_socket_configure(fd) == 0:
+        sync_socket_close(fd)
+        return 0 - 1
+    return fd
+
+define sync_socket_io with fd and buffer and size and writing and deadline:
+    set libc to native_system()
+    set pollfd to alloc_bytes(8)
+    set event to 1
+    set operation to "recv"
+    set flags to 0
+    set again to 35
+    if native_android():
+        set again to 11
+    if writing:
+        set event to 4
+        set operation to "send"
+        if native_android():
+            set flags to 16384
+    set used to 0
+    set valid to 1
+    repeat while used < size && valid:
+        if transport_wait(libc and pollfd and fd and event and deadline) <= 0:
+            set valid to 0
+        else:
+            set amount to size - used
+            if amount > 65536:
+                set amount to 65536
+            set count to ep_dlcall4(ep_dlsym(libc and operation) and fd and buffer + used and amount and flags)
+            if count > 0 && count <= amount:
+                set used to used + count
+            else if count == 0:
+                set valid to 0
+            else if transport_errno(libc) != 4 && transport_errno(libc) != again:
+                set valid to 0
+    free_bytes(pollfd)
+    return valid
+
+define sync_frame_send with fd and frame and deadline:
+    set size to string_length(frame)
+    if size == 0 || size > 11186000:
+        return 0
+    set header to alloc_bytes(8)
+    poke_byte(header and 0 and 69)
+    poke_byte(header and 1 and 76)
+    poke_byte(header and 2 and 83)
+    poke_byte(header and 3 and 49)
+    set remaining to size
+    set i to 7
+    repeat while i >= 4:
+        poke_byte(header and i and remaining % 256)
+        set remaining to remaining / 256
+        set i to i - 1
+    set valid to sync_socket_io(fd and header and 8 and 1 and deadline)
+    free_bytes(header)
+    if valid:
+        set valid to sync_socket_io(fd and str_to_ptr(frame) and size and 1 and deadline)
+    return valid
+
+define sync_frame_receive with fd and limit and deadline returning Str:
+    set header to alloc_bytes(8)
+    set valid to sync_socket_io(fd and header and 8 and 0 and deadline)
+    if peek_byte(header and 0) != 69 || peek_byte(header and 1) != 76 || peek_byte(header and 2) != 83 || peek_byte(header and 3) != 49:
+        set valid to 0
+    set size to 0
+    set i to 4
+    repeat while i < 8:
+        set size to size * 256 + peek_byte(header and i)
+        set i to i + 1
+    free_bytes(header)
+    if valid == 0 || size == 0 || size > limit || size > 11186000:
+        return ""
+    set buffer to alloc_bytes(size + 1)
+    set frame to ""
+    if sync_socket_io(fd and buffer and size and 0 and deadline) && ep_dlcall3(ep_dlsym(native_system() and "memchr") and buffer and 0 and size) == 0:
+        poke_byte(buffer and size and 0)
+        set frame to ptr_to_str(buffer)
+    free_bytes(buffer)
+    return frame

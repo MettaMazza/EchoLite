@@ -1,0 +1,17 @@
+# Active identity is an explicit selection, not the largest history row ID.
+# Insertions activate local revisions; imported history is stored while importing=1
+# inside a transaction. Deleting a selected revision falls back through actual
+# selections, never through unrelated imported history.
+import "result_cache"
+
+define identity_active_init with db:
+    set code to sql_execute(db and "CREATE TABLE IF NOT EXISTS identity_control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),importing INTEGER NOT NULL DEFAULT 0 CHECK(importing IN (0,1)),initialized INTEGER NOT NULL DEFAULT 0 CHECK(initialized IN (0,1))); INSERT OR IGNORE INTO identity_control(singleton) VALUES(1); CREATE TABLE IF NOT EXISTS identity_selections(sequence INTEGER PRIMARY KEY AUTOINCREMENT,version INTEGER NOT NULL REFERENCES me_versions(id) ON DELETE CASCADE); INSERT INTO identity_selections(version) SELECT id FROM me_versions WHERE (SELECT initialized FROM identity_control WHERE singleton=1)=0 ORDER BY id; UPDATE identity_control SET initialized=1 WHERE singleton=1; CREATE TRIGGER IF NOT EXISTS identity_local_selection AFTER INSERT ON me_versions WHEN (SELECT importing FROM identity_control WHERE singleton=1)=0 BEGIN INSERT INTO identity_selections(version) VALUES(new.id); END; CREATE VIEW IF NOT EXISTS active_me AS SELECT m.id,m.body,m.reason,m.created FROM identity_selections s JOIN me_versions m ON m.id=s.version ORDER BY s.sequence DESC LIMIT 1;")
+    return code == 0
+
+define identity_active_id with db returning Str:
+    set version to ""
+    if result_cache_scalar(db and "SELECT count(*) FROM sqlite_master WHERE type='view' AND name='active_me'" and []) == "1":
+        set version to result_cache_scalar(db and "SELECT id FROM active_me" and [])
+    else:
+        set version to result_cache_scalar(db and "SELECT max(id) FROM me_versions" and [])
+    return version

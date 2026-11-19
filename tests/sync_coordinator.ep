@@ -1,0 +1,63 @@
+import "../src/sync_coordinator"
+import "os"
+set checks to 0
+
+define coordinator_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define coordinator_ok with db and result:
+    return result_cache_scalar(db and "SELECT coalesce(json_extract(?,'$.status'),'ok')" and [result]) == "ok"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set a to sql_open(concat(get_list(args and 1) and "/memory.sqlite3"))
+    set home to get_list(args and 2)
+    set b to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(a and "PRAGMA foreign_keys=ON")
+    sql_execute(b and "PRAGMA foreign_keys=ON")
+    coordinator_assert(sync_coordinator_init(a) && sync_coordinator_init(b) and "coordinator schemas")
+    coordinator_assert(sql_execute(a and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','test','user','Question'),('episodic','test','assistant','Answer'); INSERT INTO derivations VALUES(1,2); INSERT INTO turns(project,user_memory,reply_memory,me_version,status) VALUES('test',1,2,1,'completed'); INSERT INTO tool_runs(turn_id,name,arguments,status,observation,request_memory) VALUES(1,'calculator','19*23','completed',2,1); INSERT INTO generation_rounds VALUES(1,0,'{\"reasoning\":\"Calculation checked\",\"completion_tokens\":\"3\"}');") == 0 and "conversation with dependent records")
+    set captured to sync_capture_batch(a)
+    coordinator_assert(coordinator_ok(a and captured) && result_cache_scalar(a and "SELECT json_extract(?,'$.pending')" and [captured]) == "0" and concat("batch captured all records: " and captured))
+    set peer to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    coordinator_assert(coordinator_ok(b and sync_import(b and peer and sync_export(a and "0"))) and "imported complete replica page")
+    coordinator_assert(coordinator_ok(b and sync_project_batch(b and home and home and "" and 18997)) == 0 and "projection requires maintenance")
+    coordinator_assert(coordinator_ok(b and state_lease(home and "maintenance")) and "maintenance lease acquired")
+    set count to 0
+    repeat while count < 3:
+        coordinator_assert(coordinator_ok(b and sync_project_batch(b and home and home and "" and 18997)) and "dependency projection pass")
+        set count to count + 1
+    coordinator_assert(result_cache_scalar(b and "SELECT (SELECT count(*) FROM memories)=2 AND (SELECT count(*) FROM turns)=1 AND (SELECT count(*) FROM tool_runs)=1 AND (SELECT count(*) FROM generation_rounds)=1" and []) == "1" and "whole conversation reaches application tables")
+    coordinator_assert(result_cache_scalar(b and "SELECT json_extract(response,'$.reasoning') FROM generation_rounds" and []) == "Calculation checked" and "thinking data preserved")
+    set child to sync_identity_get(a and "memory" and "2")
+    set child_id to result_cache_scalar(b and "SELECT local_id FROM sync_local_ids WHERE object=?" and [child])
+    sql_execute_params(b and "UPDATE memories SET body='Local edit' WHERE id=?" and [child_id])
+    sql_execute(a and "UPDATE memories SET body='Remote edit' WHERE id=2")
+    coordinator_assert(coordinator_ok(a and sync_capture_batch(a)) and "new remote edit captured")
+    set cursor to result_cache_scalar(b and "SELECT cursor FROM sync_cursors WHERE peer=?" and [peer])
+    coordinator_assert(coordinator_ok(b and sync_import(b and peer and sync_export(a and cursor))) and "concurrent edit received")
+    coordinator_assert(coordinator_ok(b and sync_project_batch(b and home and home and "" and 18997)) && result_cache_scalar(b and "SELECT body FROM memories WHERE id=?" and [child_id]) == "Local edit" && result_cache_scalar(b and "SELECT length(issue)>0 FROM sync_work WHERE direction='project' AND object=?" and [child]) == "1" and "local edit retained with durable deferred issue")
+    sql_close(b)
+    set b to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(b and "PRAGMA foreign_keys=ON")
+    coordinator_assert(result_cache_scalar(b and "SELECT length(issue)>0 FROM sync_work WHERE direction='project' AND object=?" and [child]) == "1" and "deferred issue survives reopen")
+    set root to sync_identity_get(a and "memory" and "1")
+    coordinator_assert(coordinator_ok(a and sync_forget(a and root)) and "root tombstone")
+    set cursor to result_cache_scalar(b and "SELECT cursor FROM sync_cursors WHERE peer=?" and [peer])
+    coordinator_assert(coordinator_ok(b and sync_import(b and peer and sync_export(a and cursor))) && coordinator_ok(b and sync_project_batch(b and home and home and "" and 18997)) and "received forgetting fully reconciled")
+    coordinator_assert(result_cache_scalar(b and "SELECT (SELECT count(*) FROM memories)+(SELECT count(*) FROM turns)+(SELECT count(*) FROM generation_rounds)+(SELECT count(*) FROM sync_cleanup)" and []) == "0" and "forgetting removes closure and completes runtime cleanup")
+    coordinator_assert(sql_execute(a and "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<70) INSERT INTO memories(layer,project,source,body) SELECT 'episodic','bulk','user','Bulk '||x FROM n") == 0 and "large edit queue fixture")
+    set batch to sync_capture_batch(a)
+    coordinator_assert(coordinator_ok(a and batch) && result_cache_scalar(a and "SELECT json_extract(?,'$.examined')=64 AND json_extract(?,'$.pending')=6" and [batch,batch]) == "1" and "capture work bounded to 64 records")
+    set batch to sync_capture_batch(a)
+    coordinator_assert(coordinator_ok(a and batch) && result_cache_scalar(a and "SELECT json_extract(?,'$.examined')=6 AND json_extract(?,'$.pending')=0" and [batch,batch]) == "1" and "remaining records captured on next batch")
+    sql_close(a)
+    sql_close(b)
+    display concat("PASS: " and concat(int_to_string(checks) and " synchronization coordinator checks"))
+    return 0

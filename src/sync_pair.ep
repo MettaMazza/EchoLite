@@ -1,0 +1,112 @@
+# Pair credentials and anti-replay counters are local-only state. Installation is
+# an explicit provisioning operation, never an action accepted over the sync wire.
+import "sync_crypto"
+
+define sync_pair_init with db:
+    if sync_store_init(db) == 0:
+        return 0
+    set code to sql_execute(db and "PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS sync_peers(peer TEXT PRIMARY KEY,label TEXT NOT NULL,secret TEXT NOT NULL,fingerprint TEXT NOT NULL,enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),tx_request INTEGER NOT NULL DEFAULT 0,tx_response INTEGER NOT NULL DEFAULT 0,rx_request INTEGER NOT NULL DEFAULT 0,rx_response INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS sync_retired_keys(fingerprint TEXT PRIMARY KEY,peer TEXT NOT NULL);")
+    return code == 0
+
+define sync_pair_abort with db and message returning Str:
+    sql_execute(db and "ROLLBACK")
+    return result_cache_error(message)
+
+define sync_pair_install with db and peer and label and secret returning Str:
+    set bytes to alloc_bytes(32)
+    set valid to sync_unhex(secret and bytes and 32)
+    if sync_crypto_library() != 0:
+        ep_dlcall2(ep_dlsym(SYNC_CRYPTO and "OPENSSL_cleanse") and bytes and 32)
+    free_bytes(bytes)
+    if valid == 0 || sync_identifier(db and peer) == 0 || string_length(label) == 0 || string_length(label) > 80:
+        return result_cache_error("Invalid pairing identity, label or secret")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot begin device pairing")
+    set device to result_cache_scalar(db and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    if string_equals(peer and device):
+        return sync_pair_abort(db and "Cannot pair a device with itself")
+    set fingerprint to sha256(secret)
+    if result_cache_scalar(db and "SELECT count(*) FROM sync_retired_keys WHERE fingerprint=?" and [fingerprint]) != "0":
+        return sync_pair_abort(db and "A retired pairing secret cannot be reused")
+    set existing to result_cache_scalar(db and "SELECT fingerprint FROM sync_peers WHERE peer=? AND enabled=1" and [peer])
+    if existing != "":
+        if string_equals(existing and fingerprint) == 0:
+            return sync_pair_abort(db and "Revoke the existing pairing before replacing its secret")
+    else:
+        if result_cache_scalar(db and "SELECT count(*)<16 AND NOT EXISTS(SELECT 1 FROM sync_peers WHERE fingerprint=? AND enabled=1) FROM sync_peers WHERE enabled=1" and [fingerprint]) != "1":
+            return sync_pair_abort(db and "Pairing capacity reached or secret already assigned")
+        if sync_execute(db and "INSERT INTO sync_peers(peer,label,secret,fingerprint,enabled) VALUES(?,?,?,?,1) ON CONFLICT(peer) DO UPDATE SET label=excluded.label,secret=excluded.secret,fingerprint=excluded.fingerprint,enabled=1,tx_request=0,tx_response=0,rx_request=0,rx_response=0" and [peer,label,secret,fingerprint]) == 0:
+            return sync_pair_abort(db and "Cannot persist pairing")
+    if sql_execute(db and "COMMIT") != 0:
+        return sync_pair_abort(db and "Cannot commit device pairing")
+    return result_cache_scalar(db and "SELECT json_object('status','ok','peer',?,'fingerprint',?)" and [peer,fingerprint])
+
+define sync_pair_revoke with db and peer returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot begin pairing revocation")
+    if result_cache_scalar(db and "SELECT count(*) FROM sync_peers WHERE peer=?" and [peer]) != "1":
+        return sync_pair_abort(db and "Paired device does not exist")
+    if sync_execute(db and "INSERT OR IGNORE INTO sync_retired_keys SELECT fingerprint,peer FROM sync_peers WHERE peer=?" and [peer]) == 0 || sync_execute(db and "UPDATE sync_peers SET secret='',enabled=0 WHERE peer=?" and [peer]) == 0:
+        return sync_pair_abort(db and "Cannot persist pairing revocation")
+    if sql_execute(db and "COMMIT") != 0:
+        return sync_pair_abort(db and "Cannot commit pairing revocation")
+    return "{\"status\":\"ok\",\"text\":\"Device pairing revoked\"}"
+
+define sync_pair_wrap with db and peer and direction and reply_to and body returning Str:
+    if direction != "request" && direction != "response":
+        return result_cache_error("Invalid sync direction")
+    if (direction == "request" && reply_to != "") || (direction == "response" && string_length(reply_to) != 24):
+        return result_cache_error("Invalid request binding")
+    if string_length(body) > 8387584 || result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [body,body]) != "1":
+        return result_cache_error("Invalid sync message body")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot reserve sync message counter")
+    set secret to result_cache_scalar(db and "SELECT secret FROM sync_peers WHERE peer=? AND enabled=1" and [peer])
+    if secret == "":
+        return sync_pair_abort(db and "Device is not paired or its pairing was revoked")
+    set read_counter to "SELECT tx_request+1 FROM sync_peers WHERE peer=?"
+    set write_counter to "UPDATE sync_peers SET tx_request=? WHERE peer=?"
+    if direction == "response":
+        set read_counter to "SELECT tx_response+1 FROM sync_peers WHERE peer=?"
+        set write_counter to "UPDATE sync_peers SET tx_response=? WHERE peer=?"
+    set counter to result_cache_scalar(db and read_counter and [peer])
+    if result_cache_scalar(db and "SELECT CAST(? AS INTEGER) BETWEEN 1 AND 4294967295" and [counter]) != "1":
+        return sync_pair_abort(db and "Rotate this device pairing before sending more frames")
+    set device to result_cache_scalar(db and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set payload to result_cache_scalar(db and "SELECT json_object('counter',CAST(? AS INTEGER),'reply_to',?,'body',json(?))" and [counter,reply_to,body])
+    set frame to sync_seal(db and secret and device and peer and direction and payload)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')" and [frame]) != "1":
+        return sync_pair_abort(db and "Cannot encrypt paired sync message")
+    if sync_execute(db and write_counter and [counter,peer]) == 0 || sql_execute(db and "COMMIT") != 0:
+        return sync_pair_abort(db and "Cannot persist outgoing sync counter")
+    return frame
+
+define sync_pair_unwrap with db and peer and direction and reply_to and frame returning Str:
+    if direction != "request" && direction != "response":
+        return result_cache_error("Invalid sync direction")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot begin paired sync receive")
+    set secret to result_cache_scalar(db and "SELECT secret FROM sync_peers WHERE peer=? AND enabled=1" and [peer])
+    if secret == "":
+        return sync_pair_abort(db and "Device is not paired or its pairing was revoked")
+    set device to result_cache_scalar(db and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    set opened to sync_open(db and secret and peer and device and direction and frame)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [opened]) != "ok":
+        return sync_pair_abort(db and "Paired sync authentication failed")
+    set payload to result_cache_scalar(db and "SELECT json_extract(?,'$.payload')" and [opened])
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [payload,payload]) != "1":
+        return sync_pair_abort(db and "Invalid authenticated sync payload")
+    if result_cache_scalar(db and "SELECT json_type(?,'$.counter')='integer' AND json_extract(?,'$.counter') BETWEEN 1 AND 4294967295 AND json_type(?,'$.body')='object' AND json_extract(?,'$.reply_to')=?" and [payload,payload,payload,payload,reply_to]) != "1":
+        return sync_pair_abort(db and "Invalid counter or response does not match request")
+    set counter to result_cache_scalar(db and "SELECT json_extract(?,'$.counter')" and [payload])
+    set read_counter to "SELECT rx_request FROM sync_peers WHERE peer=?"
+    set write_counter to "UPDATE sync_peers SET rx_request=? WHERE peer=?"
+    if direction == "response":
+        set read_counter to "SELECT rx_response FROM sync_peers WHERE peer=?"
+        set write_counter to "UPDATE sync_peers SET rx_response=? WHERE peer=?"
+    set previous to result_cache_scalar(db and read_counter and [peer])
+    if result_cache_scalar(db and "SELECT CAST(? AS INTEGER)>CAST(? AS INTEGER)" and [counter,previous]) != "1":
+        return sync_pair_abort(db and "Replayed or out-of-order sync frame rejected")
+    if sync_execute(db and write_counter and [counter,peer]) == 0 || sql_execute(db and "COMMIT") != 0:
+        return sync_pair_abort(db and "Cannot persist incoming sync counter")
+    return result_cache_scalar(db and "SELECT json_object('status','ok','body',json(json_extract(?,'$.body')),'nonce',json_extract(?,'$.nonce'),'counter',CAST(? AS INTEGER))" and [payload,opened,counter])

@@ -1,0 +1,31 @@
+import "../src/sync_coordinator"
+import "../src/sync_startup"
+import "os"
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        return 1
+    set a to sql_open(concat(get_list(args and 1) and "/memory.sqlite3"))
+    set home to get_list(args and 2)
+    set b to sql_open(concat(home and "/memory.sqlite3"))
+    sync_coordinator_init(a)
+    sync_coordinator_init(b)
+    sql_execute(a and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','local','session','Mac conversation'); INSERT INTO sessions(memory,project) VALUES(last_insert_rowid(),'local');")
+    sql_execute(b and "INSERT INTO memories(layer,project,source,body) VALUES('episodic','local','session','Phone conversation'); INSERT INTO sessions(memory,project) VALUES(last_insert_rowid(),'local');")
+    sync_capture_batch(a)
+    sync_capture_batch(b)
+    set peer to result_cache_scalar(a and "SELECT value FROM sync_meta WHERE key='device'" and [])
+    sync_import(b and peer and sync_export(a and "0"))
+    state_lease(home and "maintenance")
+    sync_project_batch(b and home and home and "" and 18997)
+    if result_cache_scalar(b and "SELECT count(*) FROM sessions" and []) != "2":
+        display "FAIL: both device conversations must be visible"
+        return 2
+    if result_cache_scalar(b and "SELECT m.body FROM sessions s JOIN memories m ON m.id=s.memory WHERE s.closed IS NULL" and []) != "Phone conversation":
+        display "FAIL: remote sync replaced the active local conversation"
+        return 3
+    sync_project_batch(b and home and home and "" and 18997)
+    if result_cache_scalar(b and "SELECT count(*) FROM sessions" and []) != "2":
+        return 4
+    display "PASS: concurrent open sessions merge without duplicates or replacing local activity"
+    return 0

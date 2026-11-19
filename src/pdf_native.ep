@@ -28,8 +28,8 @@ define pdf_snapshot with db and path:
         set_list(result and 3 and "Cannot open local PDF")
         return result
     set info to alloc_bytes(144)
-    set valid to ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) == 0 && lease_integer(info and 4 and 2) / 4096 == 8
-    set size to lease_integer(info and 96 and 8)
+    set valid to ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) == 0 && native_stat_mode(info) / 4096 == 8
+    set size to native_stat_size(info)
     set signature to filesystem_signature(db and info)
     if size < 5 || size > 8388608:
         set valid to 0

@@ -1,0 +1,40 @@
+import "../src/sync_startup"
+import "os"
+set checks to 0
+
+define startup_assert with valid and label:
+    if valid == 0:
+        display concat("FAIL: " and label)
+        ep_exit(1)
+    set checks to checks + 1
+    return 0
+
+define startup_ok with result:
+    return string_contains(result and "\"status\":\"ok\"")
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 1
+    set home to get_list(args and 1)
+    startup_assert(sync_cleanup_pending(home) == 0 and "fresh state has no cleanup")
+    startup_assert(startup_ok(sync_command_lease(home and "shared" and home and "" and 18997)) && STATE_LEASE_FD >= 0 && WORKER_LEASE_FD < 0 and "fresh command retains shared lease")
+    sync_release_state()
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    startup_assert(sql_execute(db and "CREATE TABLE me_versions(body TEXT); INSERT INTO me_versions VALUES('Retained identity'); CREATE VIEW active_me AS SELECT body FROM me_versions; CREATE TABLE sync_cleanup(singleton INTEGER PRIMARY KEY,epoch TEXT); INSERT INTO sync_cleanup VALUES(1,'7');") == 0 and "restart pending fixture")
+    startup_assert(sync_cleanup_pending(home) == 1 and "pending cleanup detected")
+    sql_execute(db and "CREATE TRIGGER fail_cleanup BEFORE DELETE ON sync_cleanup BEGIN SELECT RAISE(ABORT,'injected failure'); END")
+    startup_assert(startup_ok(sync_command_lease(home and "shared" and home and "" and 18997)) == 0 && STATE_LEASE_FD < 0 && WORKER_LEASE_FD < 0 and "failure stops command and releases leases")
+    startup_assert(sync_cleanup_pending(home) == 1 and "failure remains pending across reopen")
+    sql_execute(db and "DROP TRIGGER fail_cleanup")
+    startup_assert(startup_ok(sync_command_lease(home and "shared" and home and "" and 18997)) && STATE_LEASE_FD >= 0 && WORKER_LEASE_FD < 0 and "restart completes cleanup and reacquires shared lease")
+    startup_assert(sync_cleanup_pending(home) == 0 && read_file(concat(home and "/Me.txt")) == "Retained identity" and "restart projects retained identity before command")
+    sync_release_state()
+    sql_execute(db and "INSERT INTO sync_cleanup VALUES(1,'8')")
+    startup_assert(startup_ok(sync_command_lease(home and "maintenance" and home and "" and 18997)) && STATE_LEASE_FD >= 0 && WORKER_LEASE_FD >= 0 and "restore maintenance retained after cleanup")
+    sync_release_state()
+    sql_execute(db and "DROP TABLE sync_cleanup; CREATE TABLE sync_cleanup(broken TEXT); INSERT INTO sync_cleanup VALUES('bad')")
+    startup_assert(startup_ok(sync_command_lease(home and "shared" and home and "" and 18997)) == 0 && STATE_LEASE_FD < 0 and "malformed pending state prevents command")
+    sql_close(db)
+    display concat("PASS: " and concat(int_to_string(checks) and " synchronized startup checks"))
+    return 0

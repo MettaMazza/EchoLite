@@ -4,12 +4,12 @@ import "backup_create"
 define restore_ordinary with dir and name:
     set libc to native_system()
     set info to alloc_bytes(144)
-    set code to ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and 32)
+    set code to ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and native_at_nofollow())
     set valid to 0
     if code != 0:
         set valid to transport_errno(libc) == 2
     else:
-        set valid to lease_integer(info and 4 and 2) / 4096 == 8 && lease_integer(info and 16 and 4) == ep_dlcall0(ep_dlsym(libc and "getuid")) && lease_integer(info and 6 and 2) == 1
+        set valid to native_stat_mode(info) / 4096 == 8 && native_stat_owner(info) == ep_dlcall0(ep_dlsym(libc and "getuid")) && native_stat_links(info) == 1
     free_bytes(info)
     return valid
 
@@ -95,7 +95,7 @@ define restore_copy with source_dir and source and target_dir and target:
     set space to alloc_bytes(128)
     set valid to snapshot_private(input and before) && ep_dlcall2(ep_dlsym(libc and "fstatvfs") and target_dir and space) == 0
     if valid == 1:
-        set valid to lease_integer(space and 24 and 4) * lease_integer(space and 8 and 8) >= lease_integer(before and 96 and 8) + 67108864
+        set valid to native_available_bytes(space) >= native_stat_size(before) + 67108864
     free_bytes(space)
     set output to 0 - 1
     if valid == 1:
@@ -119,11 +119,11 @@ define restore_copy with source_dir and source and target_dir and target:
             else:
                 set valid to restore_write_all(output and buffer and count)
                 set total to total + count
-    if snapshot_private(input and after) == 0 || total != lease_integer(before and 96 and 8) || lease_integer(before and 96 and 8) != lease_integer(after and 96 and 8):
+    if snapshot_private(input and after) == 0 || total != native_stat_size(before) || native_stat_size(before) != native_stat_size(after):
         set valid to 0
     set field to 48
     repeat while field <= 72:
-        if lease_integer(before and field and 8) != lease_integer(after and field and 8):
+        if native_stat_time(before and field) != native_stat_time(after and field):
             set valid to 0
         set field to field + 8
     ep_dlcall1(ep_dlsym(libc and "close") and input)
@@ -153,7 +153,10 @@ define restore_identity with database and dir:
     set db to backup_sql_open(database and 16777217)
     if db == 0:
         return 0
-    set body to health_scalar(db and "SELECT body FROM me_versions ORDER BY id DESC LIMIT 1" and 16385)
+    set statement to "SELECT body FROM me_versions ORDER BY id DESC LIMIT 1"
+    if health_scalar(db and "SELECT count(*) FROM sqlite_master WHERE type='view' AND name='active_me'" and 16) == "1":
+        set statement to "SELECT body FROM active_me"
+    set body to health_scalar(db and statement and 16385)
     sql_close(db)
     if body == "":
         return 0
@@ -230,7 +233,7 @@ define restore_state with home and operation and identifier returning Str:
         set expected to concat(identifier and concat("\n" and concat(guard and "\n")))
         set marker to restore_read(dir and ".restore.pending" and 98 and 1)
         set info to alloc_bytes(144)
-        set code to ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and ".restore.pending" and info and 32)
+        set code to ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and ".restore.pending" and info and native_at_nofollow())
         set absent to code != 0 && transport_errno(libc) == 2
         free_bytes(info)
         set pending to 0

@@ -1,0 +1,96 @@
+# Shared native device cards; commands run through the core child process.
+import "ui_style"
+import "result_cache"
+import "text_layout"
+import "sync_pairing_io"
+set UI_UNPAIR_CONFIRM to ""
+
+define ui_devices_rows with db:
+    if db == 0:
+        return create_list()
+    if result_cache_scalar(db and "SELECT count(*) FROM sqlite_master WHERE name='sync_endpoints'" and []) != "1":
+        return create_list()
+    set rows to sql_query_params(db and "SELECT p.peer,p.label,coalesce((SELECT CASE transport WHEN 'wifi' THEN 'Wi-Fi' ELSE 'USB' END||' / '||CASE last_result WHEN 'transferred' THEN 'last transfer received' WHEN 'never' THEN 'not yet connected' ELSE 'unavailable' END FROM sync_endpoints WHERE peer=p.peer ORDER BY coalesce(last_attempt,'') DESC,(last_result='transferred') DESC,transport LIMIT 1),'No connection address'),coalesce((SELECT last_attempt FROM sync_endpoints WHERE peer=p.peer ORDER BY last_attempt DESC LIMIT 1),'Never connected') FROM sync_peers p WHERE enabled=1 ORDER BY label,peer LIMIT 16" and [])
+    return rows
+
+define ui_devices_button with text and x and y and width and clicked and enabled and surface and mint:
+    ui_frame(x and y and width and 32 and surface and ui_color(46 and 54 and 62))
+    font_draw(text and x + 12 and y + 10 and 12 and mint)
+    return enabled && clicked && ui_mouse_x() >= x && ui_mouse_x() < x + width && ui_mouse_y() >= y && ui_mouse_y() < y + 32
+
+define ui_devices_draw with db and home and left and width and height and scroll and clicked and enabled and surface and white and mint and muted:
+    set command to create_list()
+    font_draw("Your connected devices" and left + 24 and 143 and 24 and white)
+    selectable_text("Private sync over USB or Wi-Fi. Your models stay on each device." and left + 24 and 184 and width - 48 and 12 and muted)
+    set action_y to editor_max(216 and 196 + length_list(layout_lines("Private sync over USB or Wi-Fi. Your models stay on each device." and width - 48 and 12)) * 21)
+    set rows to ui_devices_rows(db)
+    set device_label to "EchoLite Mac"
+    if native_android():
+        set device_label to "EchoLite Android"
+    if ui_devices_button("New pairing" and left + 24 and action_y and 104 and clicked and enabled and surface and mint):
+        append_list(command and "sync-invite")
+        append_list(command and device_label)
+    if ui_devices_button("Paste code" and left + 136 and action_y and 104 and clicked and enabled and surface and mint):
+        if sync_pairing_stage(home and editor_clipboard()):
+            append_list(command and "sync-pair-paste")
+            append_list(command and device_label)
+    if ui_devices_button("Refresh" and left + 248 and action_y and 88 and clicked and enabled and surface and mint):
+        append_list(command and "sync-devices")
+    set stage to ""
+    set payload to ""
+    if db != 0 && result_cache_scalar(db and "SELECT count(*) FROM sqlite_master WHERE name='sync_pairing_output'" and []) == "1":
+        set stage to result_cache_scalar(db and "SELECT stage FROM sync_pairing_output WHERE expires>unixepoch()" and [])
+        set payload to result_cache_scalar(db and "SELECT payload FROM sync_pairing_output WHERE expires>unixepoch()" and [])
+    set instructions to "Start a pairing here, or paste a code from your other device."
+    set top to 320
+    if stage != "":
+        set instructions to "Copy this invitation and paste it in Devices on your other device. Then paste its confirmation here. Codes expire after 10 minutes."
+        if stage == "confirmation":
+            set instructions to "Copy this confirmation and paste it on the device that created the invitation to finish pairing."
+        if ui_devices_button("Copy code" and left + 24 and action_y + 46 and 112 and clicked and enabled and surface and mint):
+            ep_dlcall1(ep_dlsym(RAYLIB_HANDLE and "SetClipboardText") and payload)
+        if ui_devices_button("Dismiss" and left + 146 and action_y + 46 and 100 and clicked and enabled and surface and muted):
+            append_list(command and "sync-pair-cancel")
+        set top to 380
+    set instruction_y to action_y + 50
+    if stage != "":
+        set instruction_y to action_y + 94
+    selectable_text(instructions and left + 24 and instruction_y and width - 48 and 12 and muted)
+    set top to instruction_y + length_list(layout_lines(instructions and width - 48 and 12)) * 21 + 20
+    set visible_height to height - top - 64
+    set scroll to editor_min(scroll and editor_max(0 and length_list(rows) * 174 - visible_height))
+    ui_scissor(left + 20 and top and width - 40 and visible_height)
+    if length_list(rows) == 0:
+        ui_frame(left + 24 and top and width - 48 and 154 and surface and ui_color(46 and 54 and 62))
+        font_draw("No paired devices" and left + 44 and top + 24 and 18 and white)
+        selectable_text("Paired Macs and Android phones appear here. Each keeps its own local memory and model." and left + 44 and top + 62 and width - 88 and 14 and muted)
+    set index to 0
+    repeat while index < length_list(rows):
+        set row to get_list(rows and index)
+        set peer to get_list(row and 0)
+        set y to top + index * 174 - scroll
+        ui_frame(left + 24 and y and width - 48 and 158 and surface and ui_color(46 and 54 and 62))
+        font_draw(ui_text_fit(get_list(row and 1) and width - 90 and 18) and left + 44 and y + 18 and 18 and white)
+        font_draw(ui_text_fit(get_list(row and 2) and width - 90 and 12) and left + 44 and y + 48 and 12 and mint)
+        set last_time to get_list(row and 3)
+        if last_time != "Never connected":
+            set last_time to concat(last_time and " UTC")
+        font_draw(last_time and left + 44 and y + 70 and 11 and muted)
+        set can_click to clicked && ui_mouse_y() >= top && ui_mouse_y() < top + visible_height
+        if ui_devices_button("Sync now" and left + 44 and y + 108 and 110 and can_click and enabled and surface and mint):
+            append_list(command and "sync-now")
+            append_list(command and peer)
+            set UI_UNPAIR_CONFIRM to ""
+        set unpair_label to "Unpair"
+        if UI_UNPAIR_CONFIRM == peer:
+            set unpair_label to "Confirm unpair"
+        if ui_devices_button(unpair_label and left + 166 and y + 108 and 138 and can_click and enabled and surface and muted):
+            if UI_UNPAIR_CONFIRM == peer:
+                append_list(command and "sync-unpair")
+                append_list(command and peer)
+                set UI_UNPAIR_CONFIRM to ""
+            else:
+                set UI_UNPAIR_CONFIRM to peer
+        set index to index + 1
+    ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
+    return command

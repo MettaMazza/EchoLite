@@ -1,0 +1,138 @@
+# Dedicated local Kokoro voice model. Persistent WAV cache, no system/cloud TTS.
+import "speech_model"
+import "android/input"
+import "transport"
+set SPEECH_ROOT to ""
+set SPEECH_WORKER to ""
+set SPEECH_LIBRARY to ""
+set SPEECH_TURN to ""
+set SPEECH_ERROR to ""
+set SPEECH_PREFIX to ""
+set SPEECH_GENERATOR to 0
+set SPEECH_PID to 0
+set SPEECH_STREAM to 0
+set SPEECH_INDEX to 0
+set SPEECH_NEXT to 0
+set SPEECH_PLAY_UNTIL to 0
+
+define speech_configure with root and native_directory:
+    set SPEECH_ROOT to root
+    set SPEECH_WORKER to concat(root and "/bin/echolite-speech")
+    set SPEECH_LIBRARY to concat(root and "/models/voice/runtime/libsherpa-onnx-c-api.dylib")
+    if native_android():
+        set SPEECH_WORKER to concat(native_directory and "/libecholite-speech.so")
+        set SPEECH_LIBRARY to concat(native_directory and "/libsherpa-onnx-c-api.so")
+    return 0
+
+define speech_stop:
+    if SPEECH_GENERATOR > 0:
+        ep_dlcall2(ep_dlsym(native_system() and "kill") and SPEECH_GENERATOR and 15)
+        process_poll(SPEECH_GENERATOR)
+        set SPEECH_GENERATOR to 0
+    if SPEECH_PID > 0:
+        ep_dlcall2(ep_dlsym(native_system() and "kill") and SPEECH_PID and 15)
+        process_poll(SPEECH_PID)
+        set SPEECH_PID to 0
+    if SPEECH_STREAM != 0:
+        ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_DestroyAudioStream") and SPEECH_STREAM)
+        set SPEECH_STREAM to 0
+    set SPEECH_TURN to ""
+    return 0
+
+define speech_start with turn and text:
+    speech_stop()
+    set SPEECH_ERROR to ""
+    set directory to concat(get_env("ECHOLITE_HOME") and "/speech-cache")
+    ep_dlcall2(ep_dlsym(native_system() and "mkdir") and directory and 448)
+    set SPEECH_PREFIX to concat(directory and concat("/" and speech_cache_key(text)))
+    set input to concat(SPEECH_PREFIX and ".txt")
+    ep_dlcall1(ep_dlsym(native_system() and "umask") and 63)
+    if write_file(input and text) != 1:
+        set SPEECH_ERROR to "Could not prepare local speech."
+        return 0
+    if file_exists(concat(SPEECH_PREFIX and ".done")) == 0:
+        set model to concat(SPEECH_ROOT and "/models/voice/kokoro")
+        if file_exists(concat(model and "/model.int8.onnx")) == 0:
+            set SPEECH_ERROR to "The local Kokoro voice model is not installed."
+            return 0
+        set log to native_open(concat(SPEECH_PREFIX and ".log") and 1537 and 384)
+        set SPEECH_GENERATOR to process_launch(SPEECH_WORKER and [model,SPEECH_LIBRARY,input,SPEECH_PREFIX] and log)
+        ep_dlcall1(ep_dlsym(native_system() and "close") and log)
+        if SPEECH_GENERATOR <= 0:
+            set SPEECH_ERROR to "Could not start the local voice model."
+            return 0
+    set SPEECH_TURN to turn
+    set SPEECH_INDEX to 0
+    set SPEECH_NEXT to 0
+    return 0
+
+define speech_android_play with path:
+    ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_InitSubSystem") and 16)
+    set spec to alloc_bytes(12)
+    set buffer to alloc_bytes(8)
+    set size to alloc_bytes(4)
+    set loaded to ep_dlcall4(ep_dlsym(ANDROID_SDL and "SDL_LoadWAV") and path and spec and buffer and size)
+    set ok to 0
+    if loaded:
+        set SPEECH_STREAM to ep_dlcall4(ep_dlsym(ANDROID_SDL and "SDL_OpenAudioDeviceStream") and 4294967295 and spec and 0 and 0)
+        if SPEECH_STREAM != 0:
+            set ok to ep_dlcall3(ep_dlsym(ANDROID_SDL and "SDL_PutAudioStreamData") and SPEECH_STREAM and process_integer(buffer and 8) and process_integer(size and 4))
+            ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_FlushAudioStream") and SPEECH_STREAM)
+            ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_ResumeAudioStreamDevice") and SPEECH_STREAM)
+            # WAV output is mono signed 16-bit PCM; keep the final device buffer alive.
+            set SPEECH_PLAY_UNTIL to transport_now(native_system()) + process_integer(size and 4) * 1000 / (process_integer(spec + 8 and 4) * 2) + 150
+        ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_free") and process_integer(buffer and 8))
+    free_bytes(size)
+    free_bytes(buffer)
+    free_bytes(spec)
+    return ok
+
+define speech_tick:
+    if SPEECH_TURN == "":
+        return 0
+    set now to transport_now(native_system())
+    if now < SPEECH_NEXT:
+        return 0
+    set SPEECH_NEXT to now + 100
+    if SPEECH_GENERATOR > 0:
+        set status to process_poll(SPEECH_GENERATOR)
+        if status != -1:
+            set SPEECH_GENERATOR to 0
+            if status != 0:
+                set SPEECH_ERROR to "Local voice generation failed."
+                speech_stop()
+                return 0
+    if SPEECH_PID > 0:
+        set status to process_poll(SPEECH_PID)
+        if status == -1:
+            return 0
+        set SPEECH_PID to 0
+        if status != 0:
+            set SPEECH_ERROR to "Audio playback failed."
+            speech_stop()
+            return 0
+    if SPEECH_STREAM != 0:
+        if now < SPEECH_PLAY_UNTIL || ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_GetAudioStreamQueued") and SPEECH_STREAM) > 0:
+            return 0
+        ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_DestroyAudioStream") and SPEECH_STREAM)
+        set SPEECH_STREAM to 0
+    set path to speech_wave_path(SPEECH_PREFIX and SPEECH_INDEX)
+    if file_exists(path):
+        if native_android():
+            if speech_android_play(path) == 0:
+                set SPEECH_ERROR to "Could not play the generated voice."
+                speech_stop()
+                return 0
+        else:
+            set SPEECH_PID to process_start("/usr/bin/afplay" and [path])
+            if SPEECH_PID <= 0:
+                set SPEECH_ERROR to "Could not play the generated voice."
+                speech_stop()
+                return 0
+        set SPEECH_INDEX to SPEECH_INDEX + 1
+    else if file_exists(concat(SPEECH_PREFIX and ".done")):
+        speech_stop()
+    return 0
+
+define speech_close:
+    return speech_stop()

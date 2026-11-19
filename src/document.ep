@@ -79,7 +79,7 @@ define read_document with path returning Str:
     repeat while reading == 1 && used <= 8388608:
         set n to ep_dlcall3(read_fn and fd and data + used and 8388609 - used)
         if n < 0:
-            set errno_ptr to ep_dlcall0(ep_dlsym(libc and "__error"))
+            set errno_ptr to native_errno_pointer()
             if peek_byte(errno_ptr and 0) != 4:
                 set problem to "Document read failed"
                 set reading to 0

@@ -1,0 +1,35 @@
+# Stable identities for local application rows. Change tracking contains IDs only.
+# Call inside the application's schema transaction. Remote projection must bind
+# the peer object before insertion and suppress capture only within its transaction.
+import "sync_store"
+
+define sync_identity_table with db and table and kind:
+    if (table != "memories" || kind != "memory") && (table != "me_versions" || kind != "identity") && (table != "turns" || kind != "turn") && (table != "tool_runs" || kind != "tool_run"):
+        return 0
+    set prefix to concat("sync_track_" and table)
+    set mapping to concat("INSERT OR IGNORE INTO sync_local_ids(kind,local_id,object) SELECT '" and concat(kind and concat("',id,lower(hex(randomblob(16))) FROM " and concat(table and ";"))))
+    set inserted to concat("INSERT OR IGNORE INTO sync_local_ids(kind,local_id,object) VALUES('" and concat(kind and "',new.id,lower(hex(randomblob(16))));"))
+    set changed to concat("UPDATE sync_local_ids SET dirty=1 WHERE kind='" and concat(kind and "' AND local_id=new.id AND (SELECT value FROM sync_meta WHERE key='projecting')='0';"))
+    set deleted to concat("UPDATE sync_local_ids SET deleted=1,dirty=1 WHERE kind='" and concat(kind and "' AND local_id=old.id;"))
+    set statement to concat(mapping and concat("CREATE TRIGGER IF NOT EXISTS " and concat(prefix and concat("_insert AFTER INSERT ON " and concat(table and concat(" BEGIN " and concat(inserted and concat(changed and " END;"))))))))
+    set statement to concat(statement and concat("CREATE TRIGGER IF NOT EXISTS " and concat(prefix and concat("_update AFTER UPDATE ON " and concat(table and concat(" BEGIN " and concat(changed and " END;")))))))
+    set statement to concat(statement and concat("CREATE TRIGGER IF NOT EXISTS " and concat(prefix and concat("_delete AFTER DELETE ON " and concat(table and concat(" BEGIN " and concat(deleted and " END;")))))))
+    set code to sql_execute(db and statement)
+    return code == 0
+
+define sync_identity_init with db:
+    if sync_store_init(db) == 0:
+        return 0
+    set code to sql_execute(db and "INSERT OR IGNORE INTO sync_meta VALUES('projecting','0'); CREATE TABLE IF NOT EXISTS sync_local_ids(kind TEXT NOT NULL,local_id INTEGER NOT NULL,object TEXT NOT NULL UNIQUE CHECK(length(object)=32 AND object NOT GLOB '*[^0-9a-f]*'),deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1)),dirty INTEGER NOT NULL DEFAULT 1 CHECK(dirty IN (0,1)),applied_heads TEXT NOT NULL DEFAULT '',PRIMARY KEY(kind,local_id)); CREATE INDEX IF NOT EXISTS sync_local_dirty ON sync_local_ids(dirty,kind,local_id);")
+    if code != 0:
+        return 0
+    set code to sql_execute(db and "CREATE TRIGGER IF NOT EXISTS sync_local_forgetting AFTER UPDATE OF deleted ON sync_local_ids WHEN new.deleted=1 BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM sync_objects WHERE id=new.object AND kind!=new.kind) THEN RAISE(ABORT,'sync identity kind mismatch') END; INSERT OR IGNORE INTO sync_objects(id,kind,deleted) VALUES(new.object,new.kind,0); INSERT INTO sync_changes(object) SELECT id FROM sync_objects WHERE id=new.object AND deleted=0; UPDATE sync_objects SET deleted=1 WHERE id=new.object; DELETE FROM sync_versions WHERE object=new.object; DELETE FROM sync_seen WHERE object=new.object; END; UPDATE sync_local_ids SET deleted=deleted WHERE deleted=1;")
+    if code != 0:
+        return 0
+    return sync_identity_table(db and "memories" and "memory") && sync_identity_table(db and "me_versions" and "identity") && sync_identity_table(db and "turns" and "turn") && sync_identity_table(db and "tool_runs" and "tool_run")
+
+define sync_identity_get with db and kind and local_id returning Str:
+    set object to result_cache_scalar(db and "SELECT object FROM sync_local_ids WHERE kind=? AND local_id=? AND deleted=0" and [kind,local_id])
+    if object == "":
+        return ""
+    return object

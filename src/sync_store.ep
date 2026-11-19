@@ -1,0 +1,233 @@
+# Local-first replicated record frontier. App projections and transport sit above
+# this module; SQLite transactions make every imported batch atomic.
+import "result_cache"
+
+define sync_execute with db and statement and params:
+    set code to sql_execute_params(db and statement and params)
+    return code == 101
+
+define sync_store_init with db:
+    set code to sql_execute(db and "CREATE TABLE IF NOT EXISTS sync_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT OR IGNORE INTO sync_meta VALUES('device',lower(hex(randomblob(16)))); INSERT OR IGNORE INTO sync_meta VALUES('sequence','0'); CREATE TABLE IF NOT EXISTS sync_objects(id TEXT PRIMARY KEY,kind TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1))); CREATE TABLE IF NOT EXISTS sync_versions(id TEXT PRIMARY KEY,object TEXT NOT NULL REFERENCES sync_objects(id),origin TEXT NOT NULL,sequence INTEGER NOT NULL,clock TEXT NOT NULL,payload TEXT NOT NULL,digest TEXT NOT NULL); CREATE INDEX IF NOT EXISTS sync_versions_object ON sync_versions(object); CREATE TABLE IF NOT EXISTS sync_seen(id TEXT PRIMARY KEY,object TEXT NOT NULL,digest TEXT NOT NULL); CREATE TABLE IF NOT EXISTS sync_changes(sequence INTEGER PRIMARY KEY AUTOINCREMENT,object TEXT NOT NULL); CREATE INDEX IF NOT EXISTS sync_changes_object ON sync_changes(object,sequence); CREATE TABLE IF NOT EXISTS sync_cursors(peer TEXT PRIMARY KEY,cursor INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS sync_outgoing(peer TEXT PRIMARY KEY,cursor INTEGER NOT NULL DEFAULT 0);")
+    return code == 0
+
+define sync_identifier with db and value:
+    set valid to result_cache_scalar(db and "SELECT length(?)=32 AND ? NOT GLOB '*[^0-9a-f]*'" and [value,value])
+    if valid == "1":
+        return 1
+    return 0
+
+define sync_clock with db and clock returning Str:
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [clock,clock]) != "1":
+        return ""
+    if result_cache_scalar(db and "SELECT count(*) BETWEEN 1 AND 64 AND count(*)=count(DISTINCT key) AND min(length(key)=32 AND key NOT GLOB '*[^0-9a-f]*' AND type='integer' AND value BETWEEN 1 AND 9007199254740991) FROM json_each(?)" and [clock]) != "1":
+        return ""
+    return result_cache_scalar(db and "SELECT json_group_object(key,value) FROM (SELECT key,value FROM json_each(?) ORDER BY key)" and [clock])
+
+# A dominates B exactly when it has observed every component in B.
+define sync_dominates with db and a and b:
+    set valid to result_cache_scalar(db and "SELECT NOT EXISTS(SELECT 1 FROM json_each(?) b WHERE coalesce((SELECT a.value FROM json_each(?) a WHERE a.key=b.key),0)<b.value)" and [b,a])
+    if valid == "1":
+        return 1
+    return 0
+
+define sync_version_digest with db and object and kind and origin and sequence and clock and payload returning Str:
+    set material to result_cache_scalar(db and "SELECT json_array('echolite-sync-frontier-v1',?,?,?,?,json(?),?)" and [object,kind,origin,sequence,clock,payload])
+    set digest to sha256(material)
+    return digest
+
+define sync_heads with db and object returning Str:
+    set result to sha256(result_cache_scalar(db and "SELECT json_array(coalesce((SELECT deleted FROM sync_objects WHERE id=?),0),json((SELECT json_group_array(id) FROM (SELECT id FROM sync_versions WHERE object=? ORDER BY id))))" and [object,object]))
+    return result
+
+define sync_record with db and object returning Str:
+    set result to result_cache_scalar(db and "SELECT json_object('id',id,'kind',kind,'deleted',deleted,'versions',json((SELECT json_group_array(json(v)) FROM (SELECT json_object('id',id,'origin',origin,'sequence',sequence,'clock',json(clock),'payload',payload,'digest',digest) v FROM sync_versions WHERE object=sync_objects.id ORDER BY id)))) FROM sync_objects WHERE id=?" and [object])
+    if result == "":
+        return ""
+    return result
+
+# Merge one validated record inside the caller's transaction. A tombstone is
+# permanent for this stable object ID; deliberate recreation uses a new ID.
+define sync_merge_record with db and record returning Str:
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [record,record]) != "1":
+        return "Invalid sync record"
+    set object to result_cache_scalar(db and "SELECT json_extract(?,'$.id')" and [record])
+    set kind to result_cache_scalar(db and "SELECT json_extract(?,'$.kind')" and [record])
+    set deleted to result_cache_scalar(db and "SELECT json_extract(?,'$.deleted')" and [record])
+    if sync_identifier(db and object) == 0 || result_cache_scalar(db and "SELECT length(?) BETWEEN 1 AND 40 AND ? NOT GLOB '*[^a-z_]*'" and [kind,kind]) != "1":
+        return "Invalid sync object identity"
+    if result_cache_scalar(db and "SELECT json_type(?,'$.deleted')='integer' AND json_extract(?,'$.deleted') IN (0,1) AND json_type(?,'$.versions')='array' AND json_array_length(?,'$.versions')<=32" and [record,record,record,record]) != "1":
+        return "Invalid sync record shape"
+    set previous_kind to result_cache_scalar(db and "SELECT kind FROM sync_objects WHERE id=?" and [object])
+    if previous_kind != "" && string_equals(previous_kind and kind) == 0:
+        return "Sync object kind changed"
+    if deleted == "1":
+        if result_cache_scalar(db and "SELECT json_array_length(?,'$.versions')" and [record]) != "0":
+            return "Tombstone contains retained payloads"
+        if result_cache_scalar(db and "SELECT deleted FROM sync_objects WHERE id=?" and [object]) == "1":
+            return ""
+        if sync_execute(db and "INSERT INTO sync_objects VALUES(?,?,1) ON CONFLICT(id) DO UPDATE SET deleted=1" and [object,kind]) == 0 || sync_execute(db and "DELETE FROM sync_versions WHERE object=?" and [object]) == 0 || sync_execute(db and "DELETE FROM sync_seen WHERE object=?" and [object]) == 0 || sync_execute(db and "INSERT INTO sync_changes(object) VALUES(?)" and [object]) == 0:
+            return "Cannot persist forgetting tombstone"
+        return ""
+    if result_cache_scalar(db and "SELECT deleted FROM sync_objects WHERE id=?" and [object]) == "1":
+        return ""
+    set versions to sql_query_params(db and "SELECT value FROM json_each(?,'$.versions')" and [record])
+    if length_list(versions) == 0:
+        return "Live sync record has no versions"
+    if sync_execute(db and "INSERT OR IGNORE INTO sync_objects VALUES(?,?,0)" and [object,kind]) == 0:
+        return "Cannot create sync object"
+    set changed to 0
+    set i to 0
+    repeat while i < length_list(versions):
+        set version to get_list(get_list(versions and i) and 0)
+        if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [version,version]) != "1":
+            return "Invalid sync revision"
+        set origin to result_cache_scalar(db and "SELECT json_extract(?,'$.origin')" and [version])
+        set sequence to result_cache_scalar(db and "SELECT json_extract(?,'$.sequence')" and [version])
+        set id to result_cache_scalar(db and "SELECT json_extract(?,'$.id')" and [version])
+        set payload to result_cache_scalar(db and "SELECT json_extract(?,'$.payload')" and [version])
+        set clock to sync_clock(db and result_cache_scalar(db and "SELECT json_extract(?,'$.clock')" and [version]))
+        if sync_identifier(db and origin) == 0 || clock == "" || string_equals(id and concat(origin and concat(":" and sequence))) == 0:
+            return "Invalid revision identity or clock"
+        if result_cache_scalar(db and "SELECT json_type(?,'$.sequence')='integer' AND json_extract(?,'$.sequence') BETWEEN 1 AND 9007199254740991 AND json_type(?,'$.payload')='text'" and [version,version,version]) != "1" || result_cache_scalar(db and "SELECT value FROM json_each(?) WHERE key=?" and [clock,origin]) != sequence:
+            return "Revision counter does not match clock"
+        if string_length(payload) > 65536 || result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [payload,payload]) != "1":
+            return "Invalid or oversized revision payload"
+        set digest to sync_version_digest(db and object and kind and origin and sequence and clock and payload)
+        if string_equals(digest and result_cache_scalar(db and "SELECT json_extract(?,'$.digest')" and [version])) == 0:
+            return "Sync revision integrity mismatch"
+        set seen to result_cache_scalar(db and "SELECT digest FROM sync_seen WHERE id=?" and [id])
+        if seen != "" && string_equals(seen and digest) == 0:
+            return "Sync revision ID was reused with different content"
+        if seen == "":
+            set existing to sql_query_params(db and "SELECT id,clock FROM sync_versions WHERE object=?" and [object])
+            set dominated to 0
+            set j to 0
+            repeat while j < length_list(existing):
+                set row to get_list(existing and j)
+                if sync_dominates(db and get_list(row and 1) and clock) && sync_dominates(db and clock and get_list(row and 1)):
+                    return "Distinct revisions claim the same causal clock"
+                if sync_dominates(db and get_list(row and 1) and clock):
+                    set dominated to 1
+                else if sync_dominates(db and clock and get_list(row and 1)):
+                    if sync_execute(db and "DELETE FROM sync_versions WHERE id=?" and [get_list(row and 0)]) == 0:
+                        return "Cannot retire observed revision"
+                set j to j + 1
+            if dominated == 0:
+                if sync_execute(db and "INSERT INTO sync_versions VALUES(?,?,?,?,?,?,?)" and [id,object,origin,sequence,clock,payload,digest]) == 0:
+                    return "Cannot retain sync revision"
+                set changed to 1
+            if sync_execute(db and "INSERT INTO sync_seen VALUES(?,?,?)" and [id,object,digest]) == 0:
+                return "Cannot persist sync receipt"
+            if sync_execute(db and "UPDATE sync_meta SET value=max(CAST(value AS INTEGER),CAST(? AS INTEGER)) WHERE key='sequence' AND ?=(SELECT value FROM sync_meta WHERE key='device')" and [sequence,origin]) == 0:
+                return "Cannot advance local revision counter"
+        set i to i + 1
+    if result_cache_scalar(db and "SELECT count(*)>32 FROM sync_versions WHERE object=?" and [object]) == "1":
+        return "Resolve the existing concurrent revisions before adding more"
+    if changed && sync_execute(db and "INSERT INTO sync_changes(object) VALUES(?)" and [object]) == 0:
+        return "Cannot journal sync change"
+    return ""
+
+define sync_write_transaction with db and object and kind and payload and expected returning Str:
+    set problem to ""
+    if string_equals(sync_heads(db and object) and expected) == 0:
+        set problem to "Record changed; review its current versions before saving"
+    if result_cache_scalar(db and "SELECT deleted FROM sync_objects WHERE id=?" and [object]) == "1":
+        set problem to "Forgotten object cannot be resurrected; create a new identity"
+    set record to ""
+    if problem == "":
+        set device to result_cache_scalar(db and "SELECT value FROM sync_meta WHERE key='device'" and [])
+        set sequence to result_cache_scalar(db and "SELECT CAST(value AS INTEGER)+1 FROM sync_meta WHERE key='sequence'" and [])
+        set clock to result_cache_scalar(db and "SELECT json_group_object(key,value) FROM (SELECT j.key,max(j.value) value FROM sync_versions v,json_each(v.clock) j WHERE v.object=? GROUP BY j.key ORDER BY j.key)" and [object])
+        set clock to sync_clock(db and result_cache_scalar(db and "SELECT json_set(?, '$.'||?, CAST(? AS INTEGER))" and [clock,device,sequence]))
+        set digest to sync_version_digest(db and object and kind and device and sequence and clock and payload)
+        set record to result_cache_scalar(db and "SELECT json_object('id',?,'kind',?,'deleted',0,'versions',json_array(json_object('id',?||':'||?,'origin',?,'sequence',CAST(? AS INTEGER),'clock',json(?),'payload',?,'digest',?)))" and [object,kind,device,sequence,device,sequence,clock,payload,digest])
+        set problem to sync_merge_record(db and record)
+    return problem
+
+define sync_write with db and object and kind and payload and expected returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot begin sync write")
+    set problem to sync_write_transaction(db and object and kind and payload and expected)
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        if problem == "":
+            set problem to "Cannot commit sync write"
+        return result_cache_error(problem)
+    return sync_record(db and object)
+
+define sync_forget with db and object returning Str:
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot begin sync forgetting")
+    set kind to result_cache_scalar(db and "SELECT kind FROM sync_objects WHERE id=?" and [object])
+    set record to result_cache_scalar(db and "SELECT json_object('id',?,'kind',?,'deleted',1,'versions',json('[]'))" and [object,kind])
+    set problem to sync_merge_record(db and record)
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error(concat("Cannot commit sync forgetting: " and problem))
+    return sync_record(db and object)
+
+# Changes contain IDs only: exporting after forgetting can never leak an older
+# payload. A page is a consistent snapshot and its cursor is committed with import.
+define sync_export with db and cursor returning Str:
+    if sql_execute(db and "BEGIN") != 0:
+        return result_cache_error("Cannot begin sync export")
+    if result_cache_scalar(db and "SELECT CAST(? AS INTEGER)>=0 AND CAST(? AS TEXT)=CAST(CAST(? AS INTEGER) AS TEXT) AND CAST(? AS INTEGER)<=coalesce((SELECT max(sequence) FROM sync_changes),0)" and [cursor,cursor,cursor,cursor]) != "1":
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Invalid cursor or sender history rolled back")
+    set changes to sql_query_params(db and "SELECT sequence,object FROM sync_changes WHERE sequence>CAST(? AS INTEGER) ORDER BY sequence LIMIT 16" and [cursor])
+    set high to cursor
+    set records to create_list()
+    set bytes to 512
+    set i to 0
+    set full to 0
+    repeat while i < length_list(changes) && full == 0:
+        set change to get_list(changes and i)
+        set record to sync_record(db and get_list(change and 1))
+        if record == "":
+            sql_execute(db and "ROLLBACK")
+            return result_cache_error("Sync journal references a missing object")
+        if bytes + string_length(record) > 8387584:
+            set full to 1
+        else:
+            append_list(records and json_parse(record))
+            set bytes to bytes + string_length(record) + 1
+            set high to get_list(change and 0)
+        set i to i + 1
+    if length_list(changes) > 0 && length_list(records) == 0:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Sync record exceeds page budget")
+    set content to json_stringify(create_json_list(records))
+    set page to result_cache_scalar(db and "SELECT json_object('protocol',1,'device',(SELECT value FROM sync_meta WHERE key='device'),'after',CAST(? AS INTEGER),'cursor',CAST(? AS INTEGER),'records',json(?))" and [cursor,high,content])
+    if sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        return result_cache_error("Cannot finish sync export")
+    return page
+
+define sync_import with db and peer and page returning Str:
+    if string_length(page) > 8388608 || sync_identifier(db and peer) == 0:
+        return result_cache_error("Invalid sync peer or oversized page")
+    if result_cache_scalar(db and "SELECT CASE WHEN json_valid(?) THEN json_type(?)='object' ELSE 0 END" and [page,page]) != "1":
+        return result_cache_error("Invalid sync page")
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.protocol')=1 AND json_extract(?,'$.device')=? AND json_type(?,'$.after')='integer' AND json_type(?,'$.cursor')='integer' AND json_extract(?,'$.after')>=0 AND json_extract(?,'$.cursor')>=json_extract(?,'$.after') AND json_type(?,'$.records')='array' AND json_array_length(?,'$.records')<=16 AND json_extract(?,'$.cursor')-json_extract(?,'$.after')<=16 AND ((json_extract(?,'$.cursor')=json_extract(?,'$.after'))=(json_array_length(?,'$.records')=0))" and [page,page,peer,page,page,page,page,page,page,page,page,page,page,page,page]) != "1":
+        return result_cache_error("Invalid sync protocol or cursor")
+    if sql_execute(db and "BEGIN IMMEDIATE") != 0:
+        return result_cache_error("Cannot begin sync import")
+    set current to result_cache_scalar(db and "SELECT coalesce((SELECT cursor FROM sync_cursors WHERE peer=?),0)" and [peer])
+    set after to result_cache_scalar(db and "SELECT json_extract(?,'$.after')" and [page])
+    set cursor to result_cache_scalar(db and "SELECT json_extract(?,'$.cursor')" and [page])
+    set problem to ""
+    if result_cache_scalar(db and "SELECT CAST(? AS INTEGER)>CAST(? AS INTEGER)" and [after,current]) == "1":
+        set problem to "Sync page skipped an unreceived cursor"
+    set records to sql_query_params(db and "SELECT value FROM json_each(?,'$.records')" and [page])
+    set i to 0
+    repeat while i < length_list(records) && problem == "":
+        set problem to sync_merge_record(db and get_list(get_list(records and i) and 0))
+        set i to i + 1
+    if problem == "" && sync_execute(db and "INSERT INTO sync_cursors VALUES(?,?) ON CONFLICT(peer) DO UPDATE SET cursor=max(cursor,excluded.cursor)" and [peer,cursor]) == 0:
+        set problem to "Cannot persist sync cursor"
+    if problem != "" || sql_execute(db and "COMMIT") != 0:
+        sql_execute(db and "ROLLBACK")
+        if problem == "":
+            set problem to "Cannot commit sync import"
+        return result_cache_error(problem)
+    return result_cache_scalar(db and "SELECT json_object('status','ok','cursor',CAST(? AS INTEGER))" and [cursor])

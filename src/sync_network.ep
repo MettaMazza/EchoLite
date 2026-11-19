@@ -1,0 +1,55 @@
+# Native local IPv4 interface enumeration for LAN discovery. No shell commands,
+# guessed subnet scans, user data or persisted network configuration are involved.
+import "sync_socket"
+import "state_lock"
+
+define sync_ipv4_text with address returning Str:
+    if address == 0:
+        return ""
+    set family to peek_byte(address and 1)
+    if native_android():
+        set family to lease_integer(address and 0 and 2)
+    if family != 2:
+        return ""
+    set text to int_to_string(peek_byte(address and 4))
+    set i to 5
+    repeat while i < 8:
+        set text to concat(text and concat("." and int_to_string(peek_byte(address and i))))
+        set i to i + 1
+    return text
+
+define sync_lan_candidate with flags and host and broadcast:
+    if flags % 2 != 1 || (flags / 2) % 2 != 1 || (flags / 8) % 2 == 1 || starts_with(host and "127.") || host == broadcast:
+        return 0
+    set address to alloc_bytes(16)
+    set valid to sync_address(host and 8411 and address) && sync_address(broadcast and 8411 and address) && starts_with(broadcast and "127.") == 0
+    free_bytes(address)
+    return valid
+
+# ARM64 ifaddrs layout verified against both installed SDK headers. Results are
+# bounded and refreshed for every discovery tick, including Wi-Fi reconnection.
+define sync_network_interfaces:
+    set rows to create_list()
+    set libc to native_system()
+    set head to alloc_bytes(8)
+    if ep_dlcall1(ep_dlsym(libc and "getifaddrs") and head) != 0:
+        free_bytes(head)
+        return rows
+    set first to lease_integer(head and 0 and 8)
+    free_bytes(head)
+    set node to first
+    set inspected to 0
+    repeat while node != 0 && inspected < 256 && length_list(rows) < 8:
+        set flags to lease_integer(node and 16 and 4)
+        set host to sync_ipv4_text(lease_integer(node and 24 and 8))
+        set broadcast to sync_ipv4_text(lease_integer(node and 40 and 8))
+        if sync_lan_candidate(flags and host and broadcast):
+            set name_pointer to lease_integer(node and 8 and 8)
+            if name_pointer != 0:
+                set name to ptr_to_str(name_pointer)
+                if string_length(name) > 0 && string_length(name) < 64:
+                    append_list(rows and [name,host,broadcast])
+        set node to lease_integer(node and 0 and 8)
+        set inspected to inspected + 1
+    ep_dlcall1(ep_dlsym(libc and "freeifaddrs") and first)
+    return rows

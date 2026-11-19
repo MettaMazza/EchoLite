@@ -1,0 +1,282 @@
+EchoLite Android foundation — development checkpoint, 2026-11-19
+
+Executed on the owner's REDMAGIC 11 Pro, Android 16 / ARM64:
+- Generated Android ARM64 executable from EP with the installed Ernos compiler
+  and NDK r30. Runtime probe passed dynamic libc calls and list operations.
+- Compiled the existing EchoLite core with SQLite 3.54.1 for Android; the core
+  help command ran successfully on-device. This is an ABI checkpoint, not a
+  claim that all macOS-dependent core operations have been ported.
+- Built, signed, installed and launched a native Android APK containing an EP
+  main function and raylib 6.2. Verified the rendered screen and live process.
+- Ran the repository's EP build_foundation entry point successfully end to end.
+
+Current APK is a foundation screen labelled Under active development. Chat,
+Android system bindings, local model workers and paired sync are the next work.
+It is not presented as the finished EchoLite Android application.
+
+Pinned native build dependencies:
+Android NDK r30 (30.0.16248370), Android platform 36 revision 2,
+Android build-tools 36.0.0, CMake 3.31.6, raylib 6.2, JDK 21.
+SQLite source: https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip
+Graphics source: https://github.com/raysan5/raylib/archive/refs/tags/6.2.tar.gz
+Model runtime revision to port: llama.cpp b12359,
+b1b770d90d94cad9e9ea5b993bdbc383a522fb28.
+
+Build layout outside the source checkout:
+ANDROID_WORK/sdk/{platforms,build-tools,cmake,platform-tools}
+ANDROID_WORK/tools/android-ndk-r30
+ANDROID_WORK/vendor/raylib-6.2
+ANDROID_WORK/signing/debug.keystore (local development key, never publish)
+
+Compile src/android/build_foundation.ep with Ernos, then invoke its executable:
+build_foundation CHECKOUT ANDROID_WORK JDK_HOME
+All three arguments must be absolute paths. ERNOS_COMPILER can override the
+installed compiler path. The builder checks the native link for undefined
+symbols, aligns the APK, signs it using a local debug key and verifies signing.
+Output: ANDROID_WORK/apk/echolite-dev.apk
+
+Install with adb install --no-incremental -r, then launch
+  dev.echolite.android/android.app.NativeActivity
+The dev package has no access to the Mac's private memory or credentials.
+Application source remains EP. Manifest XML is Android packaging metadata;
+compiler-generated C and third-party library C are native build artifacts.
+
+Memory and model checkpoint — 2026-11-19
+- Android-local Qwen generated a real completion with n_ctx=262144, build
+  b12359-b1b770d9, the installed Q4_K_M model and Q8_0 vision projector.
+  Initial short sample: 10 generated tokens, 16.40 tokens/sec. This sample
+  does not establish performance for long prompts or sustained workloads.
+- Android-local MiniLM returned 384-dimensional normalized embeddings.
+- Model asset SHA-256 values matched the Mac before inference.
+- Phone process RSS after the short sample: generation 8839700 KiB;
+  embedding 74716 KiB. These are observed process RSS, not peak-memory limits.
+- Core database initialization, memory write/read across processes, semantic
+  recall and tokenizer-validated Me revision executed in app-private storage.
+- Repeated semantic recall succeeded from a new core process with the embedding
+  worker stopped, demonstrating persistent cache reuse; worker then restarted.
+- Shared and maintenance lock checks: 17 each; identity publication: 25;
+  HTTP protocol and real socket checks: 51. Mac regressions also executed.
+  Android denies hardlink fixture creation in both debugging contexts; tests
+  verify that denial explicitly rather than claiming the app rejected a created
+  hardlink. Symlink, owner, mode, concurrent lock and atomic-write checks run.
+
+Port-specific dependencies and defects addressed:
+- ARM64 Android open flags differ from generic Linux in O_DIRECTORY/O_NOFOLLOW.
+- Android struct stat, errno, monotonic clock, socket address, socket options,
+  nonblocking errno and SIGPIPE suppression differ from Darwin.
+- SQLite must enable FTS5 and SQLITE_ENABLE_MATH_FUNCTIONS for vector recall.
+- Android Bionic heap pointers can have a top-byte tag. The Ernos runtime must
+  recognize tagged raw strings in automatic conversion and map keys without
+  disabling memory tagging. The exact-text SQLite regression passes on-device.
+  The initial diagnostic state retained a bad Me revision and vectors before
+  this fix; it is not the validated fixture or future application data.
+
+Build compiler requirement:
+Use ERNOS_COMPILER pointing at the Ernos build with ep_android_string_byte in
+its runtime. The Android builder rejects an older compiler to prevent silent
+text corruption. Compiler regression/self-hosting gate logs are kept locally;
+completion of those gates must be checked before publishing the compiler patch.
+Current native activity is still the development foundation screen. The model
+and memory checks above use installed native executables; touch chat, lifecycle
+management, complete tool portability and USB/Wi-Fi sync remain active work.
+
+Validated runtime/compiler checkpoint:
+Ernos local commit 13befd1 (not pushed): tagged heap-string support.
+Release build clean; 85/85 compiler tests; native and check-only safety gates;
+3-stage byte-identical fixpoint; self-hosted parity 56/56 plus 12 expected
+rejections; differential 43/43; frozen-C bootstrap verification all passed.
+Installed local ernos/epc updated, with previous binaries backed up outside repo.
+
+Native process launch now handles Android environ and POSIX_SPAWN_SETSID.
+Native pointer serialization preserves negative/tagged pointer bits. On-phone
+and Mac tests passed direct argv (including Unicode and literal shell syntax),
+stdout/stderr redirection, real child exit codes, missing-executable failure
+and independent detached session/process-group creation. Android spawn returns
+before the child applies attributes; the regression waits up to 200 ms for
+that setup instead of racing the child.
+
+Latest consolidated APK build includes the EP core, native graphics activity
+and pinned llama-server. It completed through the EP builder with the corrected
+compiler. Model assets remain separately hash-verified private phone files.
+
+Android cache/recovery portability checkpoint (2026-11-19):
+- Shared file metadata helpers cover Android stat mode/link/owner/size/timestamps,
+  statvfs free bytes, directory-entry names and exclusive atomic rename.
+- Snapshot SHA-256 uses the packaged OpenSSL 3.5.9 library on Android.
+- Actual phone executions: 18 snapshot seal checks, 21 recovery authority checks,
+  9 native cache lifecycle checks passed. Recovery tests include process failure
+  before/after publication, preserved authority and recognized staging cleanup.
+- Matching Mac snapshot/recovery checks passed (18 and 21). Mac actually creates
+  hardlinks and tests rejection. Android rejects hardlink creation in this test
+  context; its branch verifies EPERM/EACCES and does not claim application-level
+  rejection of a hardlink fixture that was never created.
+- Reconnected USB health checks returned ok for both local model workers.
+
+Android input development checkpoint:
+- SDL 3.4.20, raylib 6.2 SDL/OpenGL ES 3 backend and libffi 3.8.1 built for ARM64.
+- SDL Android Java glue is unmodified upstream dependency code. Application
+  input event collection, keyboard calls and font bindings are Ernos Plain.
+- UTF-8 text events are collected through a bounded mutex-protected native buffer
+  and copied into managed strings on the UI thread, with overflow reporting.
+- Android fonts use the system Roboto font; Apple fonts are not redistributed.
+- The input/font probe compiles and packages. Visual keyboard validation awaits
+  an unlocked foreground activity; Android reported keyguard showing during
+  the last display checks. A black lock-screen capture is not rendering evidence.
+- The installed input probe is a temporary development APK, not the consolidated
+  app release. It preserves app-private models and memory. The consolidated EP
+  builder still needs the SDL interface, packaged dependencies and lifecycle work.
+
+Consolidated chat package checkpoint (2026-11-19):
+- src/android/build_chat.ep now builds/signs an SDL chat APK containing the EP UI,
+  EP core and runtime manager, SDL, libffi, crypto and pinned llama-server.
+  Its pinned upstream build products are checked prerequisites, not downloaded
+  at application startup. AndroidManifest-chat.xml uses upstream SDLActivity.
+- The package built, signature verification passed and installation succeeded.
+  Its core initialized a separate chat-package-validation state in the real
+  application sandbox. Existing model and memory files were preserved.
+- EP UI resolves files through SDL and its installed native directory through
+  dladdr; worker resolution uses /proc/self/exe rather than argv[0].
+- Runtime path checks passed: Android 4, Mac 3. Android locks live in writable
+  private state, and models use the already-transferred private models directory.
+- Chat editor consumes complete SDL UTF-8 input events on Android and retains
+  the desktop character queue on Mac. Focus requests the software keyboard.
+- Focused Mac native editor regression passed 20 checks and rendered selection,
+  caret and accented text. The first diagnostic invocation omitted the test's
+  screenshot argument; that invocation failure was not an editor regression.
+- Phone keyguard remained showing and the activity paused behind it. Foreground
+  rendering/keyboard validation remains pending; package installation is not
+  evidence that the phone chat journey works yet.
+- Wikipedia/tool dependency porting, final runtime credential migration,
+  responsive phone layout, lifecycle validation and synchronization remain work.
+
+Unlocked-device UI checkpoint (2026-11-19):
+- Replaced desktop-sized phone drawing with an integer-scaled EP viewport,
+  matching input coordinates and scissor rectangles. Mobile navigation collapses
+  into a touch menu; desktop layout remains on its existing coordinate system.
+- Enabled SDL_TOUCH_MOUSE_EVENTS after raylib initialization. The upstream SDL
+  backend disables these, so touch state existed but desktop pointer coordinates
+  were stale until this explicit application setting.
+- Actual phone checks: navigation opened, New conversation returned to chat,
+  composer focus displayed the software keyboard (mInputShown=true), and
+  "Hello Android" appeared with a visible caret.
+- EP JNI bindings read WindowInsets IME height; SDL supplies safe-area bounds.
+  The composer was visually verified above the real keyboard after resizing.
+  Local captures: chat-mobile.png, chat-touch-fixed.png, chat-insets.png.
+- The app-managed runtime started generation and embedding workers using its
+  own data/native-runtime.token. They remained alive across subsequent APK updates.
+- Android bind-mounted storage aliases /data/data and /data/user/0 defeated
+  string-only model identity checks. Runtime verification now compares device
+  and inode for differing names, retaining credential/build/context checks and
+  rejecting symlinks/different files. Focused tests: Mac 8, Android 9 passed.
+- Latest installed runtime passed model verification on relaunch with the same
+  worker PIDs; the next startup error is the missing Wikipedia manifest.
+  Chat completion remains gated by that dependency; do not describe it as ready.
+- Remaining UI work includes quick-tap/gesture robustness, mobile attachment and
+  source actions, broader Unicode glyph coverage, full chat journeys and lifecycle.
+
+Reference reader and source parsing checkpoint (2026-11-19):
+- Built libxml2 2.15.4 for Android; EP markup binding selects packaged
+  libecholite_xml2.so and handles a missing parser without calling a null symbol.
+- Phone and Mac tests passed: 6 native markup checks, 17 web markup checks.
+  These cover visible text, entities/Unicode, malformed HTML, XPath, URL
+  resolution, source labels and rejecting unsupported/credential-bearing URLs.
+- Built curl 8.23.0 against the existing Android OpenSSL 3.5.9 archives.
+  Clear host CPATH for Android dependency configuration/builds: the host's
+  OpenSSL headers otherwise override the target include directory.
+  HTTPS certificate-store and live-network behavior still need validation.
+- Native typed variadic calls select packaged libffi on Android.
+- Built unmodified upstream kiwix-tools 3.8.2 server with docopt.cpp 0.6.3,
+  official libkiwix Android 14.2.1 and libzim Android 9.8.2, plus NDK libc++.
+  Actual phone --version execution passed without LD_LIBRARY_PATH overrides.
+  libkiwix reports its build-time libzim version as 9.7.0; loaded libzim is 9.8.2
+  within kiwix-tools' declared >=9,<10 dependency range. Article/search execution
+  against the transferred archive remains the compatibility test.
+- Packager now includes the reader, libkiwix, libzim, libc++, XML and curl
+  libraries. The updated complete APK has not yet been rebuilt/installed.
+- Wikipedia manifest validation now reads Android's correct timestamp offsets.
+  Android reader path resolves beside the native runtime executable; ICU_DATA
+  points to the private reference library directory.
+- Existing Mac archive: wikipedia_en_all_nopic_2026-06.zim, 52690706555 bytes.
+  Source SHA-256: 441a56d9e05b2d98f8ae9acb7986a513ed47904d73852c92dc6b7d50baa122e5.
+  Initial streamed private copy terminated early and is not an installed archive.
+  Replacement ADB push transfer remains active to the public archive staging
+  path /data/local/tmp/echolite-wikipedia.zim.pending (past 10 GB at last check).
+  Verify its complete hash, then copy into private files/library, update the
+  manifest using the destination timestamp, and remove only the transfer staging
+  files. Do not activate the archive before verification.
+- Dictionary normalization/decompression/SQLite binding still needs Android
+  porting; the dictionary database and ICU data still need transfer.
+
+Pinned dependency sources:
+https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz
+https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz
+https://download.kiwix.org/release/libkiwix/libkiwix_android-arm64-14.2.1.tar.gz
+https://download.openzim.org/release/libzim/libzim_android-arm64-9.8.2.tar.gz
+https://github.com/kiwix/kiwix-tools/archive/refs/tags/3.8.2.tar.gz
+https://github.com/docopt/docopt.cpp/archive/refs/tags/v0.6.3.tar.gz
+
+Android service and touch checkpoint (2026-11-19):
+- Private dictionary transfer verified SHA-256
+  c6fa126716acd333a8f3a88da4508a9c7b43b2cdb4fecb89181d11b10fd5556a;
+  1118683136 bytes installed in app files/library/dictionary.sqlite3.
+- Android dictionary port uses public libicu.so (API 31+) for NFKC/full case
+  folding, libz.so for decompression and the executable's exported SQLite.
+  16 checks pass on phone and Mac: real lookup, Unicode, attribution, persistent
+  cache reopening, missing coverage and stale forgetting-epoch refusal.
+  APK minimum SDK is 31; core/runtime export SQLite symbols for this binding.
+- Quick press+release within one rendered frame was lost by raylib's sampled
+  button state. EP SDL event watch now latches presses for the next UI frame.
+  Actual single ADB tap opens keyboard; typing and caret visible above keyboard.
+  Screenshot evidence remains outside repository in work/android/chat-fast-tap.png.
+- Android native HTTPS returns verified status 200/body/headers from example.com;
+  expired.badssl.com is rejected. Mac focused HTTPS regression also passes.
+  Android's CA directory uses legacy certificate hashes: pass system PEM contents
+  through CURLOPT_CAINFO_BLOB, retaining peer/hostname verification. Do not ship
+  an obsolete copied root bundle or disable verification.
+- Add app-private mkstemp/unlink response files for the Android app sandbox.
+  A packaged EP diagnostic tests dictionary and HTTPS under the actual app UID;
+  its execution is the next checkpoint, distinct from shell-UID service checks.
+- App-UID diagnostic now passes Unicode dictionary and verified HTTPS using
+  private anonymous response storage. A check immediately after foregrounding
+  encountered Android's network policy transition; repeat after TOP/allow policy
+  was applied passed. INTERNET permission was granted throughout.
+- Mac chat editor regression: 20 checks passed after shared touch-wrapper changes.
+- Wikipedia transfer and private copy both match the source SHA-256. Final private
+  size 52690706555, mtime_ns 1795096697066997190. Manifest installed with the
+  destination timestamp and matching UUID/checksum. Native reader started;
+  app-UID lookup for Ada Lovelace returned a real offline article and source URL.
+- GMP 6.3.0 cross-built with NDK (generic arithmetic, shared, 16 KiB page alignment).
+  Existing calculator suite passes 54 checks on Android and Mac: exact decimals,
+  fractions, powers, bounded inputs, invalid expression rejection and caching.
+- Android public web source links dispatch through SDL_OpenURL from the UI.
+  Actual source-card tap/browser journey remains to be exercised.
+- Installed app-UID service suite passes all four checks: exact arithmetic,
+  Unicode dictionary, verified HTTPS/private response files, and local Wikipedia.
+  Native reader and model workers are reused after authenticated readiness checks.
+- Actual Android UI journey: single tap -> keyboard -> typed arithmetic question
+  -> Send -> model-selected calculator -> final '17 × 23 = 391' response with
+  calculation disclosure. Thinking dropdown was tapped open and closed.
+  Runtime saved/restored persistent context checkpoint files between tool rounds.
+  This CPU run took about 136 seconds across two model calls (including prefill);
+  final generation measured 8.53 tokens/sec. Do not represent this as instant chat.
+  Sample during the run: generation RSS 5676552 kB, swap 2129988 kB,
+  system MemAvailable 13468464 kB. Archive provisioning had preceded this run.
+  Screenshots/logs remain outside the public checkout in work/android.
+- Source-presentation Mac regression: 18 checks passed.
+- Force-stop/relaunch preserves the arithmetic conversation and answer on screen.
+- Touch UX validated on phone: long-press selects a word and opens Copy/Cut/
+  Paste/Select all/Undo; copied answer text was pasted into the composer. Finger
+  swiping scrolls the expanded Thinking content without selecting its text.
+  Temporary clipboard-test draft was cleared without submitting it.
+- Detached workers now receive /dev/null stdin rather than retaining a launcher
+  pipe. Native process suite passes on Android and Mac after this change.
+
+Android editor repair (2026-11-19):
+- Keep SDL text input active when moving the caret or selecting composer text.
+- Queue native IME backspace/delete events in order with committed UTF-8 text;
+  short keydown/keyup pairs no longer disappear between rendered frames.
+- Keyboard editing dismisses the selection menu and participates in undo.
+- Seven focused EP regression checks passed. Installed APK was exercised on the
+  REDMAGIC using its visible keyboard: backspace, caret relocation, word selection,
+  selection deletion, and repeated deletion to an empty draft. The keyboard stayed
+  visible and the selection menu closed after deletion. No test message was sent.

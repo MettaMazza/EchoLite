@@ -1,0 +1,47 @@
+# Bounded application-aware exchange. Caller owns the maintenance lease.
+# Transport acknowledgement means durable receipt; application status is separate.
+import "sync_exchange"
+import "sync_coordinator"
+
+define sync_service_prepare with db and home and runtime_home and token and port returning Str:
+    if STATE_LEASE_FD < 0 || WORKER_LEASE_FD < 0:
+        return result_cache_error("Sync service requires exclusive state maintenance")
+    set cleaned to sync_cleanup_finish(db and home and runtime_home and token and port)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [cleaned]) != "ok":
+        return cleaned
+    return sync_capture_batch(db)
+
+define sync_service_receive with db and fd and home and runtime_home and token and port returning Str:
+    set request to sync_connection_receive(db and fd)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [request]) != "ok":
+        return request
+    set result to sync_service_prepare(db and home and runtime_home and token and port)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok":
+        set peer to result_cache_scalar(db and "SELECT json_extract(?,'$.peer')" and [request])
+        set body to result_cache_scalar(db and "SELECT json_extract(?,'$.body')" and [request])
+        set result to sync_exchange_body(db and peer and body)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [result]) == "ok":
+            set applied to sync_project_batch(db and home and runtime_home and token and port)
+            if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [applied]) != "ok":
+                set result to applied
+            else if result_cache_scalar(db and "SELECT count(*) FROM sync_objects o JOIN sync_local_ids i ON i.object=o.id WHERE o.kind='memory' AND o.deleted=1 AND i.deleted=0" and []) != "0":
+                set result to result_cache_error("Received forgetting is pending; retry to continue cleanup")
+            else:
+                # Rebuild after deletion closure: the earlier transport snapshot
+                # must never send newly forgotten derived content back to a peer.
+                set cursor to result_cache_scalar(db and "SELECT json_extract(?,'$.pull_after')" and [body])
+                set page to sync_export(db and cursor)
+                set result to result_cache_scalar(db and "SELECT json_set(?,'$.page',json(?),'$.application',json(?))" and [result,page,applied])
+    if sync_connection_reply(db and fd and request and result) == 0:
+        return result_cache_error("Sync reply interrupted; committed data remains available for retry")
+    return result_cache_scalar(db and "SELECT json_object('status',json_extract(?,'$.status'),'application',json_extract(?,'$.application'))" and [result,result])
+
+define sync_service_exchange with db and peer and host and network_port and home and runtime_home and token and model_port returning Str:
+    set prepared to sync_service_prepare(db and home and runtime_home and token and model_port)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [prepared]) != "ok":
+        return prepared
+    set exchanged to sync_exchange(db and peer and host and network_port and "resume")
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [exchanged]) != "ok":
+        return exchanged
+    set applied to sync_project_batch(db and home and runtime_home and token and model_port)
+    return result_cache_scalar(db and "SELECT json_object('status','ok','transport','received','capture',json(?),'local_application',json(?),'peer_application',json_extract(?,'$.application'))" and [prepared,applied,exchanged])
