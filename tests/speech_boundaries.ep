@@ -1,0 +1,30 @@
+import "../src/speech_model"
+import "os"
+define boundary_assert with condition:
+    if condition == 0:
+        ep_exit(1)
+    return 0
+
+define main:
+    set text to "Dr. Smith measured 3.14 units. Next sentence."
+    boundary_assert(substring(text and 0 and speech_sentence_end(text and 0)) == "Dr. Smith measured 3.14 units. ")
+    set text to "She said, “Hello!” Next sentence."
+    boundary_assert(substring(text and 0 and speech_sentence_end(text and 0)) == "She said, “Hello!” ")
+    set text to "Hello。世界！Next?"
+    boundary_assert(speech_sentence_end(text and 0) == string_length("Hello。"))
+    set long_text to ""
+    repeat while string_length(long_text) < 900:
+        set long_text to concat(long_text and "one long_text sentence with café 🌱 ")
+    set text to concat(long_text and ". Next.")
+    boundary_assert(speech_chunk_end(text and 0) == string_length(long_text) + 2)
+    boundary_assert(speech_chunk_end(long_text and 0) == string_length(long_text))
+    set position to 0
+    set rebuilt to ""
+    repeat while position < string_length(text):
+        set finish to speech_chunk_end(text and position)
+        boundary_assert(finish > position)
+        set rebuilt to concat(rebuilt and substring(text and position and finish - position))
+        set position to finish
+    boundary_assert(rebuilt == text)
+    display "PASS: sentences, abbreviations, decimals, quotes, Unicode and long_text unsplit sentences"
+    return 0

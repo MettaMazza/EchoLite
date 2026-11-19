@@ -4,31 +4,66 @@ import "fs"
 import "hash"
 import "text_layout"
 
-define speech_chunk_end with text and start:
-    set limit to start + 400
-    if limit > string_length(text):
-        set limit to string_length(text)
+# Byte offsets always describe complete UTF-8 text. The size target is soft:
+# a long sentence stays intact instead of being cut at a word or character count.
+define speech_sentence_end with text and start:
+    set total to string_length(text)
     set i to start
-    set space to 0
-    repeat while i < limit:
+    repeat while i < total:
         set c to get_character(text and i)
-        if c <= 32:
-            set space to i + 1
-        if i > start + 40 && (c == 46 || c == 33 || c == 63 || c == 10):
-            if i + 1 == string_length(text) || get_character(text and i + 1) <= 32:
-                return i + 1
+        set punctuation to c == 46 || c == 33 || c == 63
+        set finish to i + 1
+        if i + 3 <= total:
+            set unicode_mark to substring(text and i and 3)
+            if unicode_mark == "。" || unicode_mark == "！" || unicode_mark == "？":
+                set punctuation to 1
+                set finish to i + 3
+        if punctuation:
+            set abbreviated to 0
+            if c == 46:
+                set word_start to i
+                repeat while word_start > start && get_character(text and word_start - 1) > 32:
+                    set word_start to word_start - 1
+                set word to string_to_lower(substring(text and word_start and i - word_start))
+                set abbreviations to ["mr","mrs","ms","dr","prof","sr","jr","st","vs","etc","e.g","i.e","u.s","u.k"]
+                set j to 0
+                repeat while j < length_list(abbreviations):
+                    if word == get_list(abbreviations and j):
+                        set abbreviated to 1
+                    set j to j + 1
+                if string_length(word) == 1 && get_character(word and 0) >= 97 && get_character(word and 0) <= 122:
+                    set abbreviated to 1
+            # Keep closing quotes and brackets with the sentence they close.
+            set closing to 1
+            repeat while finish < total && closing:
+                set next to get_character(text and finish)
+                if next == 34 || next == 39 || next == 41 || next == 93 || next == 33 || next == 63:
+                    set finish to finish + 1
+                else if finish + 3 <= total && (substring(text and finish and 3) == "”" || substring(text and finish and 3) == "’" || substring(text and finish and 3) == "」" || substring(text and finish and 3) == "』"):
+                    set finish to finish + 3
+                else:
+                    set closing to 0
+            if abbreviated == 0 && (finish == total || get_character(text and finish) <= 32 || c >= 128):
+                repeat while finish < total && get_character(text and finish) <= 32:
+                    set finish to finish + 1
+                return finish
         set i to i + 1
-    if limit == string_length(text):
-        return limit
-    if space > start:
-        return space
-    return layout_boundary(text and limit)
+    return total
+
+define speech_chunk_end with text and start:
+    set finish to speech_sentence_end(text and start)
+    repeat while finish < string_length(text) && finish - start < 400:
+        set next to speech_sentence_end(text and finish)
+        if next - start > 400:
+            return finish
+        set finish to next
+    return finish
 
 define speech_cache_key with text returning Str:
     set runtime to "mac-1.12.33"
     if native_android():
         set runtime to "android-1.12.10"
-    return sha256(concat(runtime and concat("|kokoro-v1.0-int8|af-heart-3|speed1|chunks400-v1|" and text)))
+    return sha256(concat(runtime and concat("|kokoro-v1.0-int8|af-heart-3|speed1|silence0.2|sentences-v3|" and text)))
 
 define speech_wave_path with prefix and index returning Str:
     return concat(prefix and concat("-" and concat(int_to_string(index) and ".wav")))

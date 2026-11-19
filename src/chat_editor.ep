@@ -170,7 +170,8 @@ define editor_clipboard returning Str:
     set pointer to ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "GetClipboardText"))
     if pointer == 0:
         return ""
-    return ptr_to_str(pointer)
+    # GLFW owns this buffer and may replace it on the next clipboard call.
+    return concat("" and ptr_to_str(pointer))
 
 define editor_handle with draft and x and y and width and height and enabled returning Str:
     if string_equals(draft and EDIT_TEXT) == 0:
@@ -306,8 +307,10 @@ define editor_handle with draft and x and y and width and height and enabled ret
     return EDIT_TEXT
 
 define editor_paint with text and rows and x and y and size and tint and anchor and caret and selected:
-    set i to 0
-    repeat while i < length_list(rows):
+    # Scissoring hides pixels but does not avoid glyph work. Skip offscreen rows.
+    set i to editor_max(0 and (0 - y - size - 9) / (size + 9))
+    set screen_bottom to ui_screen_height()
+    repeat while i < length_list(rows) && y + i * (size + 9) < screen_bottom:
         set row to get_list(rows and i)
         set start to get_list(row and 0)
         set finish to get_list(row and 1)

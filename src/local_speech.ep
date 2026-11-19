@@ -1,7 +1,9 @@
 # Dedicated local Kokoro voice model. Persistent WAV cache, no system/cloud TTS.
 import "speech_model"
+import "storage_cache"
 import "android/input"
 import "transport"
+set SPEECH_CACHE_LEASE to -1
 set SPEECH_ROOT to ""
 set SPEECH_WORKER to ""
 set SPEECH_LIBRARY to ""
@@ -11,6 +13,15 @@ set SPEECH_PREFIX to ""
 set SPEECH_GENERATOR to 0
 set SPEECH_PID to 0
 set SPEECH_STREAM to 0
+set SPEECH_PLAYER to 0
+set SPEECH_OBJC to 0
+set SPEECH_RATE to 0
+set SPEECH_FLUSHED to 0
+set SPEECH_STARTED to 0
+set SPEECH_PREPARE_AT to 0
+set SPEECH_AUDIO_READY to 0
+set SPEECH_TEXT to ""
+set SPEECH_TEXT_READY to 0
 set SPEECH_INDEX to 0
 set SPEECH_NEXT to 0
 set SPEECH_PLAY_UNTIL to 0
@@ -24,7 +35,14 @@ define speech_configure with root and native_directory:
         set SPEECH_LIBRARY to concat(native_directory and "/libsherpa-onnx-c-api.so")
     return 0
 
+define speech_metric with event and queued:
+    if SPEECH_PREFIX != "":
+        append_file(concat(SPEECH_PREFIX and ".playback") and concat(int_to_string(transport_now(native_system())) and concat(" " and concat(event and concat(" " and concat(int_to_string(SPEECH_INDEX) and concat(" " and concat(int_to_string(queued) and "\n"))))))))
+    return 0
+
 define speech_stop:
+    if SPEECH_TURN != "":
+        speech_metric("stop" and 0)
     if SPEECH_GENERATOR > 0:
         ep_dlcall2(ep_dlsym(native_system() and "kill") and SPEECH_GENERATOR and 15)
         process_poll(SPEECH_GENERATOR)
@@ -36,6 +54,17 @@ define speech_stop:
     if SPEECH_STREAM != 0:
         ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_DestroyAudioStream") and SPEECH_STREAM)
         set SPEECH_STREAM to 0
+    if SPEECH_PLAYER != 0:
+        speech_message(SPEECH_PLAYER and "pause")
+        speech_message(SPEECH_PLAYER and "removeAllItems")
+        speech_message(SPEECH_PLAYER and "release")
+        set SPEECH_PLAYER to 0
+    set SPEECH_PLAY_UNTIL to 0
+    set SPEECH_FLUSHED to 0
+    set SPEECH_RATE to 0
+    if SPEECH_CACHE_LEASE >= 0:
+        ep_dlcall1(ep_dlsym(native_system() and "close") and SPEECH_CACHE_LEASE)
+        set SPEECH_CACHE_LEASE to -1
     set SPEECH_TURN to ""
     return 0
 
@@ -44,27 +73,71 @@ define speech_start with turn and text:
     set SPEECH_ERROR to ""
     set directory to concat(get_env("ECHOLITE_HOME") and "/speech-cache")
     ep_dlcall2(ep_dlsym(native_system() and "mkdir") and directory and 448)
+    set SPEECH_CACHE_LEASE to storage_speech_lock(directory and 0)
+    if SPEECH_CACHE_LEASE < 0:
+        set SPEECH_ERROR to "Voice cache maintenance is running; try again shortly."
+        speech_stop()
+        return 0
     set SPEECH_PREFIX to concat(directory and concat("/" and speech_cache_key(text)))
-    set input to concat(SPEECH_PREFIX and ".txt")
     ep_dlcall1(ep_dlsym(native_system() and "umask") and 63)
+    write_file(concat(SPEECH_PREFIX and ".playback") and "milliseconds event chunk queued_milliseconds\n")
+    set input to concat(SPEECH_PREFIX and ".txt")
     if write_file(input and text) != 1:
         set SPEECH_ERROR to "Could not prepare local speech."
+        speech_stop()
         return 0
     if file_exists(concat(SPEECH_PREFIX and ".done")) == 0:
         set model to concat(SPEECH_ROOT and "/models/voice/kokoro")
         if file_exists(concat(model and "/model.int8.onnx")) == 0:
             set SPEECH_ERROR to "The local Kokoro voice model is not installed."
+            speech_stop()
             return 0
         set log to native_open(concat(SPEECH_PREFIX and ".log") and 1537 and 384)
         set SPEECH_GENERATOR to process_launch(SPEECH_WORKER and [model,SPEECH_LIBRARY,input,SPEECH_PREFIX] and log)
         ep_dlcall1(ep_dlsym(native_system() and "close") and log)
         if SPEECH_GENERATOR <= 0:
             set SPEECH_ERROR to "Could not start the local voice model."
+            speech_stop()
             return 0
+    set SPEECH_STARTED to 0
+    set SPEECH_PREPARE_AT to transport_now(native_system())
+    set SPEECH_AUDIO_READY to 0
+    set SPEECH_TEXT to text
+    set SPEECH_TEXT_READY to 0
     set SPEECH_TURN to turn
     set SPEECH_INDEX to 0
     set SPEECH_NEXT to 0
     return 0
+
+# One player per reply, with the next chunk queued before the current one drains.
+define speech_message with object and method:
+    set selector to ep_dlcall1(ep_dlsym(SPEECH_OBJC and "sel_registerName") and method)
+    return ep_dlcall2(ep_dlsym(SPEECH_OBJC and "objc_msgSend") and object and selector)
+
+define speech_argument with object and method and value:
+    set selector to ep_dlcall1(ep_dlsym(SPEECH_OBJC and "sel_registerName") and method)
+    return ep_dlcall3(ep_dlsym(SPEECH_OBJC and "objc_msgSend") and object and selector and value)
+
+define speech_mac_queue with path:
+    if SPEECH_OBJC == 0:
+        set SPEECH_OBJC to ep_dlopen("/usr/lib/libobjc.A.dylib")
+        ep_dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation")
+    set get_class to ep_dlsym(SPEECH_OBJC and "objc_getClass")
+    set pool to speech_message(speech_message(ep_dlcall1(get_class and "NSAutoreleasePool") and "alloc") and "init")
+    if SPEECH_PLAYER == 0:
+        set SPEECH_PLAYER to speech_message(speech_message(ep_dlcall1(get_class and "AVQueuePlayer") and "alloc") and "init")
+    set name to speech_argument(ep_dlcall1(get_class and "NSString") and "stringWithUTF8String:" and path)
+    set url to speech_argument(ep_dlcall1(get_class and "NSURL") and "fileURLWithPath:" and name)
+    set item to speech_argument(ep_dlcall1(get_class and "AVPlayerItem") and "playerItemWithURL:" and url)
+    set ok to 0
+    if SPEECH_PLAYER != 0 && item != 0:
+        set selector to ep_dlcall1(ep_dlsym(SPEECH_OBJC and "sel_registerName") and "insertItem:afterItem:")
+        ep_dlcall4(ep_dlsym(SPEECH_OBJC and "objc_msgSend") and SPEECH_PLAYER and selector and item and 0)
+        speech_message(SPEECH_PLAYER and "play")
+        speech_metric("queue_items" and speech_message(speech_message(SPEECH_PLAYER and "items") and "count"))
+        set ok to 1
+    speech_message(pool and "drain")
+    return ok
 
 define speech_android_play with path:
     ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_InitSubSystem") and 16)
@@ -74,13 +147,28 @@ define speech_android_play with path:
     set loaded to ep_dlcall4(ep_dlsym(ANDROID_SDL and "SDL_LoadWAV") and path and spec and buffer and size)
     set ok to 0
     if loaded:
-        set SPEECH_STREAM to ep_dlcall4(ep_dlsym(ANDROID_SDL and "SDL_OpenAudioDeviceStream") and 4294967295 and spec and 0 and 0)
-        if SPEECH_STREAM != 0:
-            set ok to ep_dlcall3(ep_dlsym(ANDROID_SDL and "SDL_PutAudioStreamData") and SPEECH_STREAM and process_integer(buffer and 8) and process_integer(size and 4))
-            ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_FlushAudioStream") and SPEECH_STREAM)
-            ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_ResumeAudioStreamDevice") and SPEECH_STREAM)
-            # WAV output is mono signed 16-bit PCM; keep the final device buffer alive.
-            set SPEECH_PLAY_UNTIL to transport_now(native_system()) + process_integer(size and 4) * 1000 / (process_integer(spec + 8 and 4) * 2) + 150
+        set rate to process_integer(spec + 8 and 4)
+        # Sherpa writes signed 16-bit, mono PCM. Refuse unexpected formats.
+        if process_integer(spec and 4) == 32784 && process_integer(spec + 4 and 4) == 1 && rate > 0:
+            if SPEECH_STREAM == 0:
+                set SPEECH_STREAM to ep_dlcall4(ep_dlsym(ANDROID_SDL and "SDL_OpenAudioDeviceStream") and 4294967295 and spec and 0 and 0)
+                set SPEECH_RATE to rate
+            if SPEECH_STREAM != 0 && rate == SPEECH_RATE:
+                set ok to ep_dlcall3(ep_dlsym(ANDROID_SDL and "SDL_PutAudioStreamData") and SPEECH_STREAM and process_integer(buffer and 8) and process_integer(size and 4))
+                if ok:
+                    set ahead to SPEECH_PLAY_UNTIL
+                    if SPEECH_STARTED:
+                        set ahead to ahead - transport_now(native_system())
+                    speech_metric("queue" and ahead)
+                    set now to transport_now(native_system())
+                    set duration to process_integer(size and 4) * 1000 / (rate * 2)
+                    set SPEECH_AUDIO_READY to SPEECH_AUDIO_READY + duration
+                    if SPEECH_STARTED:
+                        if SPEECH_PLAY_UNTIL < now:
+                            set SPEECH_PLAY_UNTIL to now
+                        set SPEECH_PLAY_UNTIL to SPEECH_PLAY_UNTIL + duration
+                    else:
+                        set SPEECH_PLAY_UNTIL to SPEECH_AUDIO_READY
         ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_free") and process_integer(buffer and 8))
     free_bytes(size)
     free_bytes(buffer)
@@ -93,7 +181,7 @@ define speech_tick:
     set now to transport_now(native_system())
     if now < SPEECH_NEXT:
         return 0
-    set SPEECH_NEXT to now + 100
+    set SPEECH_NEXT to now + 50
     if SPEECH_GENERATOR > 0:
         set status to process_poll(SPEECH_GENERATOR)
         if status != -1:
@@ -102,35 +190,65 @@ define speech_tick:
                 set SPEECH_ERROR to "Local voice generation failed."
                 speech_stop()
                 return 0
-    if SPEECH_PID > 0:
-        set status to process_poll(SPEECH_PID)
-        if status == -1:
-            return 0
-        set SPEECH_PID to 0
-        if status != 0:
+    if SPEECH_STREAM != 0 && SPEECH_STARTED == 0 && SPEECH_AUDIO_READY > 0:
+        set needed to 2000
+        if SPEECH_TEXT_READY > 0:
+            set remaining to SPEECH_AUDIO_READY * (string_length(SPEECH_TEXT) - SPEECH_TEXT_READY) / SPEECH_TEXT_READY
+            set excess to now - SPEECH_PREPARE_AT - SPEECH_AUDIO_READY
+            if excess > 0:
+                set needed to needed + remaining * excess * 3 / (SPEECH_AUDIO_READY * 2)
+        # If generation is slower than real time, prepare enough of the remaining
+        # reply to cover that measured deficit. Cached replies start immediately.
+        if (SPEECH_GENERATOR == 0) || (SPEECH_INDEX >= 2 && SPEECH_AUDIO_READY >= needed):
+            set SPEECH_STARTED to 1
+            set SPEECH_PLAY_UNTIL to now + SPEECH_AUDIO_READY
+            speech_metric("start" and SPEECH_AUDIO_READY)
+            ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_ResumeAudioStreamDevice") and SPEECH_STREAM)
+    # Keep preparation audio bounded; the worker can finish the rest on disk.
+    if SPEECH_STARTED == 0 && SPEECH_STREAM != 0 && SPEECH_AUDIO_READY >= 60000 && SPEECH_GENERATOR > 0:
+        return 0
+    # Bound queued audio: Android about 15 seconds plus one chunk; Mac two items.
+    if SPEECH_STREAM != 0 && SPEECH_STARTED && SPEECH_PLAY_UNTIL > now + 15000:
+        return 0
+    if SPEECH_PLAYER != 0:
+        # Deliver AVFoundation completion events while the native UI is polling.
+        set get_class to ep_dlsym(SPEECH_OBJC and "objc_getClass")
+        set pool to speech_message(speech_message(ep_dlcall1(get_class and "NSAutoreleasePool") and "alloc") and "init")
+        set loop to speech_message(ep_dlcall1(get_class and "NSRunLoop") and "currentRunLoop")
+        set mode to speech_argument(ep_dlcall1(get_class and "NSString") and "stringWithUTF8String:" and "kCFRunLoopDefaultMode")
+        set date to speech_message(ep_dlcall1(get_class and "NSDate") and "date")
+        set selector to ep_dlcall1(ep_dlsym(SPEECH_OBJC and "sel_registerName") and "runMode:beforeDate:")
+        ep_dlcall4(ep_dlsym(SPEECH_OBJC and "objc_msgSend") and loop and selector and mode and date)
+        speech_message(pool and "drain")
+        if speech_message(SPEECH_PLAYER and "status") == 2:
             set SPEECH_ERROR to "Audio playback failed."
             speech_stop()
             return 0
-    if SPEECH_STREAM != 0:
-        if now < SPEECH_PLAY_UNTIL || ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_GetAudioStreamQueued") and SPEECH_STREAM) > 0:
+        if speech_message(speech_message(SPEECH_PLAYER and "items") and "count") >= 2:
             return 0
-        ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_DestroyAudioStream") and SPEECH_STREAM)
-        set SPEECH_STREAM to 0
     set path to speech_wave_path(SPEECH_PREFIX and SPEECH_INDEX)
     if file_exists(path):
+        set ok to 0
         if native_android():
-            if speech_android_play(path) == 0:
-                set SPEECH_ERROR to "Could not play the generated voice."
-                speech_stop()
-                return 0
+            set ok to speech_android_play(path)
         else:
-            set SPEECH_PID to process_start("/usr/bin/afplay" and [path])
-            if SPEECH_PID <= 0:
-                set SPEECH_ERROR to "Could not play the generated voice."
-                speech_stop()
-                return 0
+            set ok to speech_mac_queue(path)
+        if ok == 0:
+            set SPEECH_ERROR to "Could not play the generated voice."
+            speech_stop()
+            return 0
+        set SPEECH_TEXT_READY to speech_chunk_end(SPEECH_TEXT and SPEECH_TEXT_READY)
         set SPEECH_INDEX to SPEECH_INDEX + 1
     else if file_exists(concat(SPEECH_PREFIX and ".done")):
+        if SPEECH_STREAM != 0:
+            if SPEECH_FLUSHED == 0:
+                ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_FlushAudioStream") and SPEECH_STREAM)
+                set SPEECH_FLUSHED to 1
+            # Only the end of the whole reply needs a final device-buffer margin.
+            if SPEECH_STARTED == 0 || now < SPEECH_PLAY_UNTIL + 150 || ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_GetAudioStreamQueued") and SPEECH_STREAM) > 0:
+                return 0
+        if SPEECH_PLAYER != 0 && speech_message(SPEECH_PLAYER and "currentItem") != 0:
+            return 0
         speech_stop()
     return 0
 

@@ -58,12 +58,17 @@ define main:
         set i to i + 1
     android_chat_run("/bin/cp" and [concat(work and "/build/sdl/libSDL3.so"),concat(abi and "/libSDL3.so")])
     android_chat_run("/bin/cp" and [concat(work and "/build/llama/bin/llama-server"),concat(abi and "/libllama-server.so")])
+    android_chat_run(concat(path_dirname(clang) and "/llvm-strip") and ["--strip-unneeded",concat(abi and "/libllama-server.so")])
     android_chat_run("/bin/cp" and [concat(work and "/apk/lib/arm64-v8a/libecholite_crypto.so"),concat(abi and "/libecholite_crypto.so")])
     android_chat_run("/bin/cp" and [concat(work and "/vendor/libffi-3.8.1/aarch64-unknown-linux-android/.libs/libffi.so"),concat(abi and "/libecholite_ffi.so")])
     set i to 0
     repeat while i < length_list(reference_sources):
         android_chat_run("/bin/cp" and [concat(work and get_list(reference_sources and i)),concat(abi and concat("/" and get_list(reference_names and i)))])
         set i to i + 1
+    set accelerated to concat(work and "/build/llama-opencl/bin/llama-server")
+    if file_exists(accelerated):
+        android_chat_run("/bin/cp" and [accelerated,concat(abi and "/libllama-opencl.so")])
+        android_chat_run(concat(path_dirname(clang) and "/llvm-strip") and ["--strip-unneeded",concat(abi and "/libllama-opencl.so")])
     # EP emits framework classes directly; D8 converts them alongside upstream SDL.
     android_chat_run(compiler and [concat(root and "/src/android/service_classes.ep")])
     set classes to concat(work and "/build/ep-services")
@@ -76,6 +81,8 @@ define main:
     if ep_dlcall1(ep_dlsym(native_system() and "chdir") and package) != 0:
         return 1
     android_chat_run("/usr/bin/zip" and ["-q","echolite-unsigned.apk","classes.dex","lib/arm64-v8a/libecholite-library.so","lib/arm64-v8a/libecholite-sync.so","lib/arm64-v8a/libecholite-speech.so","lib/arm64-v8a/libsherpa-onnx-c-api.so","lib/arm64-v8a/libonnxruntime.so","lib/arm64-v8a/libecholite_gmp.so","lib/arm64-v8a/libecholite-check-services.so","lib/arm64-v8a/libmain.so","lib/arm64-v8a/libSDL3.so","lib/arm64-v8a/libecholite-core.so","lib/arm64-v8a/libecholite-runtime.so","lib/arm64-v8a/libllama-server.so","lib/arm64-v8a/libecholite_crypto.so","lib/arm64-v8a/libecholite_ffi.so","lib/arm64-v8a/libkiwix-serve.so","lib/arm64-v8a/libkiwix.so","lib/arm64-v8a/libzim.so","lib/arm64-v8a/libc++_shared.so","lib/arm64-v8a/libecholite_xml2.so","lib/arm64-v8a/libecholite_curl.so"])
+    if file_exists(accelerated):
+        android_chat_run("/usr/bin/zip" and ["-q","echolite-unsigned.apk","lib/arm64-v8a/libllama-opencl.so"])
     android_chat_run(concat(build_tools and "/zipalign") and ["-f","-P","16","4","echolite-unsigned.apk","echolite-aligned.apk"])
     set_env("JAVA_HOME" and get_list(args and 3))
     android_chat_run(concat(build_tools and "/apksigner") and ["sign","--ks",concat(work and "/signing/debug.keystore"),"--ks-pass","pass:android","--out","echolite-chat.apk","echolite-aligned.apk"])

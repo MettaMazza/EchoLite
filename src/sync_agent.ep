@@ -1,5 +1,6 @@
 # Connection-driven background sync. Idle listeners never hold a state lease.
 import "sync_commands"
+import "storage_cache"
 import "sync_startup"
 import "native_process"
 import "os"
@@ -56,8 +57,13 @@ define main:
     set received_at to 0
     set adb_child to 0
     set initialized to 0
+    set cache_maintenance_at to 0
+    set log_maintenance_at to 0
     repeat while 1:
         set now to transport_now(native_system())
+        if now >= cache_maintenance_at:
+            set cache_maintenance_at to now + 3600000
+            storage_speech(home and 1 and 536870912 and 256)
         set token to ""
         if file_exists(token_path):
             set token to string_trim(read_file(token_path))
@@ -66,6 +72,15 @@ define main:
                 set initialized to sync_devices_init(AGENT_DB) && sync_coordinator_init(AGENT_DB)
                 sql_execute(AGENT_DB and "CREATE TABLE IF NOT EXISTS sync_agent_status(singleton INTEGER PRIMARY KEY CHECK(singleton=1),state TEXT,updated INTEGER,last_received INTEGER DEFAULT 0);")
                 sync_release_state()
+        if initialized && now >= log_maintenance_at:
+            set log_maintenance_at to now + 60000
+            if agent_lease(home and token):
+                storage_log(home and "native-runtime.log" and 8388608)
+                storage_log(home and "sync-agent.log" and 8388608)
+                storage_log(home and "sync-service.log" and 8388608)
+                storage_log(home and "wikipedia-runtime.log" and 8388608)
+                sync_release_state()
+                set log_maintenance_at to now + 3600000
         if initialized && now >= refresh_at:
             set refresh_at to now + 3000
             set interfaces to sync_network_interfaces()

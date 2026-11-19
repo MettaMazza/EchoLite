@@ -1,6 +1,8 @@
 # Separate native EP worker keeps inference off the UI thread and releases RAM on exit.
 import "speech_model"
+import "storage_cache"
 import "os"
+import "transport"
 define main:
     set args to get_args()
     if length_list(args) != 5:
@@ -13,6 +15,12 @@ define main:
         return 2
     set text to read_file(get_list(args and 3))
     set prefix to get_list(args and 4)
+    set separator to string_length(prefix) - 1
+    repeat while separator > 0 && get_character(prefix and separator) != 47:
+        set separator to separator - 1
+    set cache_lease to storage_speech_lock(substring(prefix and 0 and separator) and 0)
+    if cache_lease < 0:
+        return 7
     set model to concat(directory and "/model.int8.onnx")
     set voices to concat(directory and "/voices.bin")
     set tokens to concat(directory and "/tokens.txt")
@@ -31,10 +39,14 @@ define main:
     native_bytes_write(config and 176 and str_to_ptr(lexicon) and 8)
     native_bytes_write(config and 184 and str_to_ptr("en-us") and 8)
     native_bytes_write(config and 424 and 1 and 4)
+    native_bytes_write(config and 440 and 1045220557 and 4)
     set legacy_cif to 0
     if native_android():
         # Android uses sherpa 1.12.10 / baseline ONNX Runtime for this CPU.
+        native_bytes_write(config and 56 and 4 and 4)
         native_bytes_write(config and 240 and 1 and 4)
+        # sherpa 1.12.10 OfflineTtsConfig.silence_scale, verified against its header.
+        native_bytes_write(config and 256 and 1045220557 and 4)
         set FONT_FFI to ep_dlopen("libecholite_ffi.so")
         set pointer_type to ep_dlsym(FONT_FFI and "ffi_type_pointer")
         set legacy_cif to native_cif(pointer_type and [pointer_type,pointer_type,ep_dlsym(FONT_FFI and "ffi_type_sint32"),ep_dlsym(FONT_FFI and "ffi_type_float")])
@@ -49,6 +61,7 @@ define main:
         set finish to speech_chunk_end(text and offset)
         set path to speech_wave_path(prefix and index)
         if file_exists(path) == 0:
+            set generated_at to transport_now(native_system())
             if engine == 0:
                 set engine to ep_dlcall1(ep_dlsym(library and "SherpaOnnxCreateOfflineTts") and config)
                 if engine == 0:
@@ -74,6 +87,7 @@ define main:
             set temporary to concat(path and ".part")
             set result to 0
             if count > 0 && rate > 0:
+                display concat("chunk=" and concat(int_to_string(index) and concat(" generation_ms=" and concat(int_to_string(transport_now(native_system()) - generated_at) and concat(" audio_ms=" and int_to_string(count * 1000 / rate))))))
                 set result to ep_dlcall4(ep_dlsym(library and "SherpaOnnxWriteWave") and samples and count and rate and temporary)
             ep_dlcall1(ep_dlsym(library and "SherpaOnnxDestroyOfflineTtsGeneratedAudio") and audio)
             if result != 1:

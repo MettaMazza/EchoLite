@@ -1,0 +1,56 @@
+import "../src/storage_cache"
+import "os"
+define storage_assert with valid:
+    if valid == 0:
+        ep_exit(1)
+    return 0
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        return 2
+    set home to get_list(args and 1)
+    set directory to concat(home and "/speech-cache")
+    ep_dlcall2(ep_dlsym(native_system() and "mkdir") and home and 448)
+    ep_dlcall2(ep_dlsym(native_system() and "mkdir") and directory and 448)
+    set key to sha256("rebuildable test audio")
+    set prefix to concat(directory and concat("/" and key))
+    write_file(concat(home and "/Me.txt") and "valuable identity")
+    write_file(concat(directory and "/user-notes.txt") and "valuable user notes")
+    write_file(concat(prefix and ".txt") and "saved elsewhere in the conversation")
+    write_file(concat(prefix and "-0.wav") and "rebuildable wave")
+    write_file(concat(prefix and ".done") and "1")
+    set lock to storage_speech_lock(directory and 0)
+    storage_assert(lock >= 0)
+    storage_assert(string_contains(storage_speech(home and 1 and 0 and 0) and "busy"))
+    storage_assert(file_exists(concat(prefix and "-0.wav")))
+    ep_dlcall1(ep_dlsym(native_system() and "close") and lock)
+    set report to storage_speech(home and 1 and 0 and 0)
+    storage_assert(string_contains(report and "\"status\":\"ok\""))
+    storage_assert(file_exists(concat(prefix and "-0.wav")) == 0)
+    storage_assert(read_file(concat(home and "/Me.txt")) == "valuable identity")
+    storage_assert(read_file(concat(directory and "/user-notes.txt")) == "valuable user notes")
+    set linked to concat(directory and concat("/" and concat(sha256("link") and "-0.wav")))
+    ep_dlcall2(ep_dlsym(native_system() and "symlink") and concat(home and "/Me.txt") and linked)
+    storage_speech(home and 1 and 0 and 0)
+    storage_assert(read_file(concat(home and "/Me.txt")) == "valuable identity")
+    storage_assert(storage_speech_group("arbitrary-user-file.wav") == "")
+    set diagnostic to ""
+    repeat while string_length(diagnostic) < 2048:
+        set diagnostic to concat(diagnostic and "diagnostic status line\n")
+    write_file(concat(home and "/native-runtime.log") and diagnostic)
+    storage_assert(storage_log(home and "native-runtime.log" and 128) == 1)
+    storage_assert(string_length(read_file(concat(home and "/native-runtime.log"))) <= 64)
+    storage_assert(storage_log(home and "Me.txt" and 1) == 0)
+    storage_assert(read_file(concat(home and "/Me.txt")) == "valuable identity")
+    set kernels to concat(home and "/opencl-cache")
+    ep_dlcall2(ep_dlsym(native_system() and "mkdir") and kernels and 448)
+    set kernel to concat(kernels and concat("/" and concat(sha256("generated kernel") and ".clbin")))
+    write_file(kernel and "regenerable compiled kernel")
+    write_file(concat(kernels and "/notes.txt") and "keep this")
+    storage_assert(storage_generated_group(concat(sha256("kernel") and ".clbin") and "speech-cache") == "")
+    storage_generated(home and 1 and 0 and 0 and "opencl-cache")
+    storage_assert(file_exists(kernel) == 0)
+    storage_assert(read_file(concat(kernels and "/notes.txt")) == "keep this")
+    display "PASS: bounded generated-cache cleanup; active playback, identity, unknown files and symlink targets preserved"
+    return 0

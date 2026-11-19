@@ -61,6 +61,10 @@ The automatic-connectivity change passed 95 focused checks. Two actual local-mod
 
 Two native EP setup apps now provision a Mac or a USB-connected Android phone. The APK has a mint adaptive icon, launcher entry and first-launch home-screen pin request. See [installer validation](INSTALLER-VALIDATION.md) for the actual checks and [setup](SETUP.md) for first-time OS approvals and disk requirements. Automatic USB/Wi-Fi sync and Android foreground-service restart checks are recorded in [background sync](android/BACKGROUND.txt).
 
+## Prepared performance and storage update
+
+The source now includes optional Android Adreno acceleration, persistent compiled GPU caching, queued sentence-safe neural speech, and protected cache maintenance. See [acceleration measurements](android/ACCELERATION.md), [storage retention](STORAGE.md) and [voice playback](VOICE.md). These are development-build results; the existing published release assets have not been replaced.
+
 ## Next update
 
 EchoOffGrid integration is the next planned development phase, beginning with the ecosystem tab and source-linked library search, reading and opening. Broader workstation tools follow in stages. This release does not yet provide those integrations. See the [integration plan](../integration%20plan.txt).

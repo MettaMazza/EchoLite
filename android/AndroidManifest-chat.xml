@@ -10,6 +10,7 @@
 <uses-permission android:name="android.permission.WAKE_LOCK" />
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <application android:label="EchoLite" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:hasCode="true" android:debuggable="true" android:allowBackup="false" android:extractNativeLibs="true" android:theme="@android:style/Theme.Material.NoActionBar">
+    <uses-native-library android:name="libOpenCL.so" android:required="false" />
     <activity android:name="dev.echolite.android.EchoActivity" android:exported="true" android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode" android:windowSoftInputMode="adjustResize">
       <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
     </activity>

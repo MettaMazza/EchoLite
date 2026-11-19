@@ -250,3 +250,52 @@ NEXT IMPLEMENTATION TARGET
 Start with the EchoOffGrid tab, capability discovery and source-linked library
 search/read/open. This establishes the shared contract and provenance model
 needed for the remaining ecosystem tools.
+
+ADVERSARIAL REVIEW — 19 NOVEMBER 2026
+
+Delivery order correction: latency and responsiveness come before Milestone 1.
+Establish a measured baseline and validate the fixes on the actual phone before
+adding ecosystem tool traffic. Keep Qwen 4B as the default, 9B optional, and the
+262,144-token configured context. Do not repeat the unchanged capacity test.
+
+Phase 0 acceptance checks:
+- Read saved/live reasoning together with runtime and tool receipts. A greeting
+  must not spend hundreds of tokens repeatedly classifying its provenance.
+- Verify the loaded model path and worker arguments, rather than the UI label.
+- For consecutive related turns, record reused/evaluated prompt tokens and
+  restore/save time. A persistent slot file alone is not a cache-hit test.
+- Measure time to first visible output and completion separately. Compare cold
+  process start, warm distinct turns and exact persistent-cache replay.
+- Measure typing and scroll frame times while generating, not only idle frames.
+  Bound layout/audio caches and avoid repeated full-history layout and reads.
+- Neural speech must queue subsequent chunks before playback drains. Exercise
+  uncached generation, cached replay, multi-chunk boundaries, Stop and restart
+  on both platforms; measure synthesis time against generated audio duration.
+- Check device memory, scheduling and thermal reports before attributing slow
+  interaction to insufficient RAM or assuming all advertised hardware is used.
+
+Specific integration dependencies exposed by the current code:
+1. macos/OffGridHome.swift loads its bundled EchoInterface.dylib, despite looking
+   up a selected EchoLite installation. vendor/EchoLite-revision.txt pins an
+   older revision. An EchoLite update alone cannot update this embedded UI.
+   Require a versioned bridge handshake and matching UI/runtime compatibility;
+   document the OffGrid-owned dependency rather than patching its vendored copy.
+2. Android Main.java currently launches EchoLite without selected-content or
+   task extras. mobile.py requires a private workstation cookie. The localhost
+   dashboard is not a general agent API, and port discovery is not authorization.
+   Library search/control needs an explicitly authorized typed host contract.
+3. Android SharedFile is non-exported with per-URI grants. A user-selected file
+   grant can support a narrow read/open journey, not whole-library access.
+4. Keep the two sync domains separate. Reference OffGrid item IDs and revisions
+   from EchoLite receipts; never merge private database schemas or reuse peer
+   sync credentials as an agent-control credential. Invalidate cached reads on
+   source revision; use idempotency keys for actions retried after disconnect.
+5. Do not imply routing from map display, transcripts from media playback,
+   transmission from radio reception, or a working mesh from future plans.
+   Capability negotiation must distinguish installed, authorized and available.
+6. The ecosystem download button requires a confirmed official public URL.
+   Until one exists, show a clear unavailable state rather than invent a link.
+
+This review changes the implementation order, not ownership: EchoOffGrid remains
+read-only for EchoLite work. Personal reasoning traces and diagnostic databases
+are not integration fixtures and must never be included in the public repository.

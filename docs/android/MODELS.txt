@@ -21,9 +21,9 @@ select the smaller installed profile. A failed larger-model startup falls back t
 4B. These are two supported profiles, not a claim to rank every available model.
 The current Mac admission policy retains its measured 4B profile.
 
-The 9B profile retains four recurrent-context checkpoints (roughly 200 MiB total)
-so chained tool rounds can reuse earlier prompt boundaries. The 8 GB profile
-retains its existing single checkpoint.
+Android profiles retain four recurrent-context checkpoints (about 201 MiB in the
+measured 4B run), allowing chained rounds to reuse earlier prompt boundaries.
+The 8 GB Mac 4B profile retains its single checkpoint.
 
 The active model is displayed in the chat header. Response, tokenizer and native
 slot caches are bound to model identity. The existing 4B namespaces remain intact;

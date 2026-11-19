@@ -37,3 +37,5 @@ Consult the exact upstream revision or distribution for its license and notices 
 | eSpeak NG | Pronunciation engine/data supplied with the speech distribution — https://github.com/espeak-ng/espeak-ng |
 
 The speech distribution includes GPL-3.0 eSpeak NG components; Kiwix/libzim and GMP also have copyleft terms. EchoLite's MIT license does not replace these terms. Keep the component notices and upstream source references with binary distributions. The dictionary retains Wiktionary contributor attribution and CC BY-SA source metadata in its database; Wikipedia results retain article URLs and the snapshot date.
+
+The optional Android OpenCL backend uses the same pinned llama.cpp source and Khronos OpenCL-Headers revision 82f60316cc142e7b21dc1d8983b26de18858fbd9 (Apache-2.0; copyright 2008–2026 The Khronos Group Inc.). Its license is included in the APK assets. The phone supplies libOpenCL.so; EchoLite does not redistribute the device vendor's driver.

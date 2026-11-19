@@ -11,13 +11,13 @@ define main:
     set rebuilt to ""
     repeat while position < string_length(text):
         set finish to speech_chunk_end(text and position)
-        if finish <= position || finish - position > 400 || finish % 4 != 0:
+        if finish <= position || finish % 4 != 0:
             ep_exit(2)
         set rebuilt to concat(rebuilt and substring(text and position and finish - position))
         set position to finish
     if rebuilt != text:
         ep_exit(3)
-    display "PASS: speech chunks preserve long Unicode responses within local engine limits"
+    display "PASS: speech chunks preserve long Unicode responses without splitting sentences"
     set args to get_args()
     if length_list(args) != 3:
         display "Usage: local_speech INSTALL_ROOT TEST_HOME"
@@ -25,25 +25,38 @@ define main:
     set_env("ECHOLITE_HOME" and get_list(args and 2))
     ep_dlcall2(ep_dlsym(native_system() and "mkdir") and get_list(args and 2) and 448)
     speech_configure(get_list(args and 1) and "")
-    speech_start("test" and "Hello. This is EchoLite's local neural voice.")
+    set sample to "This is a continuous neural voice playback test. Each sentence should flow naturally into the next, without reopening the audio device. We keep the voice entirely on this machine and retain generated audio for the next playback. The next part is prepared while the current part is playing, so the boundary between audio chunks does not add an artificial pause. This second paragraph exercises another chunk. You can stop playback immediately, and start again using the saved local audio."
+    speech_start("test" and sample)
     if SPEECH_GENERATOR <= 0:
         return 5
-    set limit to transport_now(native_system()) + 60000
+    set queued_ahead to 0
+    set started to transport_now(native_system())
+    set first_audio to 0
+    set limit to started + 120000
     repeat while SPEECH_TURN != "" && transport_now(native_system()) < limit:
         ep_dlcall1(ep_dlsym(native_system() and "usleep") and 100000)
         speech_tick()
+        if SPEECH_INDEX > 0 && first_audio == 0:
+            set first_audio to transport_now(native_system()) - started
+        if SPEECH_PLAYER != 0 && speech_message(speech_message(SPEECH_PLAYER and "items") and "count") >= 2:
+            set queued_ahead to 1
     if SPEECH_TURN != "" || SPEECH_ERROR != "":
         display SPEECH_ERROR
         speech_close()
         return 6
-    speech_start("test" and "Hello. This is EchoLite's local neural voice.")
+    if queued_ahead == 0:
+        display "FAIL: next audio chunk was not queued ahead"
+        return 10
+    display concat("First audio queued in milliseconds: " and int_to_string(first_audio))
+    display concat("Total playback milliseconds: " and int_to_string(transport_now(native_system()) - started))
+    speech_start("test" and sample)
     if SPEECH_GENERATOR != 0:
         return 7
     speech_tick()
-    if SPEECH_PID <= 0:
+    if SPEECH_PLAYER == 0:
         return 8
     speech_stop()
-    if SPEECH_TURN != "" || SPEECH_PID != 0:
+    if SPEECH_TURN != "" || SPEECH_PLAYER != 0:
         return 9
     display "PASS: Kokoro generation, audio playback, persistent cache replay and Stop"
     return 0

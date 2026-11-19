@@ -24,7 +24,19 @@ This is a prerelease under active development. The Mac installer is ad-hoc
 signed rather than notarized. Device-specific battery policies can require
 background-running approval. See the repository setup and validation notes.
 
+## Prepared update — not yet published
+
+- Adreno OpenCL acceleration for the default Android 4B model, with CPU startup fallback; 9B remains optional. Full configured context remains 262,144 tokens.
+- Persistent GPU kernel caching and four Android recurrent checkpoints. See [measured results](android/ACCELERATION.md) for cache hits, latency and limitations.
+- Sentence-boundary Kokoro chunks, queued playback and adaptive Android preparation to reduce gaps between chunks.
+- Memory → Storage controls, bounded regenerable audio/GPU caches and diagnostic logs, with saved conversations and memories preserved.
+- Cached text layout, lighter unchanged-conversation refreshes and lower model-worker priority.
+- Left-aligned Android hamburger navigation with matching touch target and header spacing.
+
+These changes are prepared in source and tested development builds. Existing published installers still download the previous release assets until a new binary release is published. This remains active development, including the answer-basis reliability case documented in the acceleration notes.
+
 ## Next planned update
+
 
 EchoOffGrid ecosystem integration: a dedicated tab to download, open and connect
 EchoOffGrid, followed by tools to find, read, cite and open its library content.

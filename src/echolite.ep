@@ -1,4 +1,5 @@
 import "native_conversation"
+import "storage_cache"
 import "browser_history"
 import "identity_tokens"
 import "memory_correction"
@@ -681,7 +682,7 @@ define main:
         fail("Run echolite help")
     set cmd to get_list(args and 1)
     if cmd == "help":
-        display "EchoLite memory core: sync-devices | sync-pair PEER LABEL SECRET_FILE | sync-address PEER HOST PORT usb/wifi | sync-unpair PEER | sync-now PEER | sync-discover PEER | sync-discovery-listen HOST | sync-listen HOST PORT | init | doctor | schedules PROJECT | schedule-set PROJECT TASK_ID TASK_REV DELAY_SECONDS SOURCE_ID | schedule-cancel PROJECT SCHEDULE_ID | chat-due PROJECT | backup-create | backup-list | backup-check ID | backup-restore ID | backup-delete ID | session-start PROJECT LABEL | session-end PROJECT | sessions PROJECT BEFORE_ID | session-open PROJECT SESSION_ID BEFORE_TURN_ID | task-create PROJECT SOURCE_ID OBJECTIVE SUCCESS_CONDITION | task-update PROJECT TASK_ID EXPECTED_REV STATUS NEXT_ACTION BLOCKER EVIDENCE_ID | tasks PROJECT | task-open PROJECT TASK_ID | image-import PROJECT FILE | images PROJECT | document-import PROJECT FILE | documents PROJECT | consolidation-preview PROJECT IDS_CSV DRAFT_FILE | consolidation-apply PROJECT IDS_CSV DRAFT_FILE TOKEN | memory-lineage PROJECT ID | turn-history PROJECT | turn-budget PROJECT TURN_ID | turn-abandon PROJECT TURN_ID | retention-preview PROJECT BEFORE_DATE | retention-apply PROJECT BEFORE_DATE TOKEN | protect ID REASON | unprotect ID | protections PROJECT | unarchive ID | memory-tool NAME PROJECT QUERY | tool-history PROJECT | chat PROJECT MESSAGE | chat-image PROJECT IMAGE_ID MESSAGE | chat-document PROJECT DOCUMENT_ID MESSAGE | reflect PROJECT INTENTION | remember LAYER PROJECT SOURCE TEXT | recall PROJECT QUERY | context PROJECT QUERY | timeline PROJECT | link PARENT CHILD | supersede OLD NEW | forget ID | me | me-history | me-set FILE REASON EXPECTED_VERSION | me-link VERSION MEMORY | me-rollback VERSION EXPECTED_VERSION | archive ID | status"
+        display "EchoLite memory core: storage-report | storage-clean | sync-devices | sync-pair PEER LABEL SECRET_FILE | sync-address PEER HOST PORT usb/wifi | sync-unpair PEER | sync-now PEER | sync-discover PEER | sync-discovery-listen HOST | sync-listen HOST PORT | init | doctor | schedules PROJECT | schedule-set PROJECT TASK_ID TASK_REV DELAY_SECONDS SOURCE_ID | schedule-cancel PROJECT SCHEDULE_ID | chat-due PROJECT | backup-create | backup-list | backup-check ID | backup-restore ID | backup-delete ID | session-start PROJECT LABEL | session-end PROJECT | sessions PROJECT BEFORE_ID | session-open PROJECT SESSION_ID BEFORE_TURN_ID | task-create PROJECT SOURCE_ID OBJECTIVE SUCCESS_CONDITION | task-update PROJECT TASK_ID EXPECTED_REV STATUS NEXT_ACTION BLOCKER EVIDENCE_ID | tasks PROJECT | task-open PROJECT TASK_ID | image-import PROJECT FILE | images PROJECT | document-import PROJECT FILE | documents PROJECT | consolidation-preview PROJECT IDS_CSV DRAFT_FILE | consolidation-apply PROJECT IDS_CSV DRAFT_FILE TOKEN | memory-lineage PROJECT ID | turn-history PROJECT | turn-budget PROJECT TURN_ID | turn-abandon PROJECT TURN_ID | retention-preview PROJECT BEFORE_DATE | retention-apply PROJECT BEFORE_DATE TOKEN | protect ID REASON | unprotect ID | protections PROJECT | unarchive ID | memory-tool NAME PROJECT QUERY | tool-history PROJECT | chat PROJECT MESSAGE | chat-image PROJECT IMAGE_ID MESSAGE | chat-document PROJECT DOCUMENT_ID MESSAGE | reflect PROJECT INTENTION | remember LAYER PROJECT SOURCE TEXT | recall PROJECT QUERY | context PROJECT QUERY | timeline PROJECT | link PARENT CHILD | supersede OLD NEW | forget ID | me | me-history | me-set FILE REASON EXPECTED_VERSION | me-link VERSION MEMORY | me-rollback VERSION EXPECTED_VERSION | archive ID | status"
         return 0
     set home to get_env("ECHOLITE_HOME")
     if home == "":
@@ -716,6 +717,14 @@ define main:
         set maintenance_slot to slot_lock(slot_runtime_home())
         if maintenance_slot < 0:
             fail("Native inference is busy; finish or cancel it before forgetting or restoring")
+    if cmd == "storage-report" || cmd == "storage-clean":
+        set report to storage_speech(home and cmd == "storage-clean" and 536870912 and 256)
+        display report
+        if string_contains(report and "\"status\":\"busy\""):
+            return 2
+        if string_contains(report and "\"status\":\"error\""):
+            return 1
+        return 0
     if cmd == "backup-check":
         need(args and 3)
         set checked_backup to backup_check(home and get_list(args and 2))

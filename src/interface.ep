@@ -156,12 +156,15 @@ define main:
     set sessions to create_list()
     set turns to create_list()
     set image_turns to create_list()
+    set chat_version to ""
+    set chat_selected to ""
     set scroll to 0
     set body_height to 0
     set follow_bottom to 1
     set notice to ""
     set current_session to ""
 
+    set storage_summary to ""
     set section to "chat"
     set scheduled_run to 0
     set last_activity to transport_now(native_system())
@@ -338,19 +341,27 @@ define main:
                         set notice to "Scheduled work stopped. Your draft is retained; inspect Tasks before rescheduling."
                         if exercise_schedule_interrupt == 2 && draft == "User draft preserved while scheduled work stops.":
                             display "UI preserved the unsent draft after scheduled interruption"
+                if operation == "storage-clean":
+                    set storage_summary to "Cache is within its budget. Saved memory is unchanged."
+                    if exit_code != 0:
+                        set storage_summary to "Cache is busy or unavailable. Retry after voice playback stops."
                 set operation to ""
         if frames % 15 == 0:
             if db == 0 && file_exists(concat(home and "/memory.sqlite3")) == 1:
                 set db to sql_open(concat(home and "/memory.sqlite3"))
                 sql_execute(db and "PRAGMA query_only=ON; PRAGMA busy_timeout=100;")
             if db != 0:
-                set sessions to chat_sessions(db and project)
-                set task_rows to ui_schedule_rows(db and project)
-                set current_session to result_cache_scalar(db and "SELECT memory FROM sessions WHERE project=? AND closed IS NULL" and [project])
-                if selected == "":
-                    set selected to current_session
-                set turns to chat_turns(db and selected)
-                set image_turns to sql_query_params(db and "SELECT i.turn_id,a.path FROM turn_images i JOIN image_assets a ON a.memory=i.image JOIN session_turns s ON s.turn_id=i.turn_id WHERE s.session=? AND a.project=?" and [selected,project])
+                set version to result_cache_scalar(db and "PRAGMA data_version" and [])
+                if version != chat_version || selected != chat_selected:
+                    set sessions to chat_sessions(db and project)
+                    set task_rows to ui_schedule_rows(db and project)
+                    set current_session to result_cache_scalar(db and "SELECT memory FROM sessions WHERE project=? AND closed IS NULL" and [project])
+                    if selected == "":
+                        set selected to current_session
+                    set turns to chat_turns(db and selected)
+                    set image_turns to sql_query_params(db and "SELECT i.turn_id,a.path FROM turn_images i JOIN image_assets a ON a.memory=i.image JOIN session_turns s ON s.turn_id=i.turn_id WHERE s.session=? AND a.project=?" and [selected,project])
+                    set chat_version to version
+                    set chat_selected to selected
         set wheel to chat_wheel(RAYLIB_HANDLE)
         if native_android() && UI_TOUCH_CAPTURE == 0 && mobile_menu == 0 && EDIT_MENU == 0 && UI_TOUCH_START_X >= left && UI_TOUCH_START_Y >= 110 && UI_TOUCH_START_Y < height - 200:
             set wheel to UI_TOUCH_DELTA
@@ -442,7 +453,7 @@ define main:
                     set section to "chat"
                     set follow_bottom to 1
                 set si to si + 1
-        if native_android() && clicked && hit(width - 56 and 18 and 40 and 40):
+        if native_android() && clicked && hit(16 and 18 and 40 and 40):
             set mobile_menu to 1 - mobile_menu
             android_keyboard(0)
             set clicked to 0
@@ -557,8 +568,11 @@ define main:
         if native_android() == 0 || mobile_menu:
             raylib_draw_rectangle(0 and 0 and 248 and height and sidebar)
             raylib_draw_rectangle(247 and 0 and 1 and height and border)
-            ui_icon("echo" and 24 and 29 and 4 and mint)
-            ui_wordmark(60 and 34 and 2 and white)
+            if native_android():
+                ui_wordmark(68 and 34 and 2 and white)
+            else:
+                ui_icon("echo" and 24 and 29 and 4 and mint)
+                ui_wordmark(60 and 34 and 2 and white)
             label("A MIND OF YOUR OWN" and 24 and 70 and 11 and muted)
             set button_tint to surface
             if hit(24 and 104 and 208 and 40):
@@ -611,13 +625,19 @@ define main:
             else if section == "devices":
                 set title to "Devices"
                 set subtitle to "Local continuity across your devices"
+            else if section == "storage":
+                set title to "Storage"
+                set subtitle to "Local cache and retention"
             else if section == "memory":
                 set title to "Memory"
                 set subtitle to "Continuity through experience"
             else if section == "identity":
                 set title to "Me"
                 set subtitle to "Identity and working perspective"
-            label(title and left and 28 and 22 and white)
+            set title_left to left
+            if native_android():
+                set title_left to left + 56
+            label(title and title_left and 28 and 22 and white)
             label(subtitle and left and 61 and 12 and muted)
             set network_label to "WEB + LOCAL"
             if native_android() == 0:
@@ -726,6 +746,8 @@ define main:
                         set speech_label to "Read aloud"
                         if string_equals(SPEECH_TURN and get_list(turn and 0)):
                             set speech_label to "Stop reading"
+                            if native_android() && SPEECH_STARTED == 0:
+                                set speech_label to "Stop preparing"
                         panel(left + 116 and row_y and 132 and 36 and surface)
                         label(speech_label and left + 128 and row_y + 11 and 13 and mint)
                         if clicked && ui_mouse_y() >= 110 && ui_mouse_y() < SELECT_BOTTOM:
@@ -845,9 +867,32 @@ define main:
                 ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
                 if notice != "":
                     label(notice and left + 24 and height - 38 and 12 and muted)
+            else if section == "storage":
+                label("Storage" and left + 24 and 143 and 24 and white)
+                set storage_y to wrap_text("Generated audio is cached locally, with a 512 MiB / 256 reply budget. Idle background maintenance trims the least recently used audio. Playback and generation are protected." and left + 24 and 192 and content_width - 48 and 16 and muted)
+                set storage_y to storage_y + 24
+                panel(left + 24 and storage_y and 112 and 36 and surface)
+                label("Refresh" and left + 40 and storage_y + 11 and 13 and mint)
+                panel(left + 148 and storage_y and 132 and 36 and surface)
+                label("Trim cache" and left + 164 and storage_y + 11 and 13 and mint)
+                if clicked && hit(left + 24 and storage_y and 112 and 36):
+                    set report to storage_speech(home and 0 and 536870912 and 256)
+                    set storage_summary to result_cache_scalar(db and "SELECT CASE WHEN json_extract(?,'$.status')='ok' THEN printf('Generated audio: %.1f MiB / 512 MiB. %d cached replies.',coalesce(json_extract(?,'$.cache_bytes'),0)/1048576.0,coalesce(json_extract(?,'$.cached_replies'),0)) ELSE coalesce(json_extract(?,'$.text'),'Storage is unavailable.') END" and [report,report,report,report])
+                if clicked && hit(left + 148 and storage_y and 132 and 36) && child == 0:
+                    set child to process_start(core and ["storage-clean"])
+                    set operation to "storage-clean"
+                    set storage_summary to "Trimming generated audio to its budget..."
+                set storage_y to wrap_text(storage_summary and left + 24 and storage_y + 58 and content_width - 48 and 15 and white)
+                set storage_y to wrap_text("Inference results retain up to 64 MiB. One native KV snapshot is kept for reuse. Removing a generated cache can make its next use take longer." and left + 24 and storage_y + 24 and content_width - 48 and 15 and muted)
+                wrap_text("Conversations, reasoning traces, memories, Me history, source receipts, attachments, models and backups are kept. Memory consolidation uses reviewed summaries and source lineage; cache cleanup never decides what matters by matching words." and left + 24 and storage_y + 24 and content_width - 48 and 15 and muted)
             else if section == "memory":
                 label("What stays with you" and left + 24 and 143 and 24 and white)
-                label("Recent retained records / current project" and left + 24 and 184 and 12 and muted)
+                label("Retained records / current project" and left + 24 and 184 and 12 and muted)
+                panel(left + content_width - 128 and 174 and 104 and 32 and surface)
+                label("Storage" and left + content_width - 112 and 184 and 13 and mint)
+                if clicked && hit(left + content_width - 128 and 174 and 104 and 32):
+                    set section to "storage"
+                    set storage_summary to "Select Refresh to inspect generated audio storage."
                 set SELECT_TOP to 220
                 ui_scissor(left and 220 and content_width and height - 284)
                 set row_y to 228 - pane_scroll
@@ -894,8 +939,10 @@ define main:
                 ep_dlcall0(ep_dlsym(RAYLIB_HANDLE and "EndScissorMode"))
                 label("Versioned identity / changes apply at the next turn" and left + 24 and height - 38 and 11 and muted)
         if native_android():
-            panel(width - 56 and 18 and 40 and 40 and surface)
-            label("=" and width - 43 and 29 and 20 and mint)
+            panel(16 and 18 and 40 and 40 and surface)
+            raylib_draw_rectangle(28 and 29 and 16 and 2 and mint)
+            raylib_draw_rectangle(28 and 37 and 16 and 2 and mint)
+            raylib_draw_rectangle(28 and 45 and 16 and 2 and mint)
         editor_menu_draw()
         raylib_end_drawing()
         set frames to frames + 1

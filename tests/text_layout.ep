@@ -45,6 +45,20 @@ define main:
     layout_assert(length_list(lines) == 4 and "paragraph and blank lines retained")
     layout_assert(string_equals(get_list(lines and 2) and "    indented") and "indentation retained")
     layout_assert(layout_prefix("é🌱" and 0 and 18) == 2 and "tiny viewport advances whole codepoint")
+    layout_cache_clear()
+    set misses to LAYOUT_CACHE_MISSES
+    layout_ranges(text and 180 and 18)
+    layout_ranges(text and 180 and 18)
+    layout_assert(LAYOUT_CACHE_MISSES == misses + 1 and "unchanged frame reuses layout")
+    layout_ranges(text and 181 and 18)
+    layout_ranges(text and 180 and 19)
+    layout_ranges(concat(text and "x") and 180 and 18)
+    layout_assert(LAYOUT_CACHE_MISSES == misses + 4 and "resize, size and content invalidate layout")
+    set i to 0
+    repeat while i < 140:
+        layout_ranges(concat(text and int_to_string(i)) and 180 and 18)
+        set i to i + 1
+    layout_assert(length_list(LAYOUT_CACHE) <= 128 && LAYOUT_CACHE_BYTES <= 524288 and "layout retention bounded")
     raylib_close_window()
     display concat("PASS: " and concat(int_to_string(checks) and " native font layout checks"))
     return 0

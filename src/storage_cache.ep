@@ -1,0 +1,164 @@
+# Rebuildable speech artifacts only. Memory and user content are never GC targets.
+import "state_lock"
+import "result_cache"
+import "transport"
+
+define storage_generated_group with name and kind returning Str:
+    if string_length(name) < 65:
+        return ""
+    set i to 0
+    repeat while i < 64:
+        set c to get_character(name and i)
+        if (c < 48 || c > 57) && (c < 97 || c > 102):
+            return ""
+        set i to i + 1
+    set suffix to substring(name and 64 and string_length(name) - 64)
+    if kind == "opencl-cache":
+        if suffix == ".clbin":
+            return substring(name and 0 and 64)
+        return ""
+    if suffix == ".txt" || suffix == ".done" || suffix == ".log" || suffix == ".playback":
+        return substring(name and 0 and 64)
+    if starts_with(suffix and "-"):
+        set i to 1
+        repeat while i < string_length(suffix) && get_character(suffix and i) >= 48 && get_character(suffix and i) <= 57:
+            set i to i + 1
+        if i > 1:
+            set extension to substring(suffix and i and string_length(suffix) - i)
+            if extension == ".wav" || extension == ".wav.part":
+                return substring(name and 0 and 64)
+    return ""
+
+define storage_speech_lock with directory and exclusive:
+    set verified to native_open(directory and 17826048 and 0)
+    if verified < 0:
+        return -1
+    ep_dlcall1(ep_dlsym(native_system() and "close") and verified)
+    set lock to private_lock(directory and ".cache.lock")
+    if lock < 0:
+        return -1
+    set flags to 5
+    if exclusive:
+        set flags to 6
+    if ep_dlcall2(ep_dlsym(native_system() and "flock") and lock and flags) != 0:
+        ep_dlcall1(ep_dlsym(native_system() and "close") and lock)
+        return -1
+    return lock
+
+# A nonblocking lease excludes playback and generation, including orphan workers.
+# Unknown names, symlinks and files with other hard links are retained.
+define storage_generated with home and clean and budget and groups and kind returning Str:
+    set directory to concat(home and concat("/" and kind))
+    if is_directory(directory) == 0:
+        return "{\"status\":\"ok\",\"cache_bytes\":0,\"removed_bytes\":0}"
+    set lock to storage_speech_lock(directory and clean)
+    if lock < 0:
+        return "{\"status\":\"busy\",\"text\":\"Speech is active; cleanup will retry when idle.\"}"
+    set libc to native_system()
+    set dir to native_open(directory and 17826048 and 0)
+    if dir < 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and lock)
+        return lease_error("Speech cache directory is unavailable or a symlink")
+    set stream to ep_dlcall1(ep_dlsym(libc and "fdopendir") and ep_dlcall1(ep_dlsym(libc and "dup") and dir))
+    if stream == 0:
+        ep_dlcall1(ep_dlsym(libc and "close") and dir)
+        ep_dlcall1(ep_dlsym(libc and "close") and lock)
+        return lease_error("Cannot inspect speech cache")
+    set db to sql_open(":memory:")
+    sql_execute(db and "CREATE TABLE files(name TEXT PRIMARY KEY,owner TEXT,bytes INTEGER,modified INTEGER); CREATE INDEX file_owner ON files(owner);")
+    set info to alloc_bytes(144)
+    set skipped to 0
+    set count to 0
+    set valid to 1
+    repeat while 1:
+        native_bytes_write(native_errno_pointer() and 0 and 0 and 4)
+        set entry to ep_dlcall1(ep_dlsym(libc and "readdir") and stream)
+        if entry == 0:
+            if transport_errno(libc) != 0:
+                set valid to 0
+            break
+        set name to native_dirent_name(entry)
+        if name != "." && name != ".." && name != ".cache.lock":
+            set count to count + 1
+            if count > 100000:
+                set valid to 0
+                break
+            set owner to storage_generated_group(name and kind)
+            if owner != "" && ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and native_at_nofollow()) == 0 && native_stat_mode(info) / 4096 == 8 && native_stat_links(info) == 1 && native_stat_owner(info) == ep_dlcall0(ep_dlsym(libc and "getuid")):
+                sql_execute_params(db and "INSERT INTO files VALUES(?,?,CAST(? AS INTEGER),CAST(? AS INTEGER))" and [name,owner,int_to_string(native_stat_size(info)),int_to_string(native_stat_time(info and 48))])
+            else:
+                set skipped to skipped + 1
+    ep_dlcall1(ep_dlsym(libc and "closedir") and stream)
+    set before to result_cache_scalar(db and "SELECT coalesce(sum(bytes),0) FROM files" and [])
+    set removed to 0
+    if clean && valid:
+        set over to result_cache_scalar(db and "SELECT coalesce(sum(bytes),0)>CAST(? AS INTEGER) OR count(DISTINCT owner)>CAST(? AS INTEGER) FROM files" and [int_to_string(budget),int_to_string(groups)])
+        repeat while over == "1" && valid:
+            set oldest to result_cache_scalar(db and "SELECT owner FROM files GROUP BY owner ORDER BY max(modified),owner LIMIT 1" and [])
+            set rows to sql_query_params(db and "SELECT name,bytes FROM files WHERE owner=?" and [oldest])
+            set i to 0
+            repeat while i < length_list(rows) && valid:
+                set row to get_list(rows and i)
+                set name to get_list(row and 0)
+                if ep_dlcall4(ep_dlsym(libc and "fstatat") and dir and name and info and native_at_nofollow()) != 0 || native_stat_mode(info) / 4096 != 8 || native_stat_links(info) != 1 || native_stat_owner(info) != ep_dlcall0(ep_dlsym(libc and "getuid")):
+                    set valid to 0
+                else if ep_dlcall3(ep_dlsym(libc and "unlinkat") and dir and name and 0) != 0:
+                    set valid to 0
+                else:
+                    set removed to removed + string_to_int(get_list(row and 1))
+                    sql_execute_params(db and "DELETE FROM files WHERE name=?" and [name])
+                set i to i + 1
+            set over to result_cache_scalar(db and "SELECT coalesce(sum(bytes),0)>CAST(? AS INTEGER) OR count(DISTINCT owner)>CAST(? AS INTEGER) FROM files" and [int_to_string(budget),int_to_string(groups)])
+    if clean && removed > 0 && ep_dlcall1(ep_dlsym(libc and "fsync") and dir) != 0:
+        set valid to 0
+    set result to result_cache_scalar(db and "SELECT json_object('status',CASE WHEN ?='1' THEN 'ok' ELSE 'error' END,'cache_bytes_before',CAST(? AS INTEGER),'cache_bytes',coalesce(sum(bytes),0),'cached_replies',count(DISTINCT owner),'removed_bytes',CAST(? AS INTEGER),'unmanaged_entries_retained',CAST(? AS INTEGER),'budget_bytes',CAST(? AS INTEGER),'reply_limit',CAST(? AS INTEGER),'policy','Least recently used regenerable cache only; conversations, memories, identity, sources, attachments, models and backups are retained.') FROM files" and [int_to_string(valid),before,int_to_string(removed),int_to_string(skipped),int_to_string(budget),int_to_string(groups)])
+    free_bytes(info)
+    sql_close(db)
+    ep_dlcall1(ep_dlsym(libc and "close") and dir)
+    ep_dlcall1(ep_dlsym(libc and "close") and lock)
+    return result
+
+# Runtime diagnostics are separate from saved reasoning and tool receipts.
+# Keep their recent tail within a fixed disk budget, never touching SQLite data.
+define storage_log with home and name and limit:
+    if name != "native-runtime.log" && name != "sync-agent.log" && name != "sync-service.log" && name != "wikipedia-runtime.log":
+        return 0
+    if file_exists(concat(home and concat("/" and name))) == 0:
+        return 0
+    set libc to native_system()
+    set fd to private_lock(home and name)
+    if fd < 0:
+        return 0
+    set info to alloc_bytes(144)
+    set trimmed to 0
+    if ep_dlcall2(ep_dlsym(libc and "fstat") and fd and info) == 0 && native_stat_size(info) > limit:
+        set keep to limit / 2
+        set buffer to alloc_bytes(keep)
+        set count to ep_dlcall4(ep_dlsym(libc and "pread") and fd and buffer and keep and native_stat_size(info) - keep)
+        if count == keep:
+            set first to 0
+            repeat while first < keep && peek_byte(buffer and first) != 10:
+                set first to first + 1
+            if first < keep:
+                set first to first + 1
+            else:
+                set first to 0
+            set count to ep_dlcall4(ep_dlsym(libc and "pwrite") and fd and buffer + first and keep - first and 0)
+            if count == keep - first:
+                if ep_dlcall2(ep_dlsym(libc and "ftruncate") and fd and count) == 0:
+                    set trimmed to 1
+        free_bytes(buffer)
+    free_bytes(info)
+    ep_dlcall1(ep_dlsym(libc and "close") and fd)
+    return trimmed
+
+define storage_speech_group with name returning Str:
+    return storage_generated_group(name and "speech-cache")
+
+define storage_speech with home and clean and budget and groups returning Str:
+    return storage_generated(home and clean and budget and groups and "speech-cache")
+
+# Run before starting the accelerated worker, while holding the runtime-start lock.
+# Compiled GPU programs are rebuildable; model weights and KV state are separate.
+define storage_kernels with home returning Str:
+    return storage_generated(home and 1 and 67108864 and 4096 and "opencl-cache")

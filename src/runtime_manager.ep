@@ -4,10 +4,12 @@ import "wikipedia_runtime"
 import "state_lock"
 import "transport"
 import "result_cache"
+import "storage_cache"
 import "fs"
 import "os"
 
 set RUNTIME_PROFILE to 0
+set RUNTIME_ACCELERATED to 0
 
 # Read or provision a private persistent credential without exposing it in argv.
 define runtime_credential with path returning Str:
@@ -75,12 +77,20 @@ define runtime_arguments with root and token_path and embedding:
     else:
         set projector to runtime_model_path(root and profile_projector(RUNTIME_PROFILE))
         set checkpoints to "1"
-        if RUNTIME_PROFILE == 1:
+        if native_android() || RUNTIME_PROFILE == 1:
             set checkpoints to "4"
         set slots to concat(path_dirname(token_path) and "/native-slots")
         if is_directory(slots) == 0:
             ep_dlcall2(ep_dlsym(native_system() and "mkdir") and slots and 448)
-        set extra to ["--mmproj",projector,"--cache-type-k","q4_0","--cache-type-v","q4_0","--flash-attn","on","--batch-size","256","--ubatch-size","64","--ctx-checkpoints",checkpoints,"--no-kv-offload","--no-mmproj-offload","--slot-save-path",slots,"--reasoning","on","--reasoning-format","deepseek","--reasoning-budget","-1","--timeout","86400"]
+        set extra to ["--mmproj",projector,"--cache-type-k","q4_0","--cache-type-v","q4_0","--flash-attn","on","--batch-size","256","--ubatch-size","64","--ctx-checkpoints",checkpoints,"--no-mmproj-offload","--slot-save-path",slots,"--reasoning","on","--reasoning-format","deepseek","--reasoning-budget","-1","--timeout","86400"]
+    if embedding == 0:
+        if RUNTIME_ACCELERATED:
+            append_list(extra and "--gpu-layers")
+            append_list(extra and "99")
+            append_list(extra and "--device")
+            append_list(extra and "GPUOpenCL")
+        else:
+            append_list(extra and "--no-kv-offload")
     if native_android() && embedding == 0:
         append_list(extra and "--threads")
         append_list(extra and "4")
@@ -118,6 +128,14 @@ define runtime_ensure with root and home and token_path returning Str:
     if resident_profile >= 0:
         if runtime_probe(db and 8400 and token and runtime_model_path(root and profile_name(resident_profile)) and PROFILE_CONTEXT) == "ready":
             set RUNTIME_PROFILE to resident_profile
+    # The optional Adreno runtime retains the same model/context and CPU fallback.
+    set accelerator to concat(runtime_native_directory() and "/libllama-opencl.so")
+    if native_android() && RUNTIME_PROFILE == 0 && file_exists(accelerator) && file_exists("/vendor/lib64/libOpenCL.so"):
+        set RUNTIME_ACCELERATED to 1
+        set cache_directory to concat(path_dirname(token_path) and "/opencl-cache")
+        ep_dlcall2(ep_dlsym(libc and "mkdir") and cache_directory and 448)
+        set_env("GGML_OPENCL_KERNEL_CACHE_DIR" and cache_directory)
+        set_env("LD_LIBRARY_PATH" and concat(runtime_native_directory() and "/:/vendor/lib64:/vendor/lib64/egl"))
     display concat("Selected local model: " and profile_name(RUNTIME_PROFILE))
     set index to 0
     repeat while index < 2 && problem == "":
@@ -134,12 +152,20 @@ define runtime_ensure with root and home and token_path returning Str:
             if status == "occupied":
                 set problem to concat("Port " and concat(int_to_string(port) and " is occupied by a service whose model, context, build or credential does not match"))
             else if status == "absent":
+                set executable to runtime_worker_path(root)
+                if index == 0 && RUNTIME_ACCELERATED:
+                    storage_kernels(path_dirname(token_path))
+                    set executable to accelerator
+                    display "Starting Adreno OpenCL acceleration with persistent kernel cache"
                 set arguments to runtime_arguments(root and token_path and index)
                 set output_fd to private_lock(home and "native-runtime.log")
                 set pid to 0
                 if output_fd >= 0:
                     native_fcntl_int(output_fd and 4 and 8)
                     set pid to process_detached(executable and arguments and output_fd)
+                    if native_android() && pid > 0:
+                        # Inference must not inherit the foreground UI thread priority.
+                        ep_dlcall3(ep_dlsym(libc and "setpriority") and 0 and pid and 5)
                     ep_dlcall1(ep_dlsym(libc and "close") and output_fd)
                 if pid == 0:
                     set problem to "The native model process could not start"
@@ -149,6 +175,11 @@ define runtime_ensure with root and home and token_path returning Str:
                     repeat while ready == 0 && problem == "":
                         set exited to process_poll(pid)
                         if exited != 0 - 1:
+                            if index == 0 && RUNTIME_ACCELERATED:
+                                set RUNTIME_ACCELERATED to 0
+                                set index to -1
+                                display "Accelerated runtime could not start; using the installed CPU runtime"
+                                break
                             if index == 0 && RUNTIME_PROFILE == 1:
                                 set RUNTIME_PROFILE to 0
                                 set index to -1

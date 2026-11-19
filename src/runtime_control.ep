@@ -57,7 +57,7 @@ define runtime_process_matches with root and token_path and args:
     set matches_executable to runtime_same_model(runtime_worker_path(root) and executable)
     # Android preserves detached workers across package replacement. The old APK
     # directory differs, but only this app UID may own the matching process.
-    if native_android() && starts_with(executable and "/data/app/") && string_contains(executable and "/dev.echolite.android-") && ends_with(executable and "/lib/arm64/libllama-server.so"):
+    if native_android() && starts_with(executable and "/data/app/") && string_contains(executable and "/dev.echolite.android-") && (ends_with(executable and "/lib/arm64/libllama-server.so") || ends_with(executable and "/lib/arm64/libllama-opencl.so")):
         set matches_executable to 1
     if matches_executable == 0:
         return 0

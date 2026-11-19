@@ -27,7 +27,7 @@ define layout_prefix with text and width and size:
     return best
 
 # Source byte ranges keep mouse selection and copied whitespace exact.
-define layout_ranges with text and width and size:
+define layout_ranges_uncached with text and width and size:
     set rows to create_list()
     set start to 0
     set total to string_length(text)
@@ -53,6 +53,40 @@ define layout_ranges with text and width and size:
                 set start to start + 1
     if total == 0 || get_character(text and total - 1) == 10:
         append_list(rows and [total,total])
+    return rows
+
+# Reuse immutable byte-range layouts across frames. Streaming text, viewport and
+# font changes naturally miss; retention is bounded independently of chat length.
+set LAYOUT_CACHE to []
+set LAYOUT_CACHE_BYTES to 0
+set LAYOUT_CACHE_MISSES to 0
+
+define layout_cache_clear:
+    set LAYOUT_CACHE to []
+    set LAYOUT_CACHE_BYTES to 0
+    return 0
+
+define layout_ranges with text and width and size:
+    set i to 0
+    repeat while i < length_list(LAYOUT_CACHE):
+        set entry to get_list(LAYOUT_CACHE and i)
+        if get_list(entry and 1) == width && get_list(entry and 2) == size && get_list(entry and 3) == FONT_VALUE && string_equals(get_list(entry and 0) and text):
+            return get_list(entry and 4)
+        set i to i + 1
+    set LAYOUT_CACHE_MISSES to LAYOUT_CACHE_MISSES + 1
+    set rows to layout_ranges_uncached(text and width and size)
+    set cost to string_length(text) + length_list(rows) * 64 + 128
+    if cost <= 524288:
+        if length_list(LAYOUT_CACHE) >= 128 || LAYOUT_CACHE_BYTES + cost > 524288:
+            layout_cache_clear()
+        set entry to create_list()
+        append_list(entry and text)
+        append_list(entry and width)
+        append_list(entry and size)
+        append_list(entry and FONT_VALUE)
+        append_list(entry and rows)
+        append_list(LAYOUT_CACHE and entry)
+        set LAYOUT_CACHE_BYTES to LAYOUT_CACHE_BYTES + cost
     return rows
 
 define layout_lines with text and width and size:
