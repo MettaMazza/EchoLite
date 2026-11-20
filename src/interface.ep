@@ -154,6 +154,8 @@ define main:
     set thinking_open to ""
     set selected to ""
     set sessions to create_list()
+    set context_used to ""
+    set context_capacity to string_to_int(PROFILE_CONTEXT)
     set turns to create_list()
     set image_turns to create_list()
     set chat_version to ""
@@ -359,6 +361,7 @@ define main:
                     if selected == "":
                         set selected to current_session
                     set turns to chat_turns(db and selected)
+                    set context_used to result_cache_scalar(db and "SELECT json_extract(g.response,'$.prompt_tokens') + json_extract(g.response,'$.completion_tokens') FROM session_turns s JOIN generation_rounds g ON g.turn_id=s.turn_id WHERE s.session=? AND json_type(g.response,'$.prompt_tokens')='integer' AND json_type(g.response,'$.completion_tokens')='integer' ORDER BY g.turn_id DESC,g.round DESC LIMIT 1" and [selected])
                     set image_turns to sql_query_params(db and "SELECT i.turn_id,a.path FROM turn_images i JOIN image_assets a ON a.memory=i.image JOIN session_turns s ON s.turn_id=i.turn_id WHERE s.session=? AND a.project=?" and [selected,project])
                     set chat_version to version
                     set chat_selected to selected
@@ -449,6 +452,7 @@ define main:
                 if hit(16 and 192 + si * 42 and 216 and 38) && 192 + si * 42 < height - 302:
                     set selected to get_list(get_list(sessions and si) and 0)
                     set turns to chat_turns(db and selected)
+                    set context_used to result_cache_scalar(db and "SELECT json_extract(g.response,'$.prompt_tokens') + json_extract(g.response,'$.completion_tokens') FROM session_turns s JOIN generation_rounds g ON g.turn_id=s.turn_id WHERE s.session=? AND json_type(g.response,'$.prompt_tokens')='integer' AND json_type(g.response,'$.completion_tokens')='integer' ORDER BY g.turn_id DESC,g.round DESC LIMIT 1" and [selected])
                     set mobile_menu to 0
                     set section to "chat"
                     set follow_bottom to 1
@@ -808,6 +812,19 @@ define main:
                 ui_icon("image" and left + 20 and height - 104 and 2 and mint)
                 label("Attach image" and left + 42 and height - 104 and 12 and mint)
                 label(ui_text_fit(composer_status and content_width - 250 and 11) and left + 170 and height - 103 and 11 and muted)
+                set meter_text to "Context · awaiting first measurement"
+                set meter_width to content_width - 8
+                raylib_draw_rectangle(left + 4 and height - 59 and meter_width and 3 and border)
+                if context_used != "":
+                    set used_tokens to string_to_int(context_used)
+                    set fill_width to used_tokens * meter_width / context_capacity
+                    if used_tokens > 0 && fill_width < 1:
+                        set fill_width to 1
+                    if fill_width > meter_width:
+                        set fill_width to meter_width
+                    raylib_draw_rectangle(left + 4 and height - 59 and fill_width and 3 and mint)
+                    set meter_text to concat("Last model call · " and concat(context_used and concat(" / " and concat(PROFILE_CONTEXT and " tokens"))))
+                label(meter_text and left + 4 and height - 51 and 12 and muted)
                 label("Enter to send / Shift+Enter for a new line" and left + 4 and height - 38 and 11 and muted)
                 label("ON DEVICE" and left + content_width - 64 and height - 38 and 10 and mint)
             else if section == "devices":
@@ -946,7 +963,7 @@ define main:
         editor_menu_draw()
         raylib_end_drawing()
         set frames to frames + 1
-        if exercise_finished && frames % 15 == 0 && length_list(turns) > 0:
+        if exercise != "" && capture != "" && exercise_finished && frames % 15 == 0 && length_list(turns) > 0:
             set thinking_open to get_list(get_list(turns and length_list(turns) - 1) and 0)
         if capture != "" && (exercise_schedule == 0 || exercise_schedule_done) && stop_child == 0 && ((exercise == "" && frames >= 3 && child == 0 && stop_child == 0) || (exercise != "" && exercise_finished && frames % 15 == 3 && length_list(turns) > 0 && get_list(get_list(turns and length_list(turns) - 1) and 3) != "pending")):
             ui_capture(capture)

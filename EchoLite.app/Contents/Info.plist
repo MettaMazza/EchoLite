@@ -6,7 +6,7 @@
 <key>CFBundleName</key><string>EchoLite</string>
 <key>CFBundleDisplayName</key><string>EchoLite</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>20261120.3</string>
-<key>CFBundleShortVersionString</key><string>0.2.2</string>
+<key>CFBundleVersion</key><string>20261120.4</string>
+<key>CFBundleShortVersionString</key><string>0.2.3</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
