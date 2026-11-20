@@ -1,4 +1,5 @@
 import "../application_paths"
+import "keyboard_classes"
 
 # Host-side packaging; upstream native dependency builds live outside the checkout.
 define android_chat_run with executable and arguments:
@@ -73,7 +74,9 @@ define main:
     android_chat_run(compiler and [concat(root and "/src/android/service_classes.ep")])
     set classes to concat(work and "/build/ep-services")
     android_chat_run(concat(root and "/src/android/service_classes") and [classes])
-    android_chat_run(concat(build_tools and "/d8") and ["--min-api","31","--lib",concat(sdk and "/platforms/android-36/android.jar"),"--output",package,concat(work and "/build/sdl-classes.jar"),concat(classes and "/SyncService.class"),concat(classes and "/SyncReceiver.class"),concat(classes and "/EchoActivity.class")])
+    if keyboard_sdl_jar(work and get_list(args and 3) and classes) != 0:
+        return 1
+    android_chat_run(concat(build_tools and "/d8") and ["--min-api","31","--lib",concat(sdk and "/platforms/android-36/android.jar"),"--output",package,concat(classes and "/sdl-input.jar"),concat(classes and "/SyncService.class"),concat(classes and "/SyncReceiver.class"),concat(classes and "/EchoActivity.class")])
 
     android_chat_run(concat(build_tools and "/aapt2") and ["compile","--dir",concat(root and "/android/res"),"-o",concat(package and "/resources.zip")])
     android_chat_run(concat(build_tools and "/aapt2") and ["link","--manifest",concat(root and "/android/AndroidManifest-chat.xml"),"-I",concat(sdk and "/platforms/android-36/android.jar"),"-R",concat(package and "/resources.zip"),"--auto-add-overlay","-A",concat(root and "/android/assets"),"-o",concat(package and "/echolite-unsigned.apk")])

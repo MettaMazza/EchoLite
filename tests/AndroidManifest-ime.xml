@@ -1,0 +1,1 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.echolite.imecheck"><uses-sdk android:minSdkVersion="31" android:targetSdkVersion="36"/><application android:label="EchoLite keyboard regression"/><instrumentation android:name="org.libsdl.app.KeyboardChecks" android:targetPackage="dev.echolite.android"/></manifest>

@@ -1,0 +1,31 @@
+# Run against the local generation server, with an isolated in-memory dataset.
+import "../src/native_conversation"
+import "fs"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 2:
+        display "Usage: dialogue_window <runtime token file>"
+        return 1
+    set token to string_trim(read_file(get_list(args and 1)))
+    set db to sql_open(":memory:")
+    sql_execute(db and "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT); INSERT INTO metadata VALUES('cache_epoch','0'); CREATE TABLE response_cache(key TEXT PRIMARY KEY,epoch TEXT,payload TEXT,digest TEXT,bytes INTEGER,used INTEGER); CREATE TABLE turns(id INTEGER PRIMARY KEY,user_memory INTEGER,reply_memory INTEGER,status TEXT); CREATE TABLE session_turns(session INTEGER,turn_id INTEGER); CREATE TABLE memories(id INTEGER PRIMARY KEY,body TEXT,status TEXT); WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<69) INSERT INTO turns SELECT x,x*2,x*2+1,'completed' FROM n; INSERT INTO session_turns SELECT CASE WHEN id=69 THEN 2 ELSE 1 END,id FROM turns; INSERT INTO memories SELECT user_memory,'Question '||id,'active' FROM turns UNION ALL SELECT reply_memory,'Answer '||id,'active' FROM turns")
+    set base to "{\"messages\":[{\"role\":\"system\",\"content\":\"Keep continuity.\"},{\"role\":\"user\",\"content\":\"Continue.\"}],\"max_tokens\":128}"
+    set fitted to dialogue_fit(db and token and base and "1" and "70" and "fixture" and "0" and 262144)
+    if length_list(fitted) != 3 || get_list(fitted and 2) != "68":
+        display get_list(fitted and 0)
+        return 1
+    set full to get_list(fitted and 0)
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.messages[1].content')||':'||json_extract(?,'$.messages[#-2].content')" and [full,full]) != "Question 1:Answer 68":
+        return 1
+    set nine to dialogue_candidate(db and base and "1" and "70" and 9)
+    set budget to dialogue_tokens(db and token and get_list(nine and 0) and "fixture" and "0") + 128
+    set fitted to dialogue_fit(db and token and base and "1" and "70" and "fixture" and "0" and budget)
+    if length_list(fitted) != 3 || string_equals(get_list(nine and 0) and get_list(fitted and 0)) == 0:
+        return 1
+    set replay to dialogue_fit(db and "invalid-token" and base and "1" and "70" and "fixture" and "0" and budget)
+    if length_list(replay) != 3 || get_list(replay and 2) != "9":
+        return 1
+    display "PASS: 68 ordered pairs from one session; exact nine-pair boundary with output reserved; cached measurements replay offline"
+    sql_close(db)
+    return 0

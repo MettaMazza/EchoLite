@@ -22,10 +22,14 @@ define host_context with db returning Str:
         set installed to "true"
     set commands to "{}"
     set candidates to ["/usr/bin/open","/usr/bin/osascript","/usr/bin/git","/bin/sh","/usr/bin/say","/usr/bin/shortcuts","/usr/bin/curl"]
+    set platform to "macOS"
+    if native_android():
+        set platform to "Android"
+        set candidates to ["/system/bin/sh"]
     set command_index to 0
     repeat while command_index < length_list(candidates):
         set candidate to get_list(candidates and command_index)
         if file_exists(candidate) && ep_dlcall2(ep_dlsym(native_system() and "access") and candidate and 1) == 0:
             set commands to result_cache_scalar(db and "SELECT json_set(?,'$.'||?,?)" and [commands,path_basename(candidate),candidate])
         set command_index to command_index + 1
-    return result_cache_scalar(db and "SELECT json_object('platform','macOS','architecture','arm64','application_language','Ernos Plain','working_directory',?,'installation_directory',?,'state_directory',?,'compiler',?,'compiler_available',json(?),'language_reference',?,'reference_available',json(?),'local_toolchain_guide',?,'system_commands',json(?))" and [get_cwd(),root,home,compiler,executable,reference,installed,guide,commands])
+    return result_cache_scalar(db and "SELECT json_object('platform',?,'architecture','arm64','application_language','Ernos Plain','working_directory',?,'installation_directory',?,'state_directory',?,'compiler',?,'compiler_available',json(?),'language_reference',?,'reference_available',json(?),'local_toolchain_guide',?,'system_commands',json(?))" and [platform,get_cwd(),root,home,compiler,executable,reference,installed,guide,commands])

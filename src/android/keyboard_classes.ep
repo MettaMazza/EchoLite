@@ -1,0 +1,121 @@
+# Extend SDL's Android input connection. SDL's legacy backward-delete shortcut
+# only emits keys; the inherited code-point variant only edits the shadow text.
+import "jvm_class"
+
+define keyboard_delete_method with points:
+    set parent to "org/libsdl/app/SDLInputConnection"
+    set name to "deleteSurroundingText"
+    if points:
+        set name to "deleteSurroundingTextInCodePoints"
+    jvm_method()
+    # Negative distances are invalid. Non-backward edits use SDL/framework
+    # selection semantics, then reconcile the native text once.
+    jvm_emit([27])
+    jvm_branch(155 and "invalid")
+    jvm_emit([28])
+    jvm_branch(155 and "invalid")
+    jvm_emit([28])
+    jvm_branch(154 and "delegate")
+    # The app draft is bounded at 6000 UTF-8 bytes. Snapshot the whole prefix
+    # so surrogate pairs can be deleted atomically with either Android API.
+    jvm_emit([42])
+    jvm_emit([42])
+    jvm_call(182 and parent and "getEditable" and "()Landroid/text/Editable;")
+    jvm_interface("java/lang/CharSequence" and "length" and "()I" and 1)
+    jvm_emit([3])
+    jvm_call(182 and parent and "getTextBeforeCursor" and "(II)Ljava/lang/CharSequence;")
+    jvm_call(182 and "java/lang/Object" and "toString" and "()Ljava/lang/String;")
+    jvm_emit([78,45])
+    jvm_call(182 and "java/lang/String" and "length" and "()I")
+    jvm_emit([54,4])
+    # local 5 = number of units/code points the IME actually knows.
+    if points:
+        jvm_emit([45,3,21,4])
+        jvm_call(182 and "java/lang/String" and "codePointCount" and "(II)I")
+    else:
+        jvm_emit([21,4])
+    jvm_emit([54,5,27,21,5])
+    jvm_call(184 and "java/lang/Math" and "min" and "(II)I")
+    jvm_emit([54,6])
+    if points:
+        jvm_emit([45,21,4,21,6,116])
+        jvm_call(182 and "java/lang/String" and "offsetByCodePoints" and "(II)I")
+    else:
+        jvm_emit([21,4,21,6,100])
+    jvm_emit([54,7,21,6])
+    jvm_branch(153 and "outside")
+    if points == 0:
+        jvm_emit([21,7])
+        jvm_branch(153 and "erase")
+        jvm_emit([45,21,7])
+        jvm_call(182 and "java/lang/String" and "charAt" and "(I)C")
+        jvm_call(184 and "java/lang/Character" and "isLowSurrogate" and "(C)Z")
+        jvm_branch(153 and "erase")
+        jvm_emit([132,7,255])
+    jvm_label("erase")
+    jvm_emit([42])
+    jvm_call(182 and parent and "getEditable" and "()Landroid/text/Editable;")
+    jvm_emit([21,7,21,4])
+    jvm_interface("android/text/Editable" and "delete" and "(II)Landroid/text/Editable;" and 3)
+    jvm_emit([87,42])
+    jvm_call(182 and parent and "updateText" and "()V")
+    jvm_label("outside")
+    # After an app-side caret move SDL starts with an empty shadow buffer.
+    # Forward the uncovered portion to the native composer, exactly once.
+    jvm_emit([27,21,6,100])
+    jvm_int(6000)
+    jvm_call(184 and "java/lang/Math" and "min" and "(II)I")
+    jvm_emit([54,6,21,6])
+    jvm_branch(153 and "ok")
+    jvm_emit([42,21,6,3])
+    jvm_call(183 and parent and "deleteSurroundingText" and "(II)Z")
+    jvm_emit([172])
+    jvm_label("delegate")
+    jvm_emit([42,27,28])
+    jvm_call(183 and parent and name and "(II)Z")
+    if points:
+        jvm_branch(153 and "invalid")
+        jvm_emit([42])
+        jvm_call(182 and parent and "updateText" and "()V")
+    else:
+        jvm_emit([172])
+    jvm_label("ok")
+    jvm_emit([4,172])
+    jvm_label("invalid")
+    jvm_emit([3,172])
+    return jvm_end(1 and name and "(II)Z" and 4 and 8 and [])
+
+define keyboard_connection with output:
+    set parent to "org/libsdl/app/SDLInputConnection"
+    jvm_begin("org/libsdl/app/EchoInputConnection" and parent and [])
+    jvm_method()
+    jvm_emit([42,43,28])
+    jvm_call(183 and parent and "<init>" and "(Landroid/view/View;Z)V")
+    jvm_emit([177])
+    jvm_end(1 and "<init>" and "(Landroid/view/View;Z)V" and 3 and 3 and [])
+    keyboard_delete_method(0)
+    keyboard_delete_method(1)
+    return jvm_write(concat(output and "/org/libsdl/app/EchoInputConnection.class"))
+
+# Compile SDL's unmodified view behavior with the EP-generated connection
+# selected at its one construction site. Keep the upstream dependency intact.
+define keyboard_sdl_jar with work and jdk and output:
+    set package to concat(output and "/org/libsdl/app")
+    application_directory(package and 0)
+    keyboard_connection(output)
+    set upstream to read_file(concat(work and "/vendor/SDL-release-3.4.20/android-project/app/src/main/java/org/libsdl/app/SDLDummyEdit.java"))
+    set factory to "new SDLInputConnection(this, true)"
+    if length_list(string_split(upstream and factory)) != 2:
+        display "Unexpected SDL input connection factory"
+        return 1
+    set source to concat(package and "/SDLDummyEdit.java")
+    write_file(source and string_replace(upstream and factory and "new EchoInputConnection(this, true)"))
+    set jar to concat(work and "/build/sdl-classes.jar")
+    set sdk to concat(work and "/sdk/platforms/android-36/android.jar")
+    set classpath to concat(output and concat(":" and concat(jar and concat(":" and sdk))))
+    if application_wait(concat(jdk and "/bin/javac") and ["-source","8","-target","8","-classpath",classpath,"-d",output,source]) != 0:
+        return 1
+    set patched to concat(output and "/sdl-input.jar")
+    if application_wait("/bin/cp" and [jar,patched]) != 0:
+        return 1
+    return application_wait(concat(jdk and "/bin/jar") and ["uf",patched,"-C",output,"org/libsdl/app/SDLDummyEdit.class","-C",output,"org/libsdl/app/EchoInputConnection.class"])

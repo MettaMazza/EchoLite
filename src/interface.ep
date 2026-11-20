@@ -949,7 +949,15 @@ define main:
                     if length_list(identities) > 0:
                         set identity to get_list(identities and 0)
                         set card_height to length_list(layout_lines(get_list(identity and 0) and content_width - 96 and 18)) * 27 + 88
-                        set pane_scroll to editor_min(pane_scroll and editor_max(0 and card_height - (height - 292)))
+                        set track_height to editor_max(1 and height - 292)
+                        set scroll_limit to editor_max(0 and card_height - track_height)
+                        set pane_scroll to editor_min(pane_scroll and scroll_limit)
+                        if scroll_limit > 0:
+                            set thumb_height to editor_min(track_height and editor_max(24 and track_height * track_height / card_height))
+                            set thumb_offset to pane_scroll * (track_height - thumb_height) / scroll_limit
+                            set track_x to left + content_width - 16
+                            raylib_draw_rectangle(track_x and 228 and 5 and track_height and border)
+                            raylib_draw_rectangle(track_x and 228 + thumb_offset and 5 and thumb_height and mint)
                         set card_y to 228 - pane_scroll
                         panel(left + 24 and card_y and content_width - 48 and card_height and surface)
                         raylib_draw_rectangle(left + 24 and card_y and 3 and card_height and mint)

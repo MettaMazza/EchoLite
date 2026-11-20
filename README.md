@@ -16,7 +16,7 @@
 
 This update enables Metal with four checkpoints on Mac and restores New conversation after an interrupted Android reply. See the [release notes](docs/RELEASE-NOTES.md).
 
-[Download v0.2.5-dev.20261120](https://github.com/MettaMazza/EchoLite/releases/tag/v0.2.5-dev.20261120) — updated Mac and Android installers, app runtime and APK.
+[Download v0.2.6-dev.20261120](https://github.com/MettaMazza/EchoLite/releases/tag/v0.2.6-dev.20261120) — updated Mac and Android installers, app runtime and APK.
 
 ## Open. Install. Start a conversation.
 
