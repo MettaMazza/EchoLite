@@ -76,13 +76,11 @@ define runtime_arguments with root and token_path and embedding:
         set extra to ["--embedding","--pooling","mean","--batch-size","512","--ubatch-size","512","--gpu-layers","0","--threads","2","--no-warmup"]
     else:
         set projector to runtime_model_path(root and profile_projector(RUNTIME_PROFILE))
-        set checkpoints to "1"
-        if native_android() || RUNTIME_PROFILE == 1:
-            set checkpoints to "4"
+        # Keep recurrent state before the changing tool-result suffix.
         set slots to concat(path_dirname(token_path) and "/native-slots")
         if is_directory(slots) == 0:
             ep_dlcall2(ep_dlsym(native_system() and "mkdir") and slots and 448)
-        set extra to ["--mmproj",projector,"--cache-type-k","q4_0","--cache-type-v","q4_0","--flash-attn","on","--batch-size","256","--ubatch-size","64","--ctx-checkpoints",checkpoints,"--no-mmproj-offload","--slot-save-path",slots,"--reasoning","on","--reasoning-format","deepseek","--reasoning-budget","-1","--timeout","86400"]
+        set extra to ["--mmproj",projector,"--cache-type-k","q4_0","--cache-type-v","q4_0","--flash-attn","on","--batch-size","256","--ubatch-size","64","--ctx-checkpoints","4","--no-mmproj-offload","--slot-save-path",slots,"--reasoning","on","--reasoning-format","deepseek","--reasoning-budget","-1","--timeout","86400"]
     if embedding == 0:
         if RUNTIME_ACCELERATED:
             append_list(extra and "--gpu-layers")
@@ -91,6 +89,13 @@ define runtime_arguments with root and token_path and embedding:
             append_list(extra and "GPUOpenCL")
         else:
             append_list(extra and "--no-kv-offload")
+            if native_android() == 0 && RUNTIME_PROFILE == 0:
+                append_list(extra and "--device")
+                append_list(extra and "MTL0")
+                append_list(extra and "--gpu-layers")
+                append_list(extra and "99")
+                append_list(extra and "--threads")
+                append_list(extra and "4")
     if native_android() && embedding == 0:
         append_list(extra and "--threads")
         append_list(extra and "4")
@@ -130,7 +135,7 @@ define runtime_ensure with root and home and token_path returning Str:
             set RUNTIME_PROFILE to resident_profile
     # The optional Adreno runtime retains the same model/context and CPU fallback.
     set accelerator to concat(runtime_native_directory() and "/libllama-opencl.so")
-    if native_android() && RUNTIME_PROFILE == 0 && file_exists(accelerator) && file_exists("/vendor/lib64/libOpenCL.so"):
+    if native_android() && file_exists(accelerator) && file_exists("/vendor/lib64/libOpenCL.so"):
         set RUNTIME_ACCELERATED to 1
         set cache_directory to concat(path_dirname(token_path) and "/opencl-cache")
         ep_dlcall2(ep_dlsym(libc and "mkdir") and cache_directory and 448)

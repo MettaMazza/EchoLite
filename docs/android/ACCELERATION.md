@@ -1,6 +1,6 @@
 # Android acceleration and measured latency
 
-The optional `libllama-opencl.so` runs Qwen3.5-4B through llama.cpp's Adreno OpenCL backend. The runtime manager chooses it when packaged and the vendor OpenCL driver is present. An accelerator startup failure falls back to the packaged CPU worker. The 9B option retains its CPU path. Model choice stays 4B by default; context stays 262,144, KV types q4_0, with four recurrent checkpoints. The vision projector remains on CPU. Model workers run at nice level 5 to reduce competition with interactive work. Unload recognizes either backend using the app UID, executable path, model, credential path and port.
+The optional `libllama-opencl.so` runs the selected Qwen3.5-4B or Qwen3.5-9B profile through llama.cpp's Adreno OpenCL backend. The runtime manager chooses it when packaged and the vendor OpenCL driver is present. An accelerator startup failure falls back to the packaged CPU worker. Model choice stays 4B by default; context stays 262,144, KV types q4_0, with four recurrent checkpoints. The vision projector remains on CPU. Model workers run at nice level 5 to reduce competition with interactive work. Unload recognizes either backend using the app UID, executable path, model, credential path and port.
 
 The tested device is REDMAGIC 11 Pro with Adreno 840 and approximately 24 GB physical RAM. Swap expansion is not counted as physical RAM. Other vendors and drivers need their own correctness and performance checks. A Vulkan candidate produced corrupt output and a separate float32 attempt lost its device; neither is packaged as a selectable backend.
 
@@ -36,3 +36,7 @@ Use the same pinned llama.cpp commit `b1b770d90d94cad9e9ea5b993bdbc383a522fb28`,
 - `OpenCL_LIBRARY` pointing to a locally obtained Android vendor library for linking. Do not package or redistribute that driver.
 
 Place the resulting server in `ANDROID_WORK/build/llama-opencl/bin/llama-server`. The EP Android builder includes it if present, strips debug symbols and retains the separate CPU fallback. The app declares the optional native library and resolves the device's `/vendor/lib64` driver at worker startup. The upstream build uses its own kernel-generation scripts; EchoLite's authored application and lifecycle logic remain Ernos Plain.
+
+## Optional 9B comparison
+
+The optional 9B profile now uses the same OpenCL path. See [the matched phone comparison](MODEL_COMPARISON_2026-11-19.md) for timings, reasoning review, memory observations and cache evidence. 4B remains the default.

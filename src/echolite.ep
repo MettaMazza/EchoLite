@@ -811,7 +811,12 @@ define main:
     else if cmd == "session-start" || cmd == "session-end":
         set project to get_list(args and 2)
         if scalar(db and "SELECT count(*) FROM turns WHERE project=? AND status='pending'" and [project]) != "0":
-            fail("Resolve the pending turn before changing session boundaries")
+            # A live chat holds a shared state lease for its entire turn. Only
+            # recover interrupted work when this transaction has exclusive access.
+            if cmd != "session-start" || ep_dlcall2(ep_dlsym(native_system() and "flock") and STATE_LEASE_FD and 6) != 0:
+                fail("Finish or stop the active turn before changing sessions")
+            execute(db and "UPDATE tool_runs SET status='interrupted',finished=CURRENT_TIMESTAMP WHERE status='running' AND turn_id IN (SELECT id FROM turns WHERE project=? AND status='pending')" and [project])
+            execute(db and "UPDATE turns SET status='abandoned' WHERE project=? AND status='pending'" and [project])
         if cmd == "session-start":
             need(args and 4)
             set label to get_list(args and 3)
