@@ -1,6 +1,7 @@
 # Android SDL input. The native event callback only touches unmanaged storage;
 # managed strings are created on the EP UI thread after taking the mutex.
 import "../native_process"
+import "jni"
 import "string"
 set ANDROID_SDL to 0
 set ANDROID_INPUT_MUTEX to 0
@@ -125,9 +126,40 @@ define android_keyboard with visible:
         return ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_StopTextInput") and ANDROID_INPUT_WINDOW)
     set props to ep_dlcall0(ep_dlsym(ANDROID_SDL and "SDL_CreateProperties"))
     ep_dlcall3(ep_dlsym(ANDROID_SDL and "SDL_SetBooleanProperty") and props and "SDL.textinput.multiline" and 1)
+    ep_dlcall3(ep_dlsym(ANDROID_SDL and "SDL_SetNumberProperty") and props and "SDL.textinput.capitalization" and 0)
     set started to ep_dlcall2(ep_dlsym(ANDROID_SDL and "SDL_StartTextInputWithProperties") and ANDROID_INPUT_WINDOW and props)
     ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_DestroyProperties") and props)
     return started
+
+# SDL implements Android's keyboard connection with a separate editable buffer.
+# Discard its old composing range when the native editor changes the insertion point.
+define android_restart_editor:
+    if ANDROID_INPUT_WINDOW == 0 || ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_ScreenKeyboardShown") and ANDROID_INPUT_WINDOW) == 0:
+        return 0
+    set ANDROID_JNI_ENV to ep_dlcall0(ep_dlsym(ANDROID_SDL and "SDL_GetAndroidJNIEnv"))
+    if ANDROID_JNI_ENV == 0:
+        return 0
+    set ANDROID_JNI_TABLE to process_integer(ANDROID_JNI_ENV and 8)
+    set activity to ep_dlcall0(ep_dlsym(ANDROID_SDL and "SDL_GetAndroidActivity"))
+    set view to android_jni_object(activity and "getCurrentFocus" and "()Landroid/view/View;" and 0)
+    set name to ep_dlcall2(android_jni_function(167) and ANDROID_JNI_ENV and "input_method")
+    set args to alloc_bytes(8)
+    native_bytes_write(args and 0 and name and 8)
+    set manager to android_jni_object(activity and "getSystemService" and "(Ljava/lang/String;)Ljava/lang/Object;" and args)
+    if manager != 0 && view != 0:
+        set kind to ep_dlcall2(android_jni_function(31) and ANDROID_JNI_ENV and manager)
+        set method to ep_dlcall4(android_jni_function(33) and ANDROID_JNI_ENV and kind and "restartInput" and "(Landroid/view/View;)V")
+        if method != 0:
+            native_bytes_write(args and 0 and view and 8)
+            ep_dlcall4(android_jni_function(63) and ANDROID_JNI_ENV and manager and method and args)
+        android_jni_clear()
+        android_jni_release(kind)
+    free_bytes(args)
+    android_jni_release(manager)
+    android_jni_release(name)
+    android_jni_release(view)
+    android_jni_release(activity)
+    return 0
 
 define android_input_close:
     if ANDROID_INPUT_WATCH != 0:

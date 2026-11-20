@@ -174,7 +174,10 @@ define editor_clipboard returning Str:
     return concat("" and ptr_to_str(pointer))
 
 define editor_handle with draft and x and y and width and height and enabled returning Str:
-    if string_equals(draft and EDIT_TEXT) == 0:
+    set previous_caret to EDIT_CARET
+    set previous_anchor to EDIT_ANCHOR
+    set changed_draft to string_equals(draft and EDIT_TEXT) == 0
+    if changed_draft:
         set EDIT_TEXT to draft
         set EDIT_CARET to string_length(draft)
         set EDIT_ANCHOR to EDIT_CARET
@@ -208,6 +211,8 @@ define editor_handle with draft and x and y and width and height and enabled ret
             if item == 4 && EDIT_FOCUS:
                 editor_history(0)
         set EDIT_MENU to 0
+        if native_android() && EDIT_FOCUS && item != 0:
+            android_restart_editor()
         set EDIT_MENU_USED to 1
         return EDIT_TEXT
     if raylib_is_key_pressed(256):
@@ -299,6 +304,8 @@ define editor_handle with draft and x and y and width and height and enabled ret
             editor_insert(chat_character(code))
         set code to raylib_get_char_pressed()
     if native_android():
+        if EDIT_FOCUS && (changed_draft || previous_caret != EDIT_CARET || previous_anchor != EDIT_ANCHOR || string_equals(draft and EDIT_TEXT) == 0):
+            android_restart_editor()
         set input_events to android_input_events()
         if enabled && EDIT_FOCUS:
             editor_android_events(input_events)
@@ -589,6 +596,8 @@ define editor_handles_update:
         set position to editor_hit(text and rows and ui_mouse_x() - HANDLE_X and ui_mouse_y() - HANDLE_Y - HANDLE_SIZE - 13 and HANDLE_SIZE)
         editor_handle_move(HANDLE_TARGET and HANDLE_DRAG and position)
         if raylib_is_mouse_button_down(0) == 0:
+            if HANDLE_TARGET == 1:
+                android_restart_editor()
             set HANDLE_DRAG to 0
             if (HANDLE_TARGET == 1 && EDIT_ANCHOR != EDIT_CARET) || (HANDLE_TARGET == 2 && SELECT_ANCHOR != SELECT_CARET):
                 editor_menu_open(ui_mouse_x() and ui_mouse_y() - 190)
