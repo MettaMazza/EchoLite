@@ -285,7 +285,7 @@ define editor_handle with draft and x and y and width and height and enabled ret
                 else:
                     set EDIT_ANCHOR to editor_next(EDIT_TEXT and EDIT_CARET)
             editor_insert("")
-        if shift && raylib_is_key_pressed(257):
+        if native_android() == 0 && shift && raylib_is_key_pressed(257):
             editor_insert("\n")
     else if command && SELECT_TEXT != "":
         if raylib_is_key_pressed(65):
@@ -482,7 +482,9 @@ define editor_android_events with events:
             editor_insert(get_list(event and 1))
         else:
             set key to string_to_int(get_list(event and 1))
-            if key == 42 || key == 76:
+            if key == 40 || key == 88:
+                editor_insert("\n")
+            else if key == 42 || key == 76:
                 if EDIT_CARET == EDIT_ANCHOR:
                     if key == 42:
                         set EDIT_ANCHOR to editor_previous(EDIT_TEXT and EDIT_CARET)

@@ -30,7 +30,8 @@ define android_text_watch with userdata and event:
             set count to ep_dlcall1(ANDROID_INPUT_LENGTH and pointer)
     else if event_type == 768:
         set scancode to process_integer(event + 24 and 4)
-        if scancode == 42 || scancode == 76:
+        # SDL drops standalone control characters from committed text.
+        if scancode == 42 || scancode == 76 || scancode == 40 || scancode == 88:
             set kind to 2
             set pointer to event + 24
             set count to 4
@@ -120,10 +121,13 @@ define android_input_take returning Str:
 define android_keyboard with visible:
     if ANDROID_INPUT_WINDOW == 0:
         return 0
-    set operation to "SDL_StopTextInput"
-    if visible:
-        set operation to "SDL_StartTextInput"
-    return ep_dlcall1(ep_dlsym(ANDROID_SDL and operation) and ANDROID_INPUT_WINDOW)
+    if visible == 0:
+        return ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_StopTextInput") and ANDROID_INPUT_WINDOW)
+    set props to ep_dlcall0(ep_dlsym(ANDROID_SDL and "SDL_CreateProperties"))
+    ep_dlcall3(ep_dlsym(ANDROID_SDL and "SDL_SetBooleanProperty") and props and "SDL.textinput.multiline" and 1)
+    set started to ep_dlcall2(ep_dlsym(ANDROID_SDL and "SDL_StartTextInputWithProperties") and ANDROID_INPUT_WINDOW and props)
+    ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_DestroyProperties") and props)
+    return started
 
 define android_input_close:
     if ANDROID_INPUT_WATCH != 0:

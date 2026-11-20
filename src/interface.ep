@@ -488,7 +488,7 @@ define main:
             set last_activity to transport_now(native_system())
         if EDIT_MENU_USED:
             set clicked to 0
-        set send_requested to EDIT_FOCUS && raylib_is_key_pressed(257) && raylib_is_key_down(340) == 0 && raylib_is_key_down(344) == 0
+        set send_requested to native_android() == 0 && EDIT_FOCUS && raylib_is_key_pressed(257) && raylib_is_key_down(340) == 0 && raylib_is_key_down(344) == 0
         if exercise != "" && (exercise_image == "" || exercise_imported == 1) && exercise_sent == 0 && frames > 3 && db != 0 && child == 0 && stop_child == 0 && runtime_ready == 1:
             set send_requested to 1
             set exercise_sent to 1
@@ -825,7 +825,10 @@ define main:
                     raylib_draw_rectangle(left + 4 and height - 59 and fill_width and 3 and mint)
                     set meter_text to concat("Last model call · " and concat(context_used and concat(" / " and concat(PROFILE_CONTEXT and " tokens"))))
                 label(meter_text and left + 4 and height - 51 and 12 and muted)
-                label("Enter to send / Shift+Enter for a new line" and left + 4 and height - 38 and 11 and muted)
+                set input_hint to "Enter to send / Shift+Enter for a new line"
+                if native_android():
+                    set input_hint to "Return for a new line / Tap arrow to send"
+                label(input_hint and left + 4 and height - 38 and 11 and muted)
                 label("ON DEVICE" and left + content_width - 64 and height - 38 and 10 and mint)
             else if section == "devices":
                 set device_command to ui_devices_draw(db and home and left and content_width and height and pane_scroll and clicked and (child == 0 && stop_child == 0 && runtime_child == 0) and surface and white and mint and muted)
