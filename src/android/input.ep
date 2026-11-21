@@ -15,6 +15,9 @@ set ANDROID_INPUT_UNLOCK to 0
 set ANDROID_INPUT_COPY to 0
 set ANDROID_INPUT_LENGTH to 0
 set ANDROID_POINTER_PENDING to 0
+set ANDROID_DRAFT_BUFFER to 0
+set ANDROID_DRAFT_SIZE to 0
+set ANDROID_DRAFT_GENERATION to 0
 
 define android_text_watch with userdata and event:
     set event_type to process_integer(event and 4)
@@ -49,15 +52,84 @@ define android_text_watch with userdata and event:
     ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
     return 1
 
+# The JNI callbacks and the SDL render loop share a bounded, mutex-protected
+# snapshot. Its header contains a generation and the Android UTF-16 selection.
+define android_utf16_at with text and end:
+    set i to 0
+    set units to 0
+    repeat while i < end:
+        set byte to get_character(text and i)
+        if byte < 128 || byte >= 192:
+            set units to units + 1
+        if byte >= 240:
+            set units to units + 1
+        set i to i + 1
+    return units
+
+define android_seed_editor with text and anchor and caret:
+    if ANDROID_DRAFT_BUFFER == 0:
+        return 0
+    set size to string_length(text)
+    if size > 6000:
+        return 0
+    ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+    set ANDROID_DRAFT_GENERATION to ANDROID_DRAFT_GENERATION + 1
+    native_bytes_write(ANDROID_DRAFT_BUFFER and 4 and android_utf16_at(text and anchor) and 4)
+    native_bytes_write(ANDROID_DRAFT_BUFFER and 8 and android_utf16_at(text and caret) and 4)
+    ep_dlcall3(ANDROID_INPUT_COPY and ANDROID_DRAFT_BUFFER + 12 and text and size)
+    set ANDROID_DRAFT_SIZE to size
+    ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
+    return 0
+
+define Java_org_libsdl_app_EchoInputConnection_nativeOpen with env and owner:
+    if ANDROID_DRAFT_BUFFER == 0:
+        return 0
+    set table to process_integer(env and 8)
+    ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+    if ANDROID_DRAFT_BUFFER == 0:
+        ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
+        return 0
+    set ANDROID_DRAFT_GENERATION to ANDROID_DRAFT_GENERATION + 1
+    native_bytes_write(ANDROID_DRAFT_BUFFER and 0 and ANDROID_DRAFT_GENERATION and 4)
+    set size to ANDROID_DRAFT_SIZE + 12
+    set bytes to ep_dlcall2(process_integer(table + 176 * 8 and 8) and env and size)
+    if bytes != 0:
+        ep_dlcall5(process_integer(table + 208 * 8 and 8) and env and bytes and 0 and size and ANDROID_DRAFT_BUFFER)
+    ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
+    return bytes
+
+define Java_org_libsdl_app_EchoInputConnection_nativeEdit with env and owner and generation and anchor and caret and bytes:
+    if ANDROID_DRAFT_BUFFER == 0:
+        return 0
+    set table to process_integer(env and 8)
+    set size to ep_dlcall2(process_integer(table + 171 * 8 and 8) and env and bytes)
+    ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+    if ANDROID_DRAFT_BUFFER != 0 && generation == ANDROID_DRAFT_GENERATION:
+        if size <= 6000 && size + 17 <= 1048576 - ANDROID_INPUT_USED:
+            native_bytes_write(ANDROID_DRAFT_BUFFER and 4 and anchor and 4)
+            native_bytes_write(ANDROID_DRAFT_BUFFER and 8 and caret and 4)
+            if size > 0:
+                ep_dlcall5(process_integer(table + 200 * 8 and 8) and env and bytes and 0 and size and ANDROID_DRAFT_BUFFER + 12)
+            set ANDROID_DRAFT_SIZE to size
+            poke_byte(ANDROID_INPUT_BUFFER and ANDROID_INPUT_USED and 3)
+            native_bytes_write(ANDROID_INPUT_BUFFER and ANDROID_INPUT_USED + 1 and size + 12 and 4)
+            ep_dlcall3(ANDROID_INPUT_COPY and ANDROID_INPUT_BUFFER + ANDROID_INPUT_USED + 5 and ANDROID_DRAFT_BUFFER and size + 12)
+            set ANDROID_INPUT_USED to ANDROID_INPUT_USED + size + 17
+        else:
+            set ANDROID_INPUT_OVERFLOW to 1
+    ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
+    return 0
+
 define android_input_init with self_library:
     if native_android() == 0:
         return 1
-    if ANDROID_INPUT_MUTEX != 0:
+    if ANDROID_INPUT_BUFFER != 0:
         android_input_close()
     set ANDROID_SDL to ep_dlopen("libSDL3.so")
     if ANDROID_SDL == 0:
         return 0
-    set ANDROID_INPUT_MUTEX to ep_dlcall0(ep_dlsym(ANDROID_SDL and "SDL_CreateMutex"))
+    if ANDROID_INPUT_MUTEX == 0:
+        set ANDROID_INPUT_MUTEX to ep_dlcall0(ep_dlsym(ANDROID_SDL and "SDL_CreateMutex"))
     set ANDROID_INPUT_BUFFER to ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_malloc") and 1048577)
     set ANDROID_INPUT_LOCK to ep_dlsym(ANDROID_SDL and "SDL_LockMutex")
     set ANDROID_INPUT_UNLOCK to ep_dlsym(ANDROID_SDL and "SDL_UnlockMutex")
@@ -67,6 +139,10 @@ define android_input_init with self_library:
     if ANDROID_INPUT_MUTEX == 0 || ANDROID_INPUT_BUFFER == 0 || ANDROID_INPUT_WATCH == 0:
         android_input_close()
         return 0
+    ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+    set ANDROID_DRAFT_BUFFER to alloc_bytes(6012)
+    set ANDROID_DRAFT_SIZE to 0
+    ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
     set count to alloc_bytes(4)
     set windows to ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_GetWindows") and count)
     if windows != 0 && process_integer(count and 4) > 0:
@@ -86,7 +162,7 @@ define android_input_init with self_library:
 # Preserve IME replacement ordering: deletes and committed text share one queue.
 define android_input_events:
     set events to create_list()
-    if ANDROID_INPUT_MUTEX == 0:
+    if ANDROID_INPUT_BUFFER == 0:
         return events
     ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
     poke_byte(ANDROID_INPUT_BUFFER and ANDROID_INPUT_USED and 0)
@@ -95,29 +171,25 @@ define android_input_events:
         set kind to peek_byte(ANDROID_INPUT_BUFFER and offset)
         set count to process_integer(ANDROID_INPUT_BUFFER + offset + 1 and 4)
         set start to offset + 5
-        if kind == 1:
+        if kind == 1 || kind == 3:
+            set prefix to 0
+            if kind == 3:
+                set prefix to 12
             set saved to peek_byte(ANDROID_INPUT_BUFFER and start + count)
             poke_byte(ANDROID_INPUT_BUFFER and start + count and 0)
-            set text to ptr_to_str(ANDROID_INPUT_BUFFER + start)
+            set text to ptr_to_str(ANDROID_INPUT_BUFFER + start + prefix)
             poke_byte(ANDROID_INPUT_BUFFER and start + count and saved)
-            append_list(events and ["text",text])
+            if kind == 3:
+                if process_integer(ANDROID_INPUT_BUFFER + start and 4) == ANDROID_DRAFT_GENERATION:
+                    append_list(events and ["snapshot",text,int_to_string(process_integer(ANDROID_INPUT_BUFFER + start + 4 and 4)),int_to_string(process_integer(ANDROID_INPUT_BUFFER + start + 8 and 4))])
+            else:
+                append_list(events and ["text",text])
         else:
             append_list(events and ["key",int_to_string(process_integer(ANDROID_INPUT_BUFFER + start and 4))])
         set offset to start + count
     set ANDROID_INPUT_USED to 0
     ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
     return events
-
-define android_input_take returning Str:
-    set events to android_input_events()
-    set text to create_builder()
-    set i to 0
-    repeat while i < length_list(events):
-        set event to get_list(events and i)
-        if get_list(event and 0) == "text":
-            builder_append(text and get_list(event and 1))
-        set i to i + 1
-    return builder_to_string(text)
 
 define android_keyboard with visible:
     if ANDROID_INPUT_WINDOW == 0:
@@ -164,16 +236,22 @@ define android_restart_editor:
 define android_input_close:
     if ANDROID_INPUT_WATCH != 0:
         ep_dlcall2(ep_dlsym(ANDROID_SDL and "SDL_RemoveEventWatch") and ANDROID_INPUT_WATCH and 0)
+    # Android may close an old connection after the SDL window is gone.
+    # Keep the process mutex valid so a late JNI callback can observe shutdown.
     if ANDROID_INPUT_MUTEX != 0:
-        ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_DestroyMutex") and ANDROID_INPUT_MUTEX)
+        ep_dlcall1(ANDROID_INPUT_LOCK and ANDROID_INPUT_MUTEX)
+    if ANDROID_DRAFT_BUFFER != 0:
+        free_bytes(ANDROID_DRAFT_BUFFER)
+        set ANDROID_DRAFT_BUFFER to 0
     if ANDROID_INPUT_BUFFER != 0:
         ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_free") and ANDROID_INPUT_BUFFER)
-    set ANDROID_INPUT_MUTEX to 0
     set ANDROID_INPUT_BUFFER to 0
     set ANDROID_INPUT_WATCH to 0
     set ANDROID_INPUT_WINDOW to 0
     set ANDROID_INPUT_USED to 0
     set ANDROID_INPUT_OVERFLOW to 0
+    if ANDROID_INPUT_MUTEX != 0:
+        ep_dlcall1(ANDROID_INPUT_UNLOCK and ANDROID_INPUT_MUTEX)
     return 0
 
 define android_input_overflowed:

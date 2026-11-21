@@ -1,5 +1,5 @@
 # Prepare a redistributable snapshot from explicit public/runtime allowlists.
-import "setup_common"
+import "android/verify_apk"
 set RELEASE_ROOT to ""
 set RELEASE_OUTPUT to ""
 set RELEASE_BASE to ""
@@ -116,6 +116,8 @@ define main:
     setup_wait("/usr/bin/tar" and ["-czf",concat(RELEASE_OUTPUT and "/echolite-usb-tools-macos.tar.gz"),"-C",bridge,"."])
     release_asset("usb-tools" and "echolite-usb-tools-macos.tar.gz" and "" and "archive" and "android" and "")
     release_copy(concat(work and "/apk-chat/echolite-chat.apk") and concat(RELEASE_OUTPUT and "/EchoLite-Android-arm64.apk"))
+    if android_verify_core(concat(RELEASE_OUTPUT and "/EchoLite-Android-arm64.apk") and concat(work and "/tools/android-ndk-r30/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-readelf") and concat(work and "/build/verify-release-apk")) == 0:
+        setup_fail("Release APK failed its native library path check.")
     release_asset("android-app" and "EchoLite-Android-arm64.apk" and "android/EchoLite.apk" and "file" and "android" and "")
     set array to "[]"
     set i to 0

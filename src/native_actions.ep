@@ -67,7 +67,7 @@ define action_schema with db and name returning Str:
 define action_schemas with db and request returning Str:
     # Only expose tools whose native execution path is connected. Further adapters
     # are added here when their real native implementation is integrated.
-    set names to ["tool_select","process_run","process_retry","process_output","web_read","docx_read","pdf_read","wikipedia","file_read","file_list","calculator","dictionary","memory_search","memory_search_archived","memory_open","memory_lineage","memory_timeline","memory_sessions","memory_session","me_update","memory_note","memory_correct","memory_assess","memory_compact","task_create","task_update","task_open","task_schedule","schedule_cancel","schedule_list"]
+    set names to ["tool_select","process_run","process_retry","process_output","web_search","web_read","docx_read","pdf_read","wikipedia","file_read","file_list","calculator","dictionary","memory_search","memory_search_archived","memory_open","memory_lineage","memory_timeline","memory_sessions","memory_session","me_update","memory_note","memory_correct","memory_assess","memory_compact","task_create","task_update","task_open","task_schedule","schedule_cancel","schedule_list"]
     set branches to "[]"
     set allowed to result_cache_scalar(db and "SELECT CASE WHEN json_extract(?,'$.tool_required')='1' THEN '[]' ELSE (SELECT json_group_array(json_extract(value,'$[0]')) FROM json_each(?,'$.allowed_bases')) END" and [request,request])
     if result_cache_scalar(db and "SELECT coalesce(json_array_length(?,'$.temporary_browser_sessions'),0)>0" and [request]) == "1":

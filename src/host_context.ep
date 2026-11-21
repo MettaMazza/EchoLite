@@ -3,6 +3,18 @@
 import "application_paths"
 import "result_cache"
 
+# SQLite's 'now' is a single system-clock instant throughout this statement.
+# Derive the local offset for that instant, including DST and fractional hours.
+define host_turn_clock with db returning Str:
+    return result_cache_scalar(db and "WITH clock(local,utc,minutes) AS (SELECT strftime('%Y-%m-%d %H:%M:%S','now','localtime'),strftime('%Y-%m-%dT%H:%M:%SZ','now'),(CAST(strftime('%s','now','localtime') AS INTEGER)-CAST(strftime('%s','now') AS INTEGER))/60) SELECT local||' UTC'||CASE WHEN minutes<0 THEN '-' ELSE '+' END||printf('%02d:%02d',abs(minutes)/60,abs(minutes)%60)||' (device local); '||utc FROM clock" and [])
+
+# Append transient age metadata after retrieval so cached records keep their
+# original timestamps. Calendar days use this device's zone at each instant.
+define host_date_records with db and rows and timestamp_path and clock returning Str:
+    set query to "WITH records AS (SELECT key,value AS row,json_extract(value,?1) AS stamp FROM json_each(?2)), age AS (SELECT *,strftime('%s',substr(?3,-20))-strftime('%s',stamp) AS seconds,CAST(julianday(substr(?3,1,10))-julianday(date(stamp,'localtime')) AS INTEGER) AS days FROM records)"
+    set query to concat(query and " SELECT json_group_array(json(marked)) FROM (SELECT json_insert(row,'$[#]',json_object('recorded_local',datetime(stamp,'localtime'),'elapsed_seconds_since_recording',seconds,'recorded_relative_to_turn',CASE WHEN seconds IS NULL THEN 'unknown' WHEN seconds<0 THEN 'record timestamp is after the turn clock' WHEN days=0 THEN 'today' WHEN days=1 THEN 'yesterday' ELSE days||' calendar days ago' END)) AS marked FROM age ORDER BY key)")
+    return result_cache_scalar(db and query and [timestamp_path,rows,clock])
+
 define host_context with db returning Str:
     set args to get_args()
     set root to application_root(get_list(args and 0))

@@ -2,6 +2,7 @@
 import "state_lock"
 import "result_cache"
 set MARKUP_LIBRARY to 0
+set WEB_BODY_LIMIT to 2097152
 
 define markup_library:
     if MARKUP_LIBRARY == 0:
@@ -18,7 +19,10 @@ define markup_release with pointer:
     return 0
 
 define markup_parse with source and html:
-    if markup_library() == 0 || string_length(source) == 0 || string_length(source) > 1048576:
+    set limit to 1048576
+    if html == 1:
+        set limit to WEB_BODY_LIMIT
+    if markup_library() == 0 || string_length(source) == 0 || string_length(source) > limit:
         return 0
     set function to ep_dlsym(markup_library() and "xmlReadMemory")
     if html == 1:

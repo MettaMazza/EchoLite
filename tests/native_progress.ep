@@ -34,6 +34,13 @@ define main:
     progress_assert(progress_answer(db and "{\"type\":\"tool\",\"name\":\"me_update\",\"text\":\"Not an answer\"}") == "" and "tool text not exposed as answer")
     progress_assert(progress_answer(db and "{\"type\":\"answer\",\"text\":\"\\u12") == "" and "incomplete Unicode escape withheld")
     progress_assert(string_equals(progress_answer(db and "{\"type\":\"answer\",\"text\":\"hello\u12") and "hello") and "valid prefix survives incomplete escape")
+    set initial to "{\"reasoning\":\"First call\",\"completion_tokens\":12,\"reasoning_tokens\":8}"
+    set later to "{\"reasoning\":\"Second call\",\"completion_tokens\":9,\"text\":\"Answer\"}"
+    set merged to progress_merge(db and initial and later)
+    progress_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.reasoning')" and [merged]) == "First call\n\nSecond call" and "multiple model calls retain their reasoning in order")
+    progress_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.completion_tokens')" and [merged]) == "21" and "count output tokens across calls")
+    progress_assert(result_cache_scalar(db and "SELECT json_type(?,'$.reasoning_tokens')" and [merged]) == "null" and "partial reasoning counts stay unknown")
+    progress_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.text')" and [merged]) == "Answer" and "trace stays separate from answer")
     progress_scope("" and "" and "")
     sql_close(db)
     display concat("PASS: " and concat(int_to_string(checks) and " live progress checks"))

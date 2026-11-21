@@ -44,12 +44,13 @@ define transport_parser:
     append_list(state and 0)
     append_list(state and "")
     append_list(state and 0)
+    append_list(state and 2097152)
     return state
 
 define transport_parse with state and incoming and eof:
     set wire to get_list(state and 5) + string_length(incoming)
     set_list(state and 5 and wire)
-    if wire > 2097152:
+    if wire > get_list(state and 6):
         set_list(state and 4 and "Local response exceeded wire limit")
         return 0
     set buffer to concat(get_list(state and 1) and incoming)
@@ -317,6 +318,11 @@ define transport_request_cancel with method and port and path and token and payl
             else if transport_errno(libc) != 4 && transport_errno(libc) != again:
                 set error to "Local request send failed"
     set state to transport_parser()
+    set streaming_model to progress != 0 && path == "/v1/chat/completions"
+    if streaming_model:
+        # SSE repeats JSON metadata per token. Bound the wire separately from
+        # the decoded model text; release each delivered block immediately.
+        set_list(state and 6 and 67108864)
     set data to alloc_bytes(16385)
     set emitted to 0
     set last_activity to transport_now(libc)
@@ -351,6 +357,9 @@ define transport_request_cancel with method and port and path and token and payl
                 set delta to concat("data\n" and substring(decoded and emitted and string_length(decoded) - emitted))
                 send delta to progress
                 set emitted to string_length(decoded)
+                if streaming_model:
+                    set_list(state and 2 and "")
+                    set emitted to 0
     ep_dlcall1(ep_dlsym(libc and "close") and fd)
     free_bytes(data)
     free_bytes(option)

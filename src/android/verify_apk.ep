@@ -1,0 +1,16 @@
+import "../setup_common"
+
+# Inspect the ELF from the signed artifact used by the installer.
+define android_verify_core with apk and inspector and scratch:
+    if application_directory(scratch and 0) == 0:
+        return 0
+    set entry to "lib/arm64-v8a/libecholite-core.so"
+    if application_wait("/usr/bin/unzip" and ["-o",apk,entry,"-d",scratch]) != 0:
+        return 0
+    set core to concat(scratch and concat("/" and entry))
+    set previous_cache to SETUP_CACHE
+    set SETUP_CACHE to scratch
+    set dynamic to setup_capture(inspector and ["-d",core])
+    set SETUP_CACHE to previous_cache
+    remove_file(core)
+    return string_contains(dynamic and "Library runpath: [$ORIGIN]")

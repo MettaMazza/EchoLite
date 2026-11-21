@@ -1,4 +1,4 @@
-import "../application_paths"
+import "verify_apk"
 import "keyboard_classes"
 
 # Host-side packaging; upstream native dependency builds live outside the checkout.
@@ -42,6 +42,8 @@ define main:
         return 1
     if ep_dlcall1(ep_dlsym(native_system() and "chdir") and root) != 0:
         return 1
+    android_chat_run(compiler and [concat(root and "/tests/android_editor.ep")])
+    android_chat_run(concat(root and "/tests/android_editor") and [])
     android_chat_run(compiler and [concat(root and "/src/interface.ep")])
     if string_contains(read_file(concat(root and "/src/interface_compiled.c")) and "ep_android_string_byte") == 0:
         display "Android requires the tagged-string-aware Ernos runtime."
@@ -90,5 +92,8 @@ define main:
     set_env("JAVA_HOME" and get_list(args and 3))
     android_chat_run(concat(build_tools and "/apksigner") and ["sign","--ks",concat(work and "/signing/debug.keystore"),"--ks-pass","pass:android","--out","echolite-chat.apk","echolite-aligned.apk"])
     android_chat_run(concat(build_tools and "/apksigner") and ["verify","echolite-chat.apk"])
+    if android_verify_core(concat(package and "/echolite-chat.apk") and concat(path_dirname(clang) and "/llvm-readelf") and concat(package and "/verify-apk")) == 0:
+        display "Packaged core is missing its sibling-library RUNPATH."
+        return 1
     display concat("Built Android chat APK: " and concat(package and "/echolite-chat.apk"))
     return 0

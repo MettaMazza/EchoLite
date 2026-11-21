@@ -35,6 +35,13 @@ define main:
         set policy to web_freshness(db and get_list(policies and i))
         headers_assert(result_cache_scalar(db and "SELECT json_extract(?,'$.store')" and [policy]) == "0" and "unreusable representations not stored")
         set i to i + 1
+    set long_value to result_cache_scalar(db and "SELECT hex(zeroblob(3000))" and [])
+    set ignored to web_headers(db and concat("HTTP/2 200\r\nX-Unused: " and concat(long_value and "\r\nContent-Type: text/html\r\n\r\n")))
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.headers.content-type')" and [ignored]) != "text/html":
+        return 1
+    set oversized to web_headers(db and concat("HTTP/2 200\r\nETag: " and concat(long_value and "\r\n\r\n")))
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [oversized]) != "error":
+        return 1
     sql_close(db)
     display concat("PASS: " and concat(int_to_string(checks) and " native HTTP metadata/cache-policy checks"))
     return 0

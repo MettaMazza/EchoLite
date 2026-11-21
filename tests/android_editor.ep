@@ -33,5 +33,12 @@ define main:
     android_edit_assert(EDIT_TEXT == "aBc" && EDIT_CARET == 2 and "mixed text and delete events retain ordering")
     editor_history(0)
     android_edit_assert(EDIT_TEXT == "ac" and "native editing participates in undo")
+    set EDIT_TEXT to "say  here"
+    set EDIT_CARET to 4
+    set EDIT_ANCHOR to 4
+    editor_android_events([["snapshot","say hello here","9","9"],["snapshot","say hel here","7","7"],["snapshot","say helping here","11","11"],["snapshot","say helpe here","9","9"]])
+    android_edit_assert(EDIT_TEXT == "say helpe here" && EDIT_CARET == 9 and "accept, delete, retype, delete preserves draft suffix")
+    editor_android_events([["snapshot","say hello🌱 here","9","11"]])
+    android_edit_assert(EDIT_CARET == 13 && EDIT_ANCHOR == 9 and "Android UTF-16 selection maps to UTF-8 bytes")
     display concat("PASS: " and concat(int_to_string(checks) and " Android editor event checks"))
     return 0

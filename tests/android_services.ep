@@ -1,5 +1,5 @@
 # Packaged debug diagnostic, executed under the application's actual UID.
-import "../src/web_transfer"
+import "../src/web_tool"
 import "../src/dictionary"
 import "../src/calculator"
 import "../src/wikipedia"
@@ -27,6 +27,11 @@ define main:
         display result
         return 1
     display "PASS: app UID verified HTTPS, private anonymous response files"
+    set result to web_lookup(db and "{\"url\":\"https://example.com/\",\"offset\":0,\"refresh\":true}" and "0")
+    if result_cache_scalar(db and "SELECT json_extract(?1,'$.outcome')='completed' AND length(json_extract(?1,'$.entries[0].url'))>0" and [result]) != "1":
+        display result
+        return 1
+    display "PASS: app UID end-to-end web reader and citation"
     set args to get_args()
     if length_list(args) > 1:
         set result to wikipedia_lookup(db and library and "Ada Lovelace" and "0")

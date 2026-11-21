@@ -59,6 +59,20 @@ define serve_once with listener and response and delay and completion:
     return 0
 
 define main:
+    set streamed to transport_parser()
+    set_list(streamed and 6 and 67108864)
+    transport_parse(streamed and "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" and 0)
+    set block to "x"
+    repeat while string_length(block) < 16384:
+        set block to concat(block and block)
+    set chunks to 0
+    repeat while chunks < 160:
+        transport_parse(streamed and concat("4000\r\n" and concat(block and "\r\n")) and 0)
+        if string_equals(get_list(streamed and 2) and block) == 0:
+            assert_transport(0 and "streaming chunk lost or duplicated")
+        set_list(streamed and 2 and "")
+        set chunks to chunks + 1
+    assert_transport(transport_parse(streamed and "0\r\n\r\n" and 1) and "2.5 MiB model stream drains with bounded retained bytes")
     parse_response("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" and "hello")
     parse_response("HTTP/1.0 200 OK\r\n\r\nhello" and "hello")
     parse_response("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" and "")

@@ -33,8 +33,6 @@ define web_headers with db and source returning Str:
                 if (byte < 32 && byte != 9) || byte == 127:
                     return web_markup_error(db and "HTTP header contains control bytes")
                 set j to j + 1
-            if string_length(value) > 4096:
-                return web_markup_error(db and "HTTP header value exceeds 4096 bytes")
             set recognized to result_cache_scalar(db and "SELECT ? IN ('location','content-type','content-encoding','cache-control','etag','last-modified','age','vary','pragma')" and [name])
             if recognized == "1":
                 set key to concat("$." and name)
@@ -45,6 +43,8 @@ define web_headers with db and source returning Str:
                         set value to concat(previous and concat("," and value))
                     else:
                         return web_markup_error(db and "Ambiguous duplicate HTTP metadata")
+                if string_length(value) > 4096:
+                    return web_markup_error(db and "HTTP metadata value exceeds 4096 bytes")
                 set headers to result_cache_scalar(db and "SELECT json_set(?,?,?)" and [headers,key,value])
         set i to i + 1
     if started == 0 || ended == 0:

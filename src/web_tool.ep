@@ -5,6 +5,8 @@ import "network_policy"
 
 define web_namespace returning Str:
     set version to ptr_to_str(ep_dlcall0(ep_dlsym(web_url_library() and "curl_version")))
+    if native_android():
+        return concat("web-ep-v1:android:" and version)
     set data to alloc_bytes(128)
     set size to alloc_bytes(8)
     native_bytes_write(size and 0 and 127 and 8)
@@ -47,7 +49,15 @@ define web_fetch with db and original and previous returning Str:
         set hop to hop + 1
     return web_markup_error(db and "Web redirect limit exceeded")
 
+define web_repeated_invalid with db and turn and proposed:
+    set seen to result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM tool_runs r JOIN memories m ON m.id=r.observation WHERE r.turn_id=? AND r.name='web_read' AND r.status='failed' AND json_extract(m.body,'$.error_code')='invalid_url' AND json_extract(r.arguments,'$.url')=json_extract(?,'$.url'))" and [turn,proposed])
+    return seen == "1"
+
 define web_lookup with db and expression and epoch returning Str:
+    set result to web_lookup_size(db and expression and epoch and 1800)
+    return result
+
+define web_lookup_size with db and expression and epoch and excerpt_size returning Str:
     # This platform's JSON extractor can truncate U+0000; reject it before extraction.
     if string_contains(expression and "\u0000"):
         return web_markup_error(db and "Web arguments cannot contain NUL escapes")
@@ -59,9 +69,11 @@ define web_lookup with db and expression and epoch returning Str:
     set input to result_cache_scalar(db and "SELECT json_extract(?,'$.url')" and [expression])
     if result_cache_scalar(db and "SELECT instr(?,char(0))=0" and [input]) != "1":
         return web_markup_error(db and "Invalid web URL")
+    if web_url_library() == 0:
+        return "{\"status\":\"error\",\"error_code\":\"unavailable\",\"text\":\"The HTTPS library could not be loaded. Use another source for this turn.\"}"
     set url to web_url(input and "")
     if url == "":
-        return web_markup_error(db and "Web reader requires credential-free HTTPS on port 443")
+        return "{\"status\":\"error\",\"error_code\":\"invalid_url\",\"text\":\"Use a credential-free HTTPS URL on port 443. Change the URL before retrying.\"}"
     set namespace to web_namespace()
     set snapshot to result_cache_get(db and namespace and url and epoch)
     if snapshot != "" && result_cache_scalar(db and "SELECT json_extract(?,'$.status')" and [snapshot]) != "ok":
@@ -93,7 +105,7 @@ define web_lookup with db and expression and epoch returning Str:
     if result_cache_scalar(db and "SELECT CAST(? AS INTEGER)<=length(?)" and [offset,text]) != "1":
         return web_markup_error(db and "Web offset is beyond captured source text")
     set remaining to result_cache_scalar(db and "SELECT substr(?,CAST(? AS INTEGER)+1)" and [text,offset])
-    set excerpt to dictionary_excerpt(remaining and 1800)
+    set excerpt to dictionary_excerpt(remaining and excerpt_size)
     set next to result_cache_scalar(db and "SELECT CAST(? AS INTEGER)+length(?)" and [offset,excerpt])
     if result_cache_epoch(db and epoch) == 0:
         return web_markup_error(db and "Memory forgotten during web read; result discarded")

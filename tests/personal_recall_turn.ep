@@ -1,0 +1,39 @@
+# Use an isolated ECHOLITE_HOME with older user records and a local model token.
+# CORE (or --check), PROJECT, QUESTION, then pairs of original ID and expected
+# answer fragment. Expected data belongs to the fixture, never the application.
+import "../src/application_paths"
+import "../src/result_cache"
+
+define main:
+    set args to get_args()
+    if length_list(args) < 6 || length_list(args) % 2 != 0:
+        display "Usage: personal_recall_turn CORE|--check PROJECT QUESTION ORIGINAL_ID EXPECTED_FRAGMENT [...]"
+        return 1
+    set home to get_env("ECHOLITE_HOME")
+    if home == "" || file_exists(concat(home and "/memory.sqlite3")) == 0:
+        display "Set ECHOLITE_HOME to the replay snapshot."
+        return 1
+    set core to get_list(args and 1)
+    set project to get_list(args and 2)
+    set question to get_list(args and 3)
+    if core != "--check":
+        if application_wait(core and ["session-start",project,"Personal recall regression"]) != 0 || application_wait(core and ["chat",project,question]) != 0:
+            return 1
+    set db to sql_open(concat(home and "/memory.sqlite3"))
+    sql_execute(db and "PRAGMA query_only=ON")
+    set turn to result_cache_scalar(db and "SELECT t.id FROM turns t JOIN memories u ON u.id=t.user_memory WHERE t.project=? AND u.body=? ORDER BY t.id DESC LIMIT 1" and [project,question])
+    if result_cache_scalar(db and "SELECT count(*) FROM turns t JOIN generation_rounds g ON g.turn_id=t.id WHERE t.id=? AND t.status='completed' AND json_extract(g.response,'$.kind')='answer' AND instr(json_extract(g.response,'$.turn_clock'),'(device local);')>0" and [turn]) != "1":
+        display "Missing completed clock-grounded answer"
+        return 1
+    set i to 4
+    repeat while i < length_list(args):
+        set memory to get_list(args and i)
+        set fragment to get_list(args and i + 1)
+        set matched to result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM turns t JOIN memories a ON a.id=t.reply_memory JOIN tool_runs r ON r.turn_id=t.id JOIN memories receipt ON receipt.id=r.observation JOIN json_each(receipt.body,'$.records') item JOIN memories original ON original.id=json_extract(item.value,'$[0]') JOIN derivations d ON d.parent=original.id AND d.child=a.id WHERE t.id=? AND r.name='memory_open' AND r.status='completed' AND original.id=? AND original.source='user-message' AND original.id<t.user_memory AND length(?)>0 AND instr(lower(json_extract(item.value,'$[3]')),lower(?))>0 AND instr(lower(a.body),lower(?))>0)" and [turn,memory,fragment,fragment,fragment])
+        if matched != "1":
+            display concat("Answer or original-read provenance missing for record " and memory)
+            return 1
+        set i to i + 2
+    sql_close(db)
+    display concat("PASS: completed turn, device clock, original-read receipts, answer text and provenance for turn " and turn)
+    return 0

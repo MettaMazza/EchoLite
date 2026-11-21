@@ -1,0 +1,29 @@
+# Replay one logged search decision using an isolated database and tool trace.
+import "../src/search_turn"
+import "fs"
+import "os"
+
+define main:
+    set args to get_args()
+    if length_list(args) != 4 && length_list(args) != 5:
+        display "Usage: search_gap REQUEST_JSON TURN_ID SESSION_ID [EXPECTED_PASSAGE_FRAGMENT] (with ECHOLITE_HOME and ECHOLITE_NATIVE_TOKEN_FILE)"
+        return 1
+    set db to sql_open(concat(get_env("ECHOLITE_HOME") and "/memory.sqlite3"))
+    set token to string_trim(read_file(get_env("ECHOLITE_NATIVE_TOKEN_FILE")))
+    set request to read_file(get_list(args and 1))
+    set epoch to result_cache_scalar(db and "SELECT value FROM metadata WHERE key='cache_epoch'" and [])
+    set action to search_turn_decide(db and token and epoch and request and get_list(args and 3) and get_list(args and 2) and 2)
+    display action
+    if length_list(args) == 5:
+        if result_cache_scalar(db and "SELECT json_extract(?1,'$.route')='research_answer' AND instr(json_extract(?1,'$.research_evidence'),?2)>0 AND length(json_extract(?1,'$.text'))>0" and [action,get_list(args and 4)]) == "1":
+            return 0
+        display "Direct evidence did not produce the expected supported answer"
+        return 1
+    if result_cache_scalar(db and "SELECT json_extract(?,'$.kind')" and [action]) != "tool":
+        display "Evidence gap incorrectly ended research"
+        return 1
+    set target to result_cache_scalar(db and "SELECT json_extract(?,'$.expression')" and [action])
+    if result_cache_scalar(db and "SELECT count(*) FROM json_each(?,'$.tool_trace') WHERE json_extract(value,'$[1]')=?" and [request,target]) != "0":
+        display "Evidence gap repeated an earlier tool request"
+        return 1
+    return 0

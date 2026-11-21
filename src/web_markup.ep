@@ -66,8 +66,8 @@ define web_markup_error with db and text returning Str:
     return result_cache_scalar(db and "SELECT json_object('status','error','text',?)" and params)
 
 define web_html with db and source and final_url returning Str:
-    if string_length(source) > 524288 || web_url(final_url and "") == "":
-        return web_markup_error(db and "Web HTML requires a valid HTTPS source and at most 512 KiB")
+    if string_length(source) > WEB_BODY_LIMIT || web_url(final_url and "") == "":
+        return web_markup_error(db and "Web HTML requires a valid HTTPS source and at most 2 MiB")
     set document to markup_parse(source and 1)
     if document == 0:
         return web_markup_error(db and "Cannot parse web HTML")
@@ -84,6 +84,18 @@ define web_html with db and source and final_url returning Str:
     append_list(state and 0)
     append_list(state and 0)
     set root to ep_dlcall1(ep_dlsym(markup_library() and "xmlDocGetRootElement") and document)
+    # Prefer the article or main landmark so menus do not occupy the excerpt.
+    set selected to ep_dlcall1(ep_dlsym(markup_library() and "xmlXPathNewContext") and document)
+    if selected != 0:
+        set xpath to ep_dlcall2(ep_dlsym(markup_library() and "xmlXPathEvalExpression") and "(//article[.//p] | //main[.//p and not(.//article)] | //*[@role='main' and .//p and not(.//article)])[1]" and selected)
+        if xpath != 0:
+            set nodes to lease_integer(xpath and 8 and 8)
+            if nodes != 0 && lease_integer(nodes and 0 and 4) > 0:
+                set table to lease_integer(nodes and 8 and 8)
+                if table != 0:
+                    set root to lease_integer(lease_integer(table and 0 and 8) and 24 and 8)
+            ep_dlcall1(ep_dlsym(markup_library() and "xmlXPathFreeObject") and xpath)
+        ep_dlcall1(ep_dlsym(markup_library() and "xmlXPathFreeContext") and selected)
     markup_walk(root and state and 0)
     if get_list(state and 3) != 0:
         markup_close(document)

@@ -1,0 +1,83 @@
+# Search results are navigation leads. Only documents opened separately furnish
+# source evidence. Do not place provider redirect links in the citation list.
+import "web_tool"
+
+define search_codec with value and decode returning Str:
+    set library to web_url_library()
+    if library == 0:
+        return ""
+    set output to 0
+    if decode:
+        set output to ep_dlcall4(ep_dlsym(library and "curl_easy_unescape") and 0 and value and string_length(value) and 0)
+    else:
+        set output to ep_dlcall3(ep_dlsym(library and "curl_easy_escape") and 0 and value and string_length(value))
+    if output == 0:
+        return ""
+    set result to ptr_to_str(output)
+    ep_dlcall1(ep_dlsym(library and "curl_free") and output)
+    return result
+
+define search_results with db and body and rss returning Str:
+    set document to markup_parse(body and 1 - rss)
+    if document == 0:
+        return "[]"
+    set nodes to "//div[contains(concat(' ',normalize-space(@class),' '),' result ') and not(contains(@class,'result--ad'))]"
+    if rss:
+        set nodes to "/rss/channel/item"
+    set items to "[]"
+    set i to 1
+    set count to string_to_int(markup_xpath(document and concat("count(" and concat(nodes and ")"))))
+    repeat while i <= count && i <= 12 && string_length(items) < 8500:
+        set node to concat("(" and concat(nodes and concat(")[" and concat(int_to_string(i) and "]"))))
+        if rss:
+            set url to markup_xpath(document and concat(node and "/link"))
+            if starts_with(url and "http://www.bing.com/news/apiclick.aspx?") || starts_with(url and "https://www.bing.com/news/apiclick.aspx?"):
+                set fields to string_split(url and "&")
+                set url to ""
+                set j to 0
+                repeat while j < length_list(fields):
+                    set field to get_list(fields and j)
+                    if starts_with(field and "url="):
+                        set url to search_codec(substring(field and 4 and string_length(field) - 4) and 1)
+                    set j to j + 1
+            set title to markup_xpath(document and concat(node and "/title"))
+            set excerpt to markup_xpath(document and concat(node and "/description"))
+        else:
+            set anchor to concat(node and "//a[@class='result__a']")
+            set url to markup_xpath(document and concat(anchor and "/@href"))
+            set title to markup_xpath(document and anchor)
+            set excerpt to markup_xpath(document and concat(node and "//*[@class='result__snippet']"))
+            if starts_with(url and "//duckduckgo.com/l/?uddg=") || starts_with(url and "https://duckduckgo.com/l/?uddg="):
+                set encoded to get_list(string_split(url and "uddg=") and 1)
+                set url to search_codec(get_list(string_split(encoded and "&") and 0) and 1)
+        set url to web_url(url and "")
+        if url != "" && title != "" && string_length(url) <= 1200 && result_cache_scalar(db and "SELECT NOT EXISTS(SELECT 1 FROM json_each(?) WHERE json_extract(value,'$.url')=?)" and [items,url]) == "1":
+            set items to result_cache_scalar(db and "SELECT json_insert(?,'$[#]',json_object('url',?,'title',?,'snippet',?))" and [items,url,dictionary_excerpt(title and 200),dictionary_excerpt(excerpt and 360)])
+        set i to i + 1
+    markup_close(document)
+    return items
+
+define search_lookup with db and terms and epoch returning Str:
+    set terms to string_trim(terms)
+    if terms == "" || string_length(terms) > 512:
+        return web_markup_error(db and "Expected a search query of 1 to 512 bytes")
+    set cached to result_cache_get(db and "web-search-v2" and terms and epoch)
+    if cached != "" && result_cache_scalar(db and "SELECT json_extract(?,'$.expires')>unixepoch()" and [cached]) == "1":
+        return result_cache_scalar(db and "SELECT json_set(?,'$.cache_hit',json('true'))" and [cached])
+    set query to search_codec(terms and 0)
+    set providers to ["https://html.duckduckgo.com/html/?q=","https://www.bing.com/news/search?format=rss&q=","https://www.bing.com/search?format=rss&q="]
+    set i to 0
+    repeat while i < length_list(providers):
+        set url to concat(get_list(providers and i) and query)
+        set raw to web_transfer(db and url)
+        if result_cache_scalar(db and "SELECT json_extract(?,'$.http_status')" and [raw]) == "200":
+            set items to search_results(db and result_cache_scalar(db and "SELECT json_extract(?,'$.body')" and [raw]) and (i > 0))
+            if items != "[]":
+                set headers to web_headers(db and result_cache_scalar(db and "SELECT json_extract(?,'$.headers')" and [raw]))
+                set policy to web_freshness(db and result_cache_scalar(db and "SELECT json_extract(?,'$.headers')" and [headers]))
+                set receipt to result_cache_scalar(db and "SELECT json_object('status','ok','outcome','completed','tool','web_search','query',?,'provider',?,'text','Search results. Open relevant documents to verify their contents.','candidates',json(?),'cache_hit',json('false'),'expires',unixepoch()+json_extract(?,'$.ttl_seconds'))" and [terms,url,items,policy])
+                if result_cache_scalar(db and "SELECT json_extract(?,'$.store')" and [policy]) == "1":
+                    return result_cache_put(db and "web-search-v2" and terms and epoch and receipt)
+                return receipt
+        set i to i + 1
+    return "{\"status\":\"ok\",\"outcome\":\"failed\",\"tool\":\"web_search\",\"text\":\"Neither search provider returned usable results.\",\"candidates\":[]}"

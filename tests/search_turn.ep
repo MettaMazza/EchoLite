@@ -1,0 +1,43 @@
+# Validate the journal of a complete local search replay, including its reads.
+import "os"
+import "../src/native_font"
+import "../src/chat_view"
+define main:
+    set args to get_args()
+    if length_list(args) != 3:
+        display "Usage: search_turn DATABASE TURN_ID"
+        return 1
+    set db to sql_open(get_list(args and 1))
+    sql_execute(db and "PRAGMA query_only=ON")
+    set turn to get_list(args and 2)
+    if result_cache_scalar(db and "SELECT count(*) FROM turns t JOIN generation_rounds g ON g.turn_id=t.id JOIN memories a ON a.id=t.reply_memory WHERE t.id=? AND t.status='completed' AND json_extract(g.response,'$.route')='research_answer' AND length(a.body)>0" and [turn]) != "1":
+        display "Missing completed research answer"
+        return 1
+    set reads to result_cache_scalar(db and "WITH reads AS (SELECT json_extract(arguments,'$.url') AS url FROM tool_runs WHERE turn_id=?1 AND name='web_read'), leads AS (SELECT json_extract(x.value,'$.url') AS url FROM tool_runs r JOIN memories m ON m.id=r.observation,json_each(m.body,'$.candidates') x WHERE r.turn_id=?1 AND r.name='web_search') SELECT count(*)>0 AND count(*)=count(DISTINCT url) AND NOT EXISTS(SELECT url FROM reads EXCEPT SELECT url FROM leads) FROM reads" and [turn])
+    if reads != "1":
+        display "Read was missing, repeated or outside the search results"
+        return 1
+    if result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM tool_runs r JOIN memories m ON m.id=r.observation WHERE r.turn_id=? AND r.name='web_read' AND r.status='completed' AND length(json_extract(m.body,'$.research_passage'))>0 AND json_array_length(m.body,'$.entries')>0)" and [turn]) != "1":
+        display "Answer lacks a verified source passage and citation"
+        return 1
+    if result_cache_scalar(db and "SELECT count(*) FROM generation_rounds WHERE turn_id=? AND (coalesce(trim(json_extract(response,'$.reasoning')),'')='' OR json_extract(response,'$.reasoning')=json_extract(response,'$.research_assessment') OR coalesce(json_extract(response,'$.completion_tokens'),0)<=0)" and [turn]) != "0":
+        display "Research round lost model reasoning or token usage"
+        return 1
+    if result_cache_scalar(db and "SELECT EXISTS(SELECT 1 FROM generation_rounds g JOIN tool_runs r ON r.turn_id=g.turn_id JOIN memories m ON m.id=r.observation WHERE g.turn_id=? AND json_extract(g.response,'$.route')='research_answer' AND length(trim(json_extract(g.response,'$.research_evidence')))>0 AND instr(json_extract(m.body,'$.research_passage'),json_extract(g.response,'$.research_evidence'))>0)" and [turn]) != "1":
+        display "Stopping decision lacks an exact supporting passage from an opened source"
+        return 1
+    set session to result_cache_scalar(db and "SELECT session FROM session_turns WHERE turn_id=?" and [turn])
+    set rows to chat_turns(db and session)
+    set journal to result_cache_scalar(db and "SELECT group_concat(reasoning,char(10)||char(10)) FROM (SELECT json_extract(response,'$.reasoning') AS reasoning FROM generation_rounds WHERE turn_id=? ORDER BY round)" and [turn])
+    set found to 0
+    set i to 0
+    repeat while i < length_list(rows):
+        set row to get_list(rows and i)
+        if string_equals(get_list(row and 0) and turn) && string_equals(get_list(row and 4) and journal):
+            set found to 1
+        set i to i + 1
+    if found == 0:
+        display "Reopened chat did not expose the full reasoning transcript"
+        return 1
+    display "PASS: recorded model reasoning, journaled discovery, unique source reads, cited evidence and completed answer"
+    return 0

@@ -52,7 +52,7 @@ define web_transfer_request with db and url and etag and modified returning Str:
     set attached to 0
     set response to 0
     if problem == "":
-        set options to [[10002,str_to_ptr(url),1],[10001,body,1],[10029,headers,1],[10318,str_to_ptr("https"),1],[10004,str_to_ptr(""),1],[10018,str_to_ptr("EchoLite/0.1 native-web-reader"),1],[155,15000,2],[156,5000,2],[99,1,2],[64,1,2],[81,2,2],[30117,524288,2]]
+        set options to [[10002,str_to_ptr(url),1],[10001,body,1],[10029,headers,1],[10318,str_to_ptr("https"),1],[10004,str_to_ptr(""),1],[10018,str_to_ptr("EchoLite/0.1 native-web-reader"),1],[155,15000,2],[156,5000,2],[99,1,2],[64,1,2],[81,2,2],[30117,WEB_BODY_LIMIT,2]]
         set i to 0
         repeat while i < length_list(options) && problem == "":
             set option to get_list(options and i)
@@ -97,7 +97,7 @@ define web_transfer_request with db and url and etag and modified returning Str:
             set problem to "HTTPS transfer processing failed"
         set body_size to web_file_size(body)
         set header_size to web_file_size(headers)
-        if body_size < 0 || body_size > 524288 || header_size < 0 || header_size > 65536:
+        if body_size < 0 || body_size > WEB_BODY_LIMIT || header_size < 0 || header_size > 65536:
             set problem to "HTTPS response exceeds body/header byte budget"
         if transport_now(libc) > deadline:
             set problem to "HTTPS transfer deadline exceeded"

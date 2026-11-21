@@ -5,6 +5,13 @@ set PROGRESS_ROUND to ""
 set PROGRESS_EPOCH to ""
 set PROGRESS_LAST to 0
 
+set DECISION_TRACE to "{}"
+
+define progress_merge with db and earlier and current returning Str:
+    if earlier == "{}":
+        return current
+    return result_cache_scalar(db and "WITH calls(j) AS (VALUES(?1),(?2)) SELECT json_set(?2,'$.reasoning',(SELECT group_concat(nullif(json_extract(j,'$.reasoning'),''),char(10)||char(10)) FROM calls),'$.completion_tokens',(SELECT sum(json_extract(j,'$.completion_tokens')) FROM calls),'$.reasoning_tokens',(SELECT CASE WHEN count(json_extract(j,'$.reasoning_tokens'))=count(*) THEN sum(json_extract(j,'$.reasoning_tokens')) END FROM calls))" and [earlier,current])
+
 define progress_scope with turn and round and epoch:
     set PROGRESS_TURN to turn
     set PROGRESS_ROUND to round
@@ -22,7 +29,7 @@ define progress_publish with db and snapshot and now and force:
         return 0
     set PROGRESS_LAST to now
     # A single guarded statement cannot resurrect forgotten or abandoned output.
-    set params to [PROGRESS_TURN,PROGRESS_ROUND,PROGRESS_EPOCH,snapshot,PROGRESS_TURN,PROGRESS_EPOCH]
+    set params to [PROGRESS_TURN,PROGRESS_ROUND,PROGRESS_EPOCH,progress_merge(db and DECISION_TRACE and snapshot),PROGRESS_TURN,PROGRESS_EPOCH]
     set rc to sql_execute_params(db and "INSERT INTO model_progress(turn_id,round,epoch,response) SELECT ?,CAST(? AS INTEGER),?,? WHERE EXISTS(SELECT 1 FROM turns WHERE id=? AND status='pending') AND (SELECT value FROM metadata WHERE key='cache_epoch')=? ON CONFLICT(turn_id) DO UPDATE SET round=excluded.round,epoch=excluded.epoch,response=excluded.response,updates=model_progress.updates+1" and params)
     return rc == 101
 

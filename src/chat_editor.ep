@@ -212,7 +212,7 @@ define editor_handle with draft and x and y and width and height and enabled ret
                 editor_history(0)
         set EDIT_MENU to 0
         if native_android() && EDIT_FOCUS && item != 0:
-            android_restart_editor()
+            editor_restart_android()
         set EDIT_MENU_USED to 1
         return EDIT_TEXT
     if raylib_is_key_pressed(256):
@@ -231,8 +231,8 @@ define editor_handle with draft and x and y and width and height and enabled ret
         editor_menu_open(mx and my)
     if clicked:
         set EDIT_FOCUS to enabled && mx >= x && mx <= x + width && my >= y && my <= y + height
-        if native_android():
-            android_keyboard(EDIT_FOCUS)
+        if native_android() && EDIT_FOCUS == 0:
+            android_keyboard(0)
         set EDIT_DRAG to EDIT_FOCUS
         if EDIT_FOCUS:
             set SELECT_TEXT to ""
@@ -304,11 +304,19 @@ define editor_handle with draft and x and y and width and height and enabled ret
             editor_insert(chat_character(code))
         set code to raylib_get_char_pressed()
     if native_android():
-        if EDIT_FOCUS && (changed_draft || previous_caret != EDIT_CARET || previous_anchor != EDIT_ANCHOR || string_equals(draft and EDIT_TEXT) == 0):
-            android_restart_editor()
+        if clicked && EDIT_FOCUS && ep_dlcall1(ep_dlsym(ANDROID_SDL and "SDL_ScreenKeyboardShown") and ANDROID_INPUT_WINDOW) == 0:
+            android_seed_editor(EDIT_TEXT and EDIT_ANCHOR and EDIT_CARET)
+            android_keyboard(1)
+        else if EDIT_FOCUS && (changed_draft || previous_caret != EDIT_CARET || previous_anchor != EDIT_ANCHOR || string_equals(draft and EDIT_TEXT) == 0):
+            editor_restart_android()
         set input_events to android_input_events()
         if enabled && EDIT_FOCUS:
-            editor_android_events(input_events)
+            set native_change to editor_android_events(input_events)
+            if android_input_overflowed():
+                set EDIT_ERROR to "This edit exceeded the composer limit. The previous draft is preserved."
+                set native_change to 1
+            if native_change:
+                editor_restart_android()
     if clicked || raylib_get_key_pressed() != 0:
         set EDIT_BLINK to transport_now(native_system())
     return EDIT_TEXT
@@ -477,17 +485,43 @@ define editor_menu_draw:
         set i to i + 1
     return 0
 
+define editor_android_offset with text and units:
+    set offset to 0
+    set size to string_length(text)
+    repeat while offset < size && units > 0:
+        if get_character(text and offset) >= 240:
+            set units to units - 1
+        set units to units - 1
+        set offset to editor_next(text and offset)
+    return offset
+
+define editor_restart_android:
+    android_seed_editor(EDIT_TEXT and EDIT_ANCHOR and EDIT_CARET)
+    return android_restart_editor()
+
 # Apply every native IME event once, including press/release pairs within a frame.
 define editor_android_events with events:
     if length_list(events) > 0:
         set EDIT_MENU to 0
         set EDIT_DRAG to 0
+    set native_change to 0
     set i to 0
     repeat while i < length_list(events):
         set event to get_list(events and i)
-        if get_list(event and 0) == "text":
+        if get_list(event and 0) == "snapshot":
+            set native_change to 0
+            set next_text to get_list(event and 1)
+            if string_equals(EDIT_TEXT and next_text) == 0:
+                editor_snapshot()
+                set EDIT_TEXT to next_text
+                set EDIT_ERROR to ""
+            set EDIT_ANCHOR to editor_android_offset(next_text and string_to_int(get_list(event and 2)))
+            set EDIT_CARET to editor_android_offset(next_text and string_to_int(get_list(event and 3)))
+        else if get_list(event and 0) == "text":
+            set native_change to 1
             editor_insert(get_list(event and 1))
         else:
+            set native_change to 1
             set key to string_to_int(get_list(event and 1))
             if key == 40 || key == 88:
                 editor_insert("\n")
@@ -500,7 +534,7 @@ define editor_android_events with events:
                 editor_insert("")
         set EDIT_BLINK to transport_now(native_system())
         set i to i + 1
-    return 0
+    return native_change
 
 # Android touch handles use the same byte offsets and wrapped rows as selection.
 set HANDLE_TARGET to 0
@@ -597,7 +631,7 @@ define editor_handles_update:
         editor_handle_move(HANDLE_TARGET and HANDLE_DRAG and position)
         if raylib_is_mouse_button_down(0) == 0:
             if HANDLE_TARGET == 1:
-                android_restart_editor()
+                editor_restart_android()
             set HANDLE_DRAG to 0
             if (HANDLE_TARGET == 1 && EDIT_ANCHOR != EDIT_CARET) || (HANDLE_TARGET == 2 && SELECT_ANCHOR != SELECT_CARET):
                 editor_menu_open(ui_mouse_x() and ui_mouse_y() - 190)

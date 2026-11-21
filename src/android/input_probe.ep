@@ -16,9 +16,16 @@ define main:
         if raylib_is_mouse_button_pressed(0):
             android_keyboard(0)
             android_keyboard(1)
-        set inserted to android_input_take()
-        if inserted != "":
-            set text to concat(text and inserted)
+        set events to android_input_events()
+        set i to 0
+        repeat while i < length_list(events):
+            set event to get_list(events and i)
+            if get_list(event and 0) == "snapshot":
+                set text to get_list(event and 1)
+            else if get_list(event and 0) == "text":
+                set text to concat(text and get_list(event and 1))
+            set i to i + 1
+        if length_list(events) > 0:
             write_file(concat(home and "/input-probe.txt") and text)
         raylib_begin_drawing()
         raylib_clear_background(4280031252)

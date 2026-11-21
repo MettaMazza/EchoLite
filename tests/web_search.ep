@@ -1,0 +1,17 @@
+import "../src/web_search"
+
+define main:
+    set db to sql_open(":memory:")
+    set html to "<div class='result'><a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fone.example%2Fopinion&amp;rut=xyz'>Interview</a><div class='result__snippet'>A reader's account</div></div><div class='result result--ad'><a class='result__a' href='https://ads.example/'>Ad</a></div><div class='result'><a class='result__a' href='https://one.example/opinion'>Duplicate</a></div>"
+    set rows to search_results(db and html and 0)
+    if result_cache_scalar(db and "SELECT json_array_length(?1)=1 AND json_extract(?1,'$[0].url')='https://one.example/opinion' AND json_extract(?1,'$[0].snippet') LIKE '%account'" and [rows]) != "1":
+        display rows
+        return 1
+    set rss to "<rss><channel><item><title>Other voice</title><link>http://www.bing.com/news/apiclick.aspx?ref=FexRss&amp;url=https%3a%2f%2ftwo.example%2farticle&amp;c=1</link><description>Independent account</description></item></channel></rss>"
+    set rows to search_results(db and rss and 1)
+    if result_cache_scalar(db and "SELECT json_extract(?1,'$[0].title')||' '||json_extract(?1,'$[0].url')" and [rows]) != "Other voice https://two.example/article":
+        return 1
+    if search_results(db and "<html>Search challenge</html>" and 0) != "[]":
+        return 1
+    display "PASS: search redirects, snippets, ads, duplicate URLs, provider fallback format and empty results"
+    return 0
